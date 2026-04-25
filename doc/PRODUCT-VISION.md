@@ -2,7 +2,7 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-25
-**Features Implemented**: 2
+**Features Implemented**: 3
 
 ---
 
@@ -166,7 +166,7 @@ These are claims the architecture leans on but that we haven't empirically confi
 | 2 | **One persistent SDK teammate, end-to-end.** `spawn_teammate` actually creates a `ClaudeSDKClient`, holds the reference in the broker, routes messages to/from it. Validates the persistence claim by exchanging 10+ messages and confirming context is preserved. | 1 | 1 | M | done | 89 mocked + 4 live tests + stdio smoke. SDK memory verification resolved in `doc/research/sdk-memory.md`. Real-bug-find: SDK's RateLimitInfo.status='allowed' is informational. Validated end-to-end against my-money-matters via Claude Code. |
 | 3a | **Default subagent pack.** Ship `explorer`, `planner`, `general-purpose` agent definitions bundled with claude-crew. Each teammate is configured with this pack as available subagents on spawn. Models, tools, and system prompts chosen to mirror Claude Code's built-ins (haiku for explorer, sonnet for planner). | 1, 2 | 1, 2 | S | idea | Prompts written by us; behavior contract matches Claude Code's, byte-identity not required. |
 | 3b | **Agent-definition loader.** Parse user-defined `~/.claude/agents/*.md` and project-level `.claude/agents/*.md`, convert YAML+markdown to SDK `AgentDefinition` objects, merge into the available subagent set. Skip unsupported fields with warnings. | 2 | 1, 2 | S | idea | Removes adoption friction — bring your existing agents. |
-| 4 | **JSONL transcript per crew.** Every message that crosses the bus (lead ↔ teammate ↔ subagent) appended to a structured JSONL file per crew, with sender, recipient, timestamp, payload, message id. Floor for observability — `tail -f` is the v1 dashboard. | 4 | 4 | S | idea | Live UI is post-MVP. |
+| 4 | **JSONL transcript per crew.** Every message that crosses the bus (lead ↔ teammate ↔ subagent) appended to a structured JSONL file per crew, with sender, recipient, timestamp, payload, message id. Floor for observability — `tail -f` is the v1 dashboard. | 4 | 4 | S | done | Per-line schema with `kind` discriminator (envelope vs lifecycle), crew_id primary key, XDG_STATE_HOME path. v1 covers lead↔teammate; subagent activity inside SDK does not cross the broker (documented limitation). 119 tests. |
 | 5 | **Real-task validation.** Use claude-crew on a non-trivial real task at home with one of Jerome's existing roles. Pass criterion: task completes end-to-end without operator intervention beyond directing the lead, and "needed manual rescue?" flag is false. | all | 5 | M | idea | The proof point. Without this, MVP doesn't ship. |
 
 ### Deferred (v2+)
@@ -206,6 +206,18 @@ These are claims the architecture leans on but that we haven't empirically confi
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-04-25 — Feature #4 (JSONL Transcript) Completed
+- Advances criteria: #4 (full crew conversation observable in real time — `tail -f` is the v1 dashboard).
+- Design highlights:
+  - Per-line schema `{v, kind, ts, crew_id, ...}` with `kind: envelope|lifecycle` discriminator. crew_id stamped on every line so concatenated transcripts (multi-crew analysis) need no filename cross-reference.
+  - Lifecycle events: `started`, `spawn`, `kill` (with `reason: explicit|shutdown` — distinct so shutdown cascades aren't misread as N explicit kills), `shutdown`.
+  - XDG_STATE_HOME path; `CLAUDE_CREW_TRANSCRIPT_DIR` override; `CLAUDE_CREW_TRANSCRIPT_DISABLED=1` opts out.
+  - Discoverability: `[claude-crew]` stderr stamp on init + new MCP tool `get_transcript_path`.
+  - Tolerate-and-disable on init failure; transient write failures log to stderr but do not disable. Broker is never load-bearing on transcript success.
+- v1 limitation documented: SDK subagent activity (Task tool calls inside SdkTeammate) does NOT cross the broker, so transcript shows lead ↔ teammate only. Subagent observability is a Feature #3a-shaped concern.
+- Process: Plan-mode (not full SDD ceremony). Used dogfooded co-architect (Opus, persistent across the feature) for design review — caught `kind: lifecycle` discriminator, `kill` reason threading, schema versioning per line. Sentinel still caught vacuous tests + missing transient-failure coverage. Different roles, both pulled weight.
+- Pipeline impact: Feature #4 → done. Feature #3a → next (recursive subagent decomposition — the differentiated capability).
 
 ### 2026-04-25 — Feature #2 (SDK Teammate) Completed
 - Advances criteria: #1 (lead spawns persistent role-specialized teammates and exchanges messages — now via real `ClaudeSDKClient`, not stubs)
