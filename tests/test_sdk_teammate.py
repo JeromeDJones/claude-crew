@@ -55,7 +55,7 @@ def _patch_sdk(monkeypatch, fake: FakeSDKClient):
 
 
 def _factory_for(fake: FakeSDKClient):
-    def _factory(id, name, role):
+    def _factory(id, name, role, **_kwargs):
         return SdkTeammate(id=id, name=name, role=role)
     return _factory
 
@@ -172,6 +172,35 @@ class TestRoundTrip:
         opts = captured["options"]
         assert opts.setting_sources == ["user", "project"]
         assert opts.model == "claude-sonnet-4-6"
+
+    async def test_model_and_effort_propagate_to_options(
+        self, broker, monkeypatch,
+    ) -> None:
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        # Use a factory that respects model/effort kwargs from the broker.
+        def factory(id, name, role, *, model=None, effort=None):
+            kwargs = {}
+            if model is not None:
+                kwargs["model"] = model
+            if effort is not None:
+                kwargs["effort"] = effort
+            return SdkTeammate(id=id, name=name, role=role, **kwargs)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=factory,
+            model="claude-opus-4-7", effort="medium",
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.model == "claude-opus-4-7"
+        assert opts.effort == "medium"
 
 
 # ---------- error paths ----------

@@ -60,7 +60,7 @@ class _NoopTeammate(Teammate):
 _SENTINEL: object = object()
 
 
-def _factory(id: str, name: str, role: str) -> _NoopTeammate:
+def _factory(id: str, name: str, role: str, **_kwargs) -> _NoopTeammate:
     return _NoopTeammate(id=id, name=name, role=role)
 
 

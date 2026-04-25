@@ -107,7 +107,7 @@ class TestClaudeMdLoading:
     async def test_claude_md_loads_with_setting_sources(self, broker: Broker) -> None:
         from claude_crew.sdk_teammate import SdkTeammate
 
-        def factory(id, name, role):
+        def factory(id, name, role, **_kwargs):
             return SdkTeammate(
                 id=id, name=name, role=role,
                 setting_sources=["user", "project"],
@@ -137,7 +137,7 @@ class TestClaudeMdLoading:
         # CLAUDE.md on setting_sources are caught here.
         from claude_crew.sdk_teammate import SdkTeammate
 
-        def factory(id, name, role):
+        def factory(id, name, role, **_kwargs):
             return SdkTeammate(
                 id=id, name=name, role=role,
                 setting_sources=None,

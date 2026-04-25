@@ -42,8 +42,10 @@ class TeammateInfo:
     alive: bool
 
 
-# A factory takes (id, name, role) and returns an unstarted Teammate.
-TeammateFactory = Callable[[str, str, str], Teammate]
+# A factory takes (id, name, role, model=None) and returns an unstarted
+# Teammate. The model kwarg is optional — factories that don't care about
+# model (e.g., stub) accept and ignore it.
+TeammateFactory = Callable[..., Teammate]
 
 
 class Broker:
@@ -62,11 +64,16 @@ class Broker:
         role: str,
         name: str | None,
         factory: TeammateFactory,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
         inbox: asyncio.Queue = asyncio.Queue()
-        teammate = factory(teammate_id, resolved_name, role)
+        teammate = factory(
+            teammate_id, resolved_name, role,
+            model=model, effort=effort,
+        )
         await teammate.start(self, inbox)
 
         self._teammates[teammate_id] = teammate

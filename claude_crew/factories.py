@@ -13,19 +13,29 @@ from claude_crew.broker import TeammateFactory
 from claude_crew.teammate import StubTeammate, Teammate
 
 
-def stub_factory(id: str, name: str, role: str) -> Teammate:
+def stub_factory(
+    id: str, name: str, role: str,
+    *, model: str | None = None, effort: str | None = None,
+) -> Teammate:
+    # Stub ignores model/effort — kept for signature uniformity with sdk_factory.
     return StubTeammate(id=id, name=name, role=role)
 
 
 stub_factory.requires_auth = False  # type: ignore[attr-defined]
 
 
-def sdk_factory(id: str, name: str, role: str) -> Teammate:
-    # T2 implements SdkTeammate. Imported lazily so that test environments
-    # without claude-agent-sdk installed don't fail at module import time.
+def sdk_factory(
+    id: str, name: str, role: str,
+    *, model: str | None = None, effort: str | None = None,
+) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
-    return SdkTeammate(id=id, name=name, role=role)
+    kwargs: dict = {}
+    if model is not None:
+        kwargs["model"] = model
+    if effort is not None:
+        kwargs["effort"] = effort
+    return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
 sdk_factory.requires_auth = True  # type: ignore[attr-defined]

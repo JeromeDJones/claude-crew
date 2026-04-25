@@ -39,14 +39,28 @@ def make_server(
     mcp = FastMCP("claude-crew")
 
     @mcp.tool()
-    async def spawn_teammate(role: str, name: str | None = None) -> dict[str, Any]:
+    async def spawn_teammate(
+        role: str,
+        name: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
         Args:
             role: The teammate's role (e.g., "planner", "builder").
             name: Optional human-friendly name; defaults to role.
+            model: Optional model id (e.g., "claude-opus-4-7",
+                "claude-sonnet-4-6", "claude-haiku-4-5"). Defaults to
+                the SdkTeammate built-in (Sonnet 4.6).
+            effort: Optional reasoning effort. One of "low", "medium",
+                "high", "max". Higher uses more thinking tokens and costs
+                more; "low" is fastest and cheapest.
         """
-        tid = await broker.spawn_teammate(role=role, name=name, factory=factory)
+        tid = await broker.spawn_teammate(
+            role=role, name=name, factory=factory,
+            model=model, effort=effort,
+        )
         info = next(t for t in broker.list_crew() if t.id == tid)
         return {"teammate_id": info.id, "name": info.name, "role": info.role}
 

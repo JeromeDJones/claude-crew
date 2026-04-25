@@ -15,7 +15,7 @@ from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import StubTeammate
 
 
-def _stub_factory(id: str, name: str, role: str) -> StubTeammate:
+def _stub_factory(id: str, name: str, role: str, **_kwargs) -> StubTeammate:
     return StubTeammate(id=id, name=name, role=role)
 
 

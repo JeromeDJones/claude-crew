@@ -120,6 +120,7 @@ class SdkTeammate(Teammate):
         role: str,
         *,
         model: str = "claude-sonnet-4-6",
+        effort: str | None = None,
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
     ) -> None:
@@ -127,6 +128,7 @@ class SdkTeammate(Teammate):
         self.name = name
         self.role = role
         self._model = model
+        self._effort = effort
         self._system_prompt = system_prompt or _default_system_prompt(role)
         self._setting_sources = (
             setting_sources if setting_sources is not None else ["user", "project"]
@@ -141,11 +143,14 @@ class SdkTeammate(Teammate):
         self._task = asyncio.create_task(self._run(), name=f"sdk-{self.id}")
 
     async def _run(self) -> None:
-        options = ClaudeAgentOptions(
-            model=self._model,
-            system_prompt=self._system_prompt,
-            setting_sources=self._setting_sources,
-        )
+        opts_kwargs: dict = {
+            "model": self._model,
+            "system_prompt": self._system_prompt,
+            "setting_sources": self._setting_sources,
+        }
+        if self._effort is not None:
+            opts_kwargs["effort"] = self._effort
+        options = ClaudeAgentOptions(**opts_kwargs)
         try:
             async with ClaudeSDKClient(options=options) as client:
                 while True:

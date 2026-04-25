@@ -81,7 +81,7 @@ class TestMakeServerAuthGate:
         from claude_crew.server import make_server
         from claude_crew.teammate import StubTeammate
 
-        def custom_factory(id, name, role):
+        def custom_factory(id, name, role, **_kwargs):
             return StubTeammate(id, name, role)
         custom_factory.requires_auth = True
 
