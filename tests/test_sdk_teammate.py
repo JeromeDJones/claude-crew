@@ -215,6 +215,36 @@ class TestErrorPaths:
         ]
         assert sdk_tasks and not sdk_tasks[0].done()
 
+    async def test_informational_rate_limit_event_is_ignored(
+        self, broker, monkeypatch,
+    ) -> None:
+        # status='allowed' or 'allowed_warning' is telemetry, not a failure.
+        # The stream still contains a real AssistantMessage; the teammate
+        # should produce a normal text envelope, not an error envelope.
+        info_event = RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed", rate_limit_type="five_hour",
+            ),
+            uuid="evt-info",
+            session_id="default",
+        )
+        fake = FakeSDKClient(scripted_responses=[
+            [info_event] + text_response("normal reply"),
+        ])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("text") == "normal reply"
+        assert "error" not in msgs[0].payload
+
     async def test_rate_limit_event_produces_rate_limited_envelope(
         self, broker, monkeypatch,
     ) -> None:

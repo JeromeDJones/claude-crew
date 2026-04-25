@@ -91,9 +91,14 @@ async def _collect_response_text(client: Any) -> str:
     text_parts: list[str] = []
     async for msg in client.receive_response():
         if isinstance(msg, RateLimitEvent):
-            raise RateLimitedError(
-                f"rate limit hit: {getattr(msg, 'rate_limit_info', '')}",
-            )
+            # status: 'allowed' (normal), 'allowed_warning' (near limit),
+            # 'rejected' (over limit). Only the last is a real failure;
+            # the rest are informational and the model still responded.
+            info = getattr(msg, "rate_limit_info", None)
+            status = getattr(info, "status", None)
+            if status == "rejected":
+                raise RateLimitedError(f"rate limit hit: {info}")
+            continue
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock):
