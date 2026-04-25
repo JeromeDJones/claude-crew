@@ -11,6 +11,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from claude_crew.auth import validate_auth_or_exit
 from claude_crew.broker import (
     LEAD_ID,
     Broker,
@@ -18,11 +19,6 @@ from claude_crew.broker import (
     UnknownTeammateError,
 )
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.teammate import StubTeammate
-
-
-def _default_factory(id: str, name: str, role: str) -> StubTeammate:
-    return StubTeammate(id=id, name=name, role=role)
 
 
 def _err(code: str, message: str) -> dict[str, Any]:
@@ -34,7 +30,12 @@ def make_server(
     factory: TeammateFactory | None = None,
 ) -> FastMCP:
     broker = broker if broker is not None else Broker()
-    factory = factory if factory is not None else _default_factory
+    if factory is None:
+        # Lazy import to avoid circular: factories imports server's siblings.
+        from claude_crew.factories import default_factory
+        factory = default_factory()
+    if getattr(factory, "requires_auth", False):
+        validate_auth_or_exit()
     mcp = FastMCP("claude-crew")
 
     @mcp.tool()

@@ -5,6 +5,7 @@ description = "Local multi-agent orchestrator: MCP-supervised crew of Agent-SDK 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "claude-agent-sdk>=0.1.68",
     "mcp[cli]>=1.2.0",
 ]
 
