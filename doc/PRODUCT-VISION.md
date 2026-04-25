@@ -2,7 +2,7 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-25
-**Features Implemented**: 1
+**Features Implemented**: 2
 
 ---
 
@@ -163,7 +163,7 @@ These are claims the architecture leans on but that we haven't empirically confi
 | # | Feature | Capability | Crit | Size | Status | Notes |
 |---|---|---|---|---|---|---|
 | 1 | **MCP server skeleton + tool surface.** stdio MCP server registered with the lead, exposes `spawn_teammate`, `send_to`, `broadcast`, `get_messages`, `list_crew`, `kill_teammate`. Tools are wired but teammates are stubs that echo. | 1 | 1 | M | done | Foundation. 49 tests passing + stdio smoke test. See `doc/features/FEATURE-mcp-skeleton.md`. |
-| 2 | **One persistent SDK teammate, end-to-end.** `spawn_teammate` actually creates a `ClaudeSDKClient`, holds the reference in the broker, routes messages to/from it. Validates the persistence claim by exchanging 10+ messages and confirming context is preserved. | 1 | 1 | M | next | Memory verification spike happens here — answer how persistence and CLAUDE.md loading behave. |
+| 2 | **One persistent SDK teammate, end-to-end.** `spawn_teammate` actually creates a `ClaudeSDKClient`, holds the reference in the broker, routes messages to/from it. Validates the persistence claim by exchanging 10+ messages and confirming context is preserved. | 1 | 1 | M | done | 89 mocked + 4 live tests + stdio smoke. SDK memory verification resolved in `doc/research/sdk-memory.md`. Real-bug-find: SDK's RateLimitInfo.status='allowed' is informational. Validated end-to-end against my-money-matters via Claude Code. |
 | 3a | **Default subagent pack.** Ship `explorer`, `planner`, `general-purpose` agent definitions bundled with claude-crew. Each teammate is configured with this pack as available subagents on spawn. Models, tools, and system prompts chosen to mirror Claude Code's built-ins (haiku for explorer, sonnet for planner). | 1, 2 | 1, 2 | S | idea | Prompts written by us; behavior contract matches Claude Code's, byte-identity not required. |
 | 3b | **Agent-definition loader.** Parse user-defined `~/.claude/agents/*.md` and project-level `.claude/agents/*.md`, convert YAML+markdown to SDK `AgentDefinition` objects, merge into the available subagent set. Skip unsupported fields with warnings. | 2 | 1, 2 | S | idea | Removes adoption friction — bring your existing agents. |
 | 4 | **JSONL transcript per crew.** Every message that crosses the bus (lead ↔ teammate ↔ subagent) appended to a structured JSONL file per crew, with sender, recipient, timestamp, payload, message id. Floor for observability — `tail -f` is the v1 dashboard. | 4 | 4 | S | idea | Live UI is post-MVP. |
@@ -206,6 +206,17 @@ These are claims the architecture leans on but that we haven't empirically confi
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-04-25 — Feature #2 (SDK Teammate) Completed
+- Advances criteria: #1 (lead spawns persistent role-specialized teammates and exchanges messages — now via real `ClaudeSDKClient`, not stubs)
+- Resolves vision verification item: **SDK memory behavior**. Findings in `doc/research/sdk-memory.md`:
+  - Conversation persistence is automatic via subprocess + `session_id`
+  - CLAUDE.md is loaded by Claude CLI defaults regardless of `setting_sources`
+  - Auto-memory subsystem is not active for SDK programs (source-confirmed)
+- Real-task validation: tested end-to-end against my-money-matters via Claude Code's `claude mcp add`. Architect teammate read the codebase and gave an accurate 3-sentence summary. Full stack (lead → claude-crew → SdkTeammate → claude CLI subprocess) works on real work.
+- Real-bug-find from the live spike: `RateLimitInfo.status='allowed'` is informational telemetry; was being treated as a hard failure, breaking every live session at turn 1. Caught by the gated UUID-recall test — exactly the failure mode that mocked tests can't surface.
+- Vision shift: none — on track.
+- Pipeline impact: Feature #2 → done. Feature #3a or #4 next, both are natural follow-ups (recursive subagents vs JSONL observability).
 
 ### 2026-04-25 — Feature #1 (MCP skeleton) Completed
 - Advances criteria: #1 (lead can spawn N persistent role-specialized teammates and exchange messages — proven for stub teammates; SDK teammates land in Feature #2)
