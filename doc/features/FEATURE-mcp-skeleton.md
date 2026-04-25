@@ -275,4 +275,41 @@ Listed so future-me (or a reviewer) doesn't think they're omissions:
 
 ## Phase 5: Completion
 
-*To be filled during SDD Phase 5.*
+### Implementation summary
+
+Module layout matches the design exactly:
+
+- `claude_crew/envelope.py` — `Envelope` frozen dataclass + `new_message_id()`
+- `claude_crew/teammate.py` — `Teammate` ABC + `StubTeammate` (echoes payload back to sender with role tag)
+- `claude_crew/broker.py` — `Broker` with monotonic `seq`, id-based dedup, per-recipient FIFO via `asyncio.Queue`, append-only log
+- `claude_crew/server.py` — FastMCP server with all 6 tools delegating to broker
+- `claude_crew/cli.py` — `claude-crew` console entry
+
+### Test results
+
+`uv run pytest`: **49 passed** in <1s.
+
+| Layer | File | Count |
+|---|---|---|
+| Implementation | `tests/test_envelope.py` | 8 |
+| Implementation | `tests/test_broker.py` | 23 |
+| Implementation | `tests/test_stub_teammate.py` | 4 |
+| Integration (in-memory MCP harness) | `tests/test_server.py` | 14 |
+
+Sad paths covered: unknown teammate id, killed teammate, duplicate `id`, `since_seq` past end.
+
+### Manual smoke test (run in Claude Code)
+
+1. **Register the server:**
+   ```bash
+   cd ~/dev/claude-crew
+   claude mcp add claude-crew -- uv --directory ~/dev/claude-crew run claude-crew
+   ```
+2. **In a Claude Code session, run:** "Spawn a stub teammate with role 'parrot', send it the message {hello: 'world'}, then read your messages."
+3. **Expected:** lead's `get_messages` returns one envelope where `payload == {"echo": {"hello": "world"}, "from": "parrot"}`.
+
+### Open follow-ups (not blockers for shipping)
+
+- Backpressure: inbox queues are unbounded. Document but do not fix unless real-use volumes hurt.
+- Persistence: deferred to v2.
+- Long-poll `wait_for_messages`: deferred per vision doc.
