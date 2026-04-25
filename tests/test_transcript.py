@@ -184,20 +184,54 @@ class TestTranscriptSinkWrites:
             sink.close()
 
     def test_write_after_close_is_silent_no_op(
-        self, monkeypatch, tmp_path,
+        self, enable_transcripts,
     ) -> None:
-        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
         sink = TranscriptSink(crew_id="abc12345")
+        # Sanity: file was actually opened before we close.
+        assert sink._fp is not None
         sink.close()
         # Should not raise.
         sink.write_envelope({"id": "m-1", "seq": 1})
         sink.write_lifecycle("kill", {"teammate_id": "t-x"})
 
-    def test_close_is_idempotent(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+    def test_close_is_idempotent(self, enable_transcripts) -> None:
         sink = TranscriptSink(crew_id="abc12345")
+        assert sink._fp is not None
         sink.close()
         sink.close()  # Should not raise.
+
+    def test_transient_write_failure_logs_but_does_not_disable(
+        self, enable_transcripts, capsys,
+    ) -> None:
+        # Promised behavior: a single write failure logs to stderr and
+        # leaves the sink alive. The next write may succeed.
+        sink = TranscriptSink(crew_id="abc12345")
+        try:
+            assert not sink.disabled
+
+            calls = {"count": 0}
+            real_write = sink._fp.write
+
+            def flaky_write(s):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise OSError("simulated transient")
+                return real_write(s)
+
+            sink._fp.write = flaky_write
+
+            sink.write_envelope({"id": "m-1", "seq": 1})  # raises internally
+            assert not sink.disabled, "transient failure must not disable"
+            err = capsys.readouterr().err
+            assert "transcript write failed" in err
+
+            sink.write_envelope({"id": "m-2", "seq": 2})  # should succeed now
+            content = sink.path.read_text()
+            assert "m-2" in content
+            assert "m-1" not in content
+        finally:
+            sink._fp.write = real_write
+            sink.close()
 
     def test_disabled_sink_writes_no_file(
         self, monkeypatch, tmp_path,

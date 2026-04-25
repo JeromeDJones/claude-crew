@@ -45,7 +45,7 @@ def _utc_filename_stem() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
 
 
-def _stamp(level: str, msg: str) -> None:
+def _stamp(msg: str) -> None:
     sys.stderr.write(f"[claude-crew] {msg}\n")
 
 
@@ -68,7 +68,7 @@ class TranscriptSink:
             self.path = directory / f"{_utc_filename_stem()}-{crew_id}.jsonl"
             self._fp = self.path.open("a", encoding="utf-8", buffering=1)
         except Exception as exc:
-            _stamp("warn", f"transcript disabled: {type(exc).__name__}: {exc}")
+            _stamp(f"transcript disabled: {type(exc).__name__}: {exc}")
             self.disabled = True
             self.path = None
             self._fp = None
@@ -113,7 +113,7 @@ class TranscriptSink:
         except Exception as exc:
             # Transient write failures: log and continue. Don't disable —
             # the next write may succeed (e.g., disk freed up).
-            _stamp("warn", f"transcript write failed: {type(exc).__name__}: {exc}")
+            _stamp(f"transcript write failed: {type(exc).__name__}: {exc}")
 
     def close(self) -> None:
         if self._fp is not None:
