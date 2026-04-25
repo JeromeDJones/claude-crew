@@ -52,8 +52,9 @@ async def main() -> int:
 
             tools = await session.list_tools()
             tool_names = sorted(t.name for t in tools.tools)
-            expected = ["broadcast", "get_messages", "kill_teammate",
-                        "list_crew", "send_to", "spawn_teammate"]
+            expected = ["broadcast", "get_messages", "get_transcript_path",
+                        "kill_teammate", "list_crew", "send_to",
+                        "spawn_teammate"]
             assert tool_names == expected, f"tools mismatch: {tool_names}"
             print(f"✓ tools registered: {len(tool_names)}")
 

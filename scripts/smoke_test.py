@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 
 from mcp import ClientSession, StdioServerParameters
@@ -24,7 +25,11 @@ def _content_json(result):
 
 
 async def main() -> int:
-    params = StdioServerParameters(command="claude-crew", args=[])
+    # Force stub mode: this script validates the bus protocol end-to-end,
+    # not the SDK. Stub mode is fast and free; SDK mode is for sdk_smoke_test.py.
+    env = dict(os.environ)
+    env["CLAUDE_CREW_TEAMMATE_MODE"] = "stub"
+    params = StdioServerParameters(command="claude-crew", args=[], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -32,8 +37,9 @@ async def main() -> int:
 
             tools = await session.list_tools()
             tool_names = sorted(t.name for t in tools.tools)
-            expected = ["broadcast", "get_messages", "kill_teammate",
-                        "list_crew", "send_to", "spawn_teammate"]
+            expected = ["broadcast", "get_messages", "get_transcript_path",
+                        "kill_teammate", "list_crew", "send_to",
+                        "spawn_teammate"]
             assert tool_names == expected, f"tools mismatch: {tool_names}"
             print(f"✓ tools registered: {', '.join(tool_names)}")
 

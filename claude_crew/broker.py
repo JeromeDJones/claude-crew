@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import Teammate
+from claude_crew.transcript import TranscriptSink
 
 LEAD_ID = "lead"
 
@@ -50,12 +51,15 @@ TeammateFactory = Callable[..., Teammate]
 
 class Broker:
     def __init__(self) -> None:
+        self.crew_id: str = uuid4().hex[:8]
         self._teammates: dict[str, Teammate] = {}
         self._info: dict[str, TeammateInfo] = {}
         self._inboxes: dict[str, asyncio.Queue] = {LEAD_ID: asyncio.Queue()}
         self._log: list[Envelope] = []
         self._seen_ids: set[str] = set()
         self._next_seq: int = 1
+        self._sink = TranscriptSink(crew_id=self.crew_id)
+        self._sink.write_lifecycle("started", {})
 
     # ---------- spawn / kill ----------
 
@@ -85,25 +89,40 @@ class Broker:
             spawned_at=time.time(),
             alive=True,
         )
+        self._sink.write_lifecycle("spawn", {
+            "teammate_id": teammate_id,
+            "name": resolved_name,
+            "role": role,
+            "model": model,
+        })
         return teammate_id
 
-    async def kill_teammate(self, teammate_id: str) -> None:
+    async def kill_teammate(
+        self, teammate_id: str, reason: str = "explicit",
+    ) -> None:
         if teammate_id not in self._teammates:
             raise UnknownTeammateError(teammate_id)
         teammate = self._teammates.pop(teammate_id)
         self._info.pop(teammate_id, None)
-        # Inbox queue is kept around long enough for shutdown sentinel to drain.
         try:
             await teammate.shutdown()
         finally:
             self._inboxes.pop(teammate_id, None)
+            self._sink.write_lifecycle("kill", {
+                "teammate_id": teammate_id, "reason": reason,
+            })
 
     async def shutdown_all(self) -> None:
-        for tid in list(self._teammates.keys()):
+        teammate_ids = list(self._teammates.keys())
+        for tid in teammate_ids:
             try:
-                await self.kill_teammate(tid)
+                await self.kill_teammate(tid, reason="shutdown")
             except Exception:
                 pass
+        self._sink.write_lifecycle("shutdown", {
+            "teammate_count": len(teammate_ids),
+        })
+        self._sink.close()
 
     # ---------- send / broadcast ----------
 
@@ -130,6 +149,7 @@ class Broker:
         )
         self._seen_ids.add(stamped.id)
         self._log.append(stamped)
+        self._sink.write_envelope(stamped.to_dict())
         await self._inboxes[stamped.recipient].put(stamped)
         return stamped
 

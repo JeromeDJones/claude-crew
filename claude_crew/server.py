@@ -6,6 +6,7 @@ inject their own broker; production builds one fresh.
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any
 
@@ -147,8 +148,32 @@ def make_server(
             return _err("unknown_teammate", f"no teammate with id {teammate_id!r}")
         return {"ok": True}
 
+    @mcp.tool()
+    async def get_transcript_path() -> dict[str, Any]:
+        """Return the path of this crew's JSONL transcript file.
+
+        Returns:
+            path: Filesystem path to the transcript, or null if disabled.
+            crew_id: 8-hex crew identifier (also embedded in path/lines).
+            disabled: True if transcripts are turned off via env var.
+        """
+        sink = broker._sink  # type: ignore[attr-defined]
+        return {
+            "path": str(sink.path) if sink.path else None,
+            "crew_id": broker.crew_id,
+            "disabled": sink.disabled,
+        }
+
     # Stash the broker on the server for tests / introspection.
     mcp._broker = broker  # type: ignore[attr-defined]
+
+    # Discoverability: print the transcript path so operators can `tail -f` it.
+    sink = broker._sink  # type: ignore[attr-defined]
+    if sink.disabled:
+        sys.stderr.write("[claude-crew] transcript: disabled\n")
+    else:
+        sys.stderr.write(f"[claude-crew] transcript -> {sink.path}\n")
+
     return mcp
 
 
