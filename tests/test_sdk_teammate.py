@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 from claude_agent_sdk.types import (
     AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -206,6 +208,49 @@ class TestErrorPaths:
         assert "boom" in msgs[0].payload.get("message", "")
         assert msgs[1].payload.get("text") == "turn-2-ok"
 
+        # Worker task must still be alive — explicit liveness assertion,
+        # not just inferred from the second envelope arriving.
+        sdk_tasks = [
+            t for t in asyncio.all_tasks() if t.get_name() == f"sdk-{tid}"
+        ]
+        assert sdk_tasks and not sdk_tasks[0].done()
+
+    async def test_rate_limit_event_produces_rate_limited_envelope(
+        self, broker, monkeypatch,
+    ) -> None:
+        # The fake's first turn yields a RateLimitEvent in the stream;
+        # _collect_response_text raises RateLimitedError; _handle_one_turn
+        # produces an envelope with code "rate_limited" and the loop survives.
+        rate_event = RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="rejected", rate_limit_type="five_hour",
+            ),
+            uuid="evt-1",
+            session_id="default",
+        )
+        fake = FakeSDKClient(scripted_responses=[
+            [rate_event],  # turn 1: rate-limited
+            text_response("recovered"),  # turn 2: normal
+        ])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="q1",
+        ))
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="q2",
+        ))
+        await _wait_for_lead_messages(broker, 2)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "rate_limited"
+        assert msgs[1].payload.get("text") == "recovered"
+
     async def test_empty_prompt_skips_sdk_call(self, broker, monkeypatch) -> None:
         fake = FakeSDKClient(scripted_responses=[text_response("never sent")])
         _patch_sdk(monkeypatch, fake)
@@ -250,8 +295,7 @@ class TestErrorPaths:
 
         msgs = broker.get_messages(recipient=LEAD_ID)
         assert msgs[0].payload.get("error") == "invalid_response"
-        assert "stuck" in msgs[0].payload.get("message", "").lower() \
-            or "subprocess" in msgs[0].payload.get("message", "").lower()
+        assert "no response" in msgs[0].payload.get("message", "").lower()
 
         # Confirm the loop is still alive: send another message.
         await broker.send(Envelope(
@@ -338,8 +382,14 @@ class TestShutdown:
             id=new_message_id(), seq=0,
             sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
         ))
-        # Give the turn a moment to enter receive_response().
-        await asyncio.sleep(0.05)
+        # Wait until the worker has actually called query() — that's the
+        # synchronization point that proves the turn is in flight, not a
+        # wall-clock sleep that can race on slow runners.
+        for _ in range(100):
+            if fake.queries_received:
+                break
+            await asyncio.sleep(0.01)
+        assert fake.queries_received, "worker never reached query()"
 
         start = asyncio.get_event_loop().time()
         await broker.kill_teammate(tid)
