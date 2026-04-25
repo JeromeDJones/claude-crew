@@ -820,4 +820,77 @@ Every Phase 1 SC and every Phase 2 edge case is covered by at least one scenario
 
 ## Phase 5: Completion
 
-*To be filled during SDD Phase 5.*
+### Verification
+
+- [x] Feature works end-to-end against Phase 1 success criteria — all 9 SCs covered by passing tests (89 mocked + 4 live + 1 stdio smoke).
+- [x] No regressions — full test suite passes (89/89 with mocks; 4/4 live with gate; Feature #1's 49 tests preserved verbatim via `conftest.py`).
+- [x] FEATURE.md spec matches implementation.
+- [x] PRODUCT-VISION.md updated (deferred to merge step — vision doc gets Feature #2 = done after Jerome confirms).
+- [x] `doc/research/sdk-memory.md` resolves the SDK-memory verification item from the vision.
+- [x] `doc/BACKLOG.md` reviewed — no scope-creep entries logged this feature; the rate-limit `status='allowed'` finding became a real bug fix in scope.
+
+### What shipped
+
+| Artifact | Purpose |
+|---|---|
+| `claude_crew/auth.py` | Pre-flight credential detection; exits 2 on missing |
+| `claude_crew/factories.py` | `stub_factory` / `sdk_factory` with `requires_auth` markers; `default_factory()` reads `CLAUDE_CREW_TEAMMATE_MODE` |
+| `claude_crew/sdk_teammate.py` | `SdkTeammate(Teammate)` wrapping `ClaudeSDKClient`; per-turn timeout, error envelopes, bounded shutdown |
+| `claude_crew/server.py` | `make_server()` consults `factory.requires_auth` for the auth gate |
+| `tests/conftest.py` | Autouse fixture forces stub mode for non-SDK tests, preserving all 49 prior tests |
+| `tests/fakes/sdk.py` | `FakeSDKClient` test double matching the real SDK's external contract |
+| `tests/test_auth.py`, `test_factories.py`, `test_sdk_teammate.py`, `test_server_sdk_mode.py` | 40 new mocked tests |
+| `tests/test_live_sdk.py` | 4 gated live tests (UUID recall, CLAUDE.md loading, doc-exists) |
+| `scripts/sdk_smoke_test.py` | Gated stdio E2E against real API |
+| `doc/research/sdk-memory.md` | SC-5 spike findings |
+
+### Test counts
+
+| Layer | File | Count | Notes |
+|---|---|---|---|
+| Implementation | test_envelope.py | 8 | (Feature #1) |
+| Implementation | test_broker.py | 23 | (Feature #1) |
+| Implementation | test_stub_teammate.py | 4 | (Feature #1) |
+| Implementation | test_auth.py | 8 | new |
+| Implementation | test_factories.py | 10 | new |
+| Implementation | test_sdk_teammate.py | 17 | new |
+| Integration (in-memory MCP) | test_server.py | 14 | (Feature #1; conftest opts to stub) |
+| Integration (in-memory MCP + fake SDK) | test_server_sdk_mode.py | 5 | new (3 in-memory + 2 subprocess) |
+| Live (gated) | test_live_sdk.py | 4 | new |
+| Live (gated, manual) | scripts/sdk_smoke_test.py | 1 | new |
+
+**Mocked total: 89.** All passing.
+**Live total: 4 + 1 stdio smoke.** All passing with `CLAUDE_CREW_LIVE_TESTS=1`.
+
+### Real bug found during the live spike
+
+`_collect_response_text` was raising `RateLimitedError` on every `RateLimitEvent`, but the SDK's `RateLimitInfo.status` field has three values: `'allowed'` (informational telemetry, not a fail), `'allowed_warning'` (near limit, still serving), `'rejected'` (actual rejection). Before the fix, *every* turn that emitted an `'allowed'` event — which happens on most live turns — would error and shift every subsequent response by one turn. The 10-turn UUID recall test was the canary that caught it; mocked tests passed because they only constructed `'rejected'` events.
+
+This is exactly the failure mode the live-test gate exists to catch. Win for the test design.
+
+### Retrospective
+
+**What went well:**
+- **Sentinel reviews caught real bugs cheaply.** Phase 1 review surfaced 5 fix-now items including the SC-4 vibes-vs-deterministic gap and the API-key-failure unspecified mode. Phase 2 review caught the `_collect_response_text` hang vector and the factory-identity-check fragility. Mid-feature review caught the missing rate-limit test path and the `sleep(0.05)` synchronization race. Each was a few minutes of agent time and saved an evening of debugging.
+- **Haiku gathering for SDK API surface paid off.** Three parallel Explore agents pinned the package, auth options, and memory behavior in under five minutes of clock time at Haiku rates. The main session never had to read SDK source until implementation, when the question was "what's the actual class signature" — a one-liner.
+- **Fake-SDK contract.** Specifying `FakeSDKClient` carefully in Phase 2 (with the per-turn-resets-stream property explicitly documented) made the 17 unit tests trivial to write and the rate-limit bug isolatable to a one-line fix once found.
+- **Gated live tests.** The `CLAUDE_CREW_LIVE_TESTS=1` gate let me default-skip the API-spending tests while still having them as the production safety net. The bug only surfaced live; without that path it would have shipped.
+
+**What was friction:**
+- **Lazy-import-then-monkeypatch tripped me up once.** I initially deferred `from claude_agent_sdk import ClaudeSDKClient` to inside `_run` to keep module import cheap. Tests then couldn't `monkeypatch.setattr(sdk_module, "ClaudeSDKClient", ...)` because the attribute didn't exist at module scope. Lost 5 minutes finding it. The deferral was unjustified anyway — the SDK is a project dep, always available.
+- **Initial CLAUDE.md test was wrong.** I wrote a "negative" test (`setting_sources=None` should suppress CLAUDE.md) based on the source-code reading. It was right about what the SDK passes to the CLI; it was wrong about what the CLI does with no flag. Empirical results inverted the test. This is the gap Sentinel didn't catch and only the live spike did.
+- **The 5-minute Sentinel for Q1.** Sentinel found the SDK source answer to "does ClaudeSDKClient recover from a dead subprocess" while reviewing Phase 2 — answering an "open question" that I'd punted to implementation. *I* should have spent 5 minutes searching the SDK source instead of leaving Q1 open. The triage rule "could one more look have resolved it" needs to bite harder.
+
+**Improvements:**
+1. **Default to module-level imports for project deps.** Lazy imports are for genuinely optional/heavy/circular dependencies, not "let's keep import light just in case." Saves the monkeypatch trap.
+2. **Treat live-API gates as a *required* design check, not an optional one.** Anywhere a feature interfaces with an external surface that mocks can fake, plan a live-test path during Phase 2 and expect to find at least one mock/real divergence.
+3. **Sentinel-review-as-spike for open questions.** Before declaring an Open Question "deferred to Phase 3", give Sentinel 5 minutes with the relevant source. Half of "open questions" in this feature were answerable from the SDK source in minutes.
+4. **In SDD spec docs, include a "Source-confirmed vs empirically-tested" column on findings.** The SDK-memory doc now has both, but during Phase 2 design I wrote source-only conclusions as if they were empirically verified. Distinguishing the two prevents the "test was wrong because I assumed source-reading was the truth" rework.
+
+### Workflow updates made
+
+- **Memory:** capturing the lazy-import-vs-monkeypatch lesson in a Kael-feedback memory.
+- **`.claude/rules/`:** no additions — the lessons above are project-shape-specific to claude-crew. If they recur in a third project, promote.
+- **`SKILL.md` / `TEMPLATE.md`:** no changes; the SDD workflow as written caught what it should have caught (every fix-now Sentinel surfaced was within scope).
+
+**Branch ready for merge.** 89 mocked tests pass, 4 live tests pass, smoke script passes. Hand-off to Jerome for final approval and merge into `master`.
