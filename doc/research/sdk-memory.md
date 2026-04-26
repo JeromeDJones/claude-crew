@@ -74,6 +74,39 @@ Don't rely on auto-memory for cross-session teammate state. Persistent memory be
 
 ---
 
+### Update 2026-04-25 — direct probe of the path
+
+After Feature #3a shipped, we ran `scripts/auto_memory_probe.py` to
+close the loop on whether top-level teammates can use the same path
+Claude Code uses, even if the SDK doesn't activate the subsystem
+itself. Findings:
+
+- **Directory does not auto-populate.** Before the probe, the path
+  `~/.claude/projects/-home-jerome-dev-claude-crew/memory/` did not
+  exist. The SDK-spawned teammate's `claude` CLI subprocess does not
+  create it. Confirms the source-read finding above.
+- **But the path is fully writable from the teammate.** The teammate
+  ran `mkdir -p ...memory/`, appended a sentinel string to
+  `MEMORY.md`, and re-read the file successfully. The sentinel landed
+  on disk; local-process verification confirmed it from the test
+  harness side.
+- **Implication:** cross-session teammate memory is a small
+  capability lift, not the v2 architectural rebuild we'd assumed. We
+  can have teammates read and write their own `MEMORY.md` at the
+  Claude-Code-conventional path with explicit instructions in their
+  system prompt (or a thin wrapper that loads and re-seeds the
+  context on spawn). Same primitive Claude Code uses; we just have to
+  invoke it ourselves rather than expect the SDK to.
+- **Open design choice (not yet a feature):** if we ship this, do we
+  share the auto-memory directory with Claude Code (so a teammate
+  spawned in `~/dev/claude-crew` writes to the same `MEMORY.md` that
+  Kael writes to from the Claude Code session) or namespace it by
+  teammate identity (so each role has its own memory file)? Probably
+  the latter for the default pack, optional sharing for custom
+  teammates. Real decision when we wire it.
+
+---
+
 ## Summary table
 
 | Question | Answer | Mechanism |
