@@ -21,18 +21,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
     AssistantMessage,
     RateLimitEvent,
+    TaskNotificationMessage,
     TextBlock,
 )
 
+logger = logging.getLogger(__name__)
+
 from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate
 
 if TYPE_CHECKING:
@@ -77,18 +83,38 @@ def _classify_error(exc: BaseException) -> str:
     return "internal"
 
 
-async def _collect_response_text(client: Any) -> str:
-    """Drain client.receive_response() and concatenate all TextBlock content.
+@dataclass(frozen=True)
+class TurnDrainResult:
+    """What we observed during one drain of client.receive_response().
+
+    text: concatenated TextBlock content from AssistantMessages.
+    last_failed_task_notif: the most recent TaskNotificationMessage with
+        status in {"failed","stopped"}, if any. Used by SC-8(a) to
+        synthesize an envelope when the parent didn't narrate over the
+        failure.
+    """
+
+    text: str
+    last_failed_task_notif: TaskNotificationMessage | None
+
+
+async def _collect_response_text(client: Any) -> TurnDrainResult:
+    """Drain client.receive_response() and accumulate text + subagent failures.
 
     - Ignores tool-use, thinking, and other non-text blocks (Assumption A2).
-    - On RateLimitEvent, raises RateLimitedError so the caller can surface
-      the `rate_limited` error code distinctly.
+    - On RateLimitEvent (status=rejected), raises RateLimitedError.
+    - Tracks the most recent TaskNotificationMessage with a failure-shaped
+      status; logs a WARNING for *every* such notification observed (so
+      operators tailing stderr see subagent failures even when the parent
+      recovers with text).
     - Terminates when the SDK iterator terminates (typically at ResultMessage).
-    - Returns "" if no AssistantMessage with TextBlocks was seen.
+    - Returns TurnDrainResult(text="", last_failed_task_notif=None) if
+      nothing of substance was observed.
 
     The caller must wrap this in asyncio.wait_for to bound non-termination.
     """
     text_parts: list[str] = []
+    last_failed: TaskNotificationMessage | None = None
     async for msg in client.receive_response():
         if isinstance(msg, RateLimitEvent):
             # status: 'allowed' (normal), 'allowed_warning' (near limit),
@@ -99,11 +125,19 @@ async def _collect_response_text(client: Any) -> str:
             if status == "rejected":
                 raise RateLimitedError(f"rate limit hit: {info}")
             continue
+        if isinstance(msg, TaskNotificationMessage):
+            if msg.status in ("failed", "stopped"):
+                last_failed = msg
+                logger.warning(
+                    "subagent failure: status=%s task_id=%s summary=%r",
+                    msg.status, msg.task_id, msg.summary,
+                )
+            continue
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
-    return "".join(text_parts)
+    return TurnDrainResult(text="".join(text_parts), last_failed_task_notif=last_failed)
 
 
 def _default_system_prompt(role: str) -> str:
@@ -123,6 +157,7 @@ class SdkTeammate(Teammate):
         effort: str | None = None,
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
+        agents: "dict[str, Any] | None" = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -133,6 +168,10 @@ class SdkTeammate(Teammate):
         self._setting_sources = (
             setting_sources if setting_sources is not None else ["user", "project"]
         )
+        # `agents=None` → load the bundled default pack. `agents={}` → explicit
+        # empty (this teammate cannot delegate). `agents={...}` → custom pack
+        # (Feature #3b's seam ride-along).
+        self._agents = load_default_pack() if agents is None else agents
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
@@ -147,6 +186,7 @@ class SdkTeammate(Teammate):
             "model": self._model,
             "system_prompt": self._system_prompt,
             "setting_sources": self._setting_sources,
+            "agents": self._agents,
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort
@@ -180,7 +220,7 @@ class SdkTeammate(Teammate):
             return
         try:
             await client.query(prompt, session_id="default")
-            text = await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 _collect_response_text(client),
                 timeout=TURN_TIMEOUT_SECONDS,
             )
@@ -200,11 +240,31 @@ class SdkTeammate(Teammate):
             )
             return
         except Exception as exc:
+            # Stream-level exception (SC-8b). Log so operators see it even
+            # when only tailing stderr.
+            logger.warning(
+                "subagent stream-level failure: teammate=%s role=%s exc=%s",
+                self.id, self.role, exc,
+            )
             await self._send_error_envelope(
                 to=env.sender, code=_classify_error(exc), message=str(exc),
             )
             return
+        text = result.text
         if not text:
+            # SC-8(a): empty parent text. If a subagent failed within the
+            # turn, synthesize the error from its summary so the lead gets
+            # a useful message. Otherwise fall through to the existing
+            # generic invalid_response.
+            if result.last_failed_task_notif is not None:
+                notif = result.last_failed_task_notif
+                summary = notif.summary or "subagent run did not complete"
+                await self._send_error_envelope(
+                    to=env.sender,
+                    code="invalid_response",
+                    message=f"subagent failed: {summary}",
+                )
+                return
             await self._send_error_envelope(
                 to=env.sender,
                 code="invalid_response",

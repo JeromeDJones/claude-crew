@@ -26,6 +26,8 @@ from typing import Any, AsyncIterator, Callable
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
+    TaskNotificationMessage,
+    TaskUsage,
     TextBlock,
 )
 
@@ -35,6 +37,72 @@ def text_response(text: str) -> list[Any]:
     return [
         AssistantMessage(
             content=[TextBlock(text=text)],
+            model="fake-model",
+        ),
+        ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=1,
+            session_id="default",
+        ),
+    ]
+
+
+def task_notification(
+    *, status: str, summary: str | None,
+    task_id: str = "task-fake",
+) -> TaskNotificationMessage:
+    return TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id=task_id,
+        status=status,  # type: ignore[arg-type]
+        output_file="",
+        summary=summary or "",
+        uuid="uuid-fake",
+        session_id="default",
+        usage=TaskUsage(total_tokens=0, tool_uses=0, duration_ms=0),
+    )
+
+
+def task_failure_response(
+    summary: str | None, *, status: str = "failed",
+) -> list[Any]:
+    """Stream a TaskNotificationMessage(status=failed|stopped) followed by a
+    terminating ResultMessage with no AssistantMessage text.
+
+    Used by Feature #3a SC-8(a) tests: the parent observed a subagent
+    failure but produced no text of its own.
+    """
+    return [
+        task_notification(status=status, summary=summary),
+        ResultMessage(
+            subtype="success",  # SDK uses "success" for normal stream end
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=1,
+            session_id="default",
+        ),
+    ]
+
+
+def task_failure_then_text(
+    summary: str | None, recovery_text: str,
+    *, status: str = "failed",
+) -> list[Any]:
+    """Stream a failure notification followed by parent recovery text.
+
+    Used by Feature #3a SC-8(β): subagent failed, parent narrated over it.
+    Recovery wins (envelope contains recovery_text), but the warning log
+    must still fire.
+    """
+    return [
+        task_notification(status=status, summary=summary),
+        AssistantMessage(
+            content=[TextBlock(text=recovery_text)],
             model="fake-model",
         ),
         ResultMessage(
