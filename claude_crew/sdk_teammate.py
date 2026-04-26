@@ -45,8 +45,15 @@ if TYPE_CHECKING:
     from claude_crew.broker import Broker
 
 # Bounded wait per turn for the SDK's receive_response() to terminate.
-# Generous; the SDK can take dozens of seconds on real model calls.
-TURN_TIMEOUT_SECONDS: float = 120.0
+# Sized to cover medium-effort Sonnet/Opus replies on non-trivial work, which
+# routinely take 2-5 minutes. Earlier 120s value was too aggressive and fired
+# on legitimate replies during Feature #5 (see
+# doc/research/feature-5-substrate-findings.md). NOTE: when this timeout fires,
+# the underlying SDK subprocess is NOT cancelled — the next turn may receive
+# the stale response. At 10 minutes that's a rare edge case; if it becomes a
+# real problem, the right fix is structural (call client.interrupt() on
+# timeout, or drop the client-side timeout entirely).
+TURN_TIMEOUT_SECONDS: float = 600.0
 
 # Bounded wait for graceful shutdown of the worker task.
 SHUTDOWN_TIMEOUT_SECONDS: float = 5.0
