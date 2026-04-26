@@ -47,11 +47,28 @@ sdk_factory.requires_auth = True  # type: ignore[attr-defined]
 def default_factory() -> TeammateFactory:
     """Return the factory selected by CLAUDE_CREW_TEAMMATE_MODE.
 
-    - "sdk" (default in production) → SdkTeammate, requires auth
+    - "sdk" (default in production) → SdkTeammate, requires auth.
+      The merged agent pack (default + ``~/.claude/agents/`` + project's
+      ``.claude/agents/``) is computed once here and frozen for the
+      process lifetime per Feature #3b's design (project root is
+      resolved at MCP-server startup, not per-spawn).
     - "stub"                        → StubTeammate
     - anything else                 → StubTeammate (conservative)
     """
     mode = os.environ.get("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
     if mode == "sdk":
-        return sdk_factory
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        merged_pack = build_merged_pack()
+
+        def factory(
+            id: str, name: str, role: str,
+            *, model: str | None = None, effort: str | None = None,
+        ) -> Teammate:
+            return sdk_factory(
+                id, name, role, model=model, effort=effort, agents=merged_pack,
+            )
+
+        factory.requires_auth = True  # type: ignore[attr-defined]
+        return factory
     return stub_factory

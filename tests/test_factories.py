@@ -24,13 +24,30 @@ class TestFactoryMarkers:
 
 
 class TestDefaultFactory:
-    def test_default_when_unset_is_sdk(self, monkeypatch) -> None:
+    """SDK-mode returns a closure that injects the #3b merged pack; tests
+    point home/cwd at a tempdir so they don't depend on the developer's
+    real ``~/.claude/agents/``."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_dirs(self, monkeypatch, tmp_path):
+        # No agent files planted; loaders return empty dicts → merged pack
+        # equals the bundled default pack. Both home and cwd are pointed
+        # at fresh tempdirs so Jerome's real ``~/.claude/agents/`` (which
+        # has 5 agents) does not leak into these tests.
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+    def test_default_when_unset_is_sdk_mode(self, monkeypatch) -> None:
         monkeypatch.delenv("CLAUDE_CREW_TEAMMATE_MODE", raising=False)
-        assert factories.default_factory() is factories.sdk_factory
+        f = factories.default_factory()
+        assert getattr(f, "requires_auth", False) is True
 
     def test_explicit_sdk_mode(self, monkeypatch) -> None:
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
-        assert factories.default_factory() is factories.sdk_factory
+        f = factories.default_factory()
+        assert getattr(f, "requires_auth", False) is True
 
     def test_explicit_stub_mode(self, monkeypatch) -> None:
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "stub")
@@ -41,6 +58,51 @@ class TestDefaultFactory:
         # typo doesn't accidentally invoke the real model.
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "garbage")
         assert factories.default_factory() is factories.stub_factory
+
+
+class TestSdkFactoryAgentInjection:
+    """SC-3, SC-7 — the merged pack reaches SdkTeammate via the existing
+    ``agents`` kwarg, with no new constructor surface and the right
+    precedence."""
+
+    def test_default_factory_in_sdk_mode_passes_merged_pack_to_sdk_teammate(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Plant a user-level agent, build the closure factory, spawn one
+        teammate via that closure, and assert the SdkTeammate's ``agents``
+        dict contains both the bundled pack and the planted one."""
+        from textwrap import dedent
+
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        home = tmp_path / "home"
+        agents_dir = home / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "scout.md").write_text(dedent("""\
+            ---
+            description: Test scout.
+            model: haiku
+            tools: [Read]
+            ---
+
+            You are a scout.
+            """))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = factories.default_factory()
+        teammate = f("t-1", "alice", "planner")
+
+        assert isinstance(teammate, SdkTeammate)
+        # The agents kwarg reaches SdkTeammate; bundled pack + planted user
+        # agent both present.
+        assert "scout" in teammate._agents  # planted
+        assert "explorer" in teammate._agents  # bundled
+        assert "planner" in teammate._agents  # bundled
+        assert "general-purpose" in teammate._agents  # bundled
 
 
 class TestMakeServerAuthGate:

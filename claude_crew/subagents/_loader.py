@@ -59,7 +59,17 @@ def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
         text = path.read_text()
     except OSError as exc:
         raise PackLoadError(f"cannot read pack file {path}: {exc}") from exc
+    return parse_pack_text(text, path)
 
+
+def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition]:
+    """Parse already-read pack text into ``(key, AgentDefinition)``.
+
+    Lets callers that already have the file contents (e.g., the user-
+    loader's ``strict_parse``, which inspects frontmatter before
+    delegating) avoid a second read. ``path`` is used for the kebab-key
+    and for error messages.
+    """
     fm_dict, body = _split_frontmatter(text, path)
     fm = _validate_frontmatter(fm_dict, path)
 
