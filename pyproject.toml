@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.1.68",
     "mcp[cli]>=1.2.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
