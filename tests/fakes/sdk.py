@@ -50,7 +50,7 @@ def text_response(text: str) -> list[Any]:
     ]
 
 
-def _task_notification(
+def task_notification(
     *, status: str, summary: str | None,
     task_id: str = "task-fake",
 ) -> TaskNotificationMessage:
@@ -77,7 +77,7 @@ def task_failure_response(
     failure but produced no text of its own.
     """
     return [
-        _task_notification(status=status, summary=summary),
+        task_notification(status=status, summary=summary),
         ResultMessage(
             subtype="success",  # SDK uses "success" for normal stream end
             duration_ms=0,
@@ -100,7 +100,7 @@ def task_failure_then_text(
     must still fire.
     """
     return [
-        _task_notification(status=status, summary=summary),
+        task_notification(status=status, summary=summary),
         AssistantMessage(
             content=[TextBlock(text=recovery_text)],
             model="fake-model",

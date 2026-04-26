@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate
 
 if TYPE_CHECKING:
@@ -170,11 +171,7 @@ class SdkTeammate(Teammate):
         # `agents=None` → load the bundled default pack. `agents={}` → explicit
         # empty (this teammate cannot delegate). `agents={...}` → custom pack
         # (Feature #3b's seam ride-along).
-        if agents is None:
-            from claude_crew.subagents import load_default_pack
-            self._agents = load_default_pack()
-        else:
-            self._agents = agents
+        self._agents = load_default_pack() if agents is None else agents
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None

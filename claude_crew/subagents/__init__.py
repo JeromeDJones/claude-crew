@@ -73,7 +73,8 @@ def merge_packs(
     Field-level merging is intentionally not supported. A user wanting
     one different knob redefines the entire entry — keeps "where did
     this value come from" trivially answerable.
+
+    Always returns a fresh dict; callers may mutate the result without
+    affecting the inputs.
     """
-    if not user:
-        return default
-    return {**default, **user}
+    return {**default, **(user or {})}

@@ -12,13 +12,19 @@ single home for #3a regression coverage.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
-from claude_agent_sdk.types import AgentDefinition
+from claude_agent_sdk.types import AgentDefinition, ResultMessage
 
+from claude_crew import sdk_teammate as sdk_module
+from claude_crew.broker import LEAD_ID, Broker
+from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.factories import sdk_factory
+from claude_crew.sdk_teammate import SdkTeammate
 from claude_crew.subagents import (
     PACK_MEMBERS,
     PackLoadError,
@@ -26,6 +32,13 @@ from claude_crew.subagents import (
     merge_packs,
 )
 from claude_crew.subagents._loader import PackFrontmatter, parse_pack_file
+from tests.fakes.sdk import (
+    FakeSDKClient,
+    task_failure_response,
+    task_failure_then_text,
+    task_notification,
+    text_response,
+)
 
 
 PACK_DIR = Path(__file__).parent.parent / "claude_crew" / "subagents"
@@ -77,6 +90,19 @@ class TestPackContents:
         for name, agent in pack.items():
             assert "Task" not in (agent.tools or []), (
                 f"{name} must not have Task — subagents are leaves"
+            )
+
+    def test_all_pack_members_are_foreground(self) -> None:
+        """Phase 1 contract: background=False for all three.
+
+        Async subagents change the parent's reasoning model and are out
+        of scope. Without an explicit assertion, the loader could ship
+        background=None (SDK default) and silently break the contract.
+        """
+        pack = load_default_pack()
+        for name, agent in pack.items():
+            assert agent.background is False, (
+                f"{name}.background must be False — async subagents are OOS"
             )
 
     def test_load_default_pack_is_deterministic(self) -> None:
@@ -222,11 +248,23 @@ class TestMergePacks:
 
     def test_none_user_returns_default(self) -> None:
         default = {"explorer": self._agent()}
-        assert merge_packs(default, None) == default
+        result = merge_packs(default, None)
+        assert result == default
+        # Always returns a fresh dict — caller mutations must not affect
+        # the default pack.
+        assert result is not default
 
     def test_empty_user_returns_default(self) -> None:
         default = {"explorer": self._agent()}
-        assert merge_packs(default, {}) == default
+        result = merge_packs(default, {})
+        assert result == default
+        assert result is not default
+
+    def test_result_mutation_does_not_affect_inputs(self) -> None:
+        default = {"explorer": self._agent()}
+        result = merge_packs(default, None)
+        result["new"] = self._agent()
+        assert "new" not in default
 
 
 class TestSecurityDoc:
@@ -244,7 +282,18 @@ class TestSecurityDoc:
         readme = PACK_DIR / "README.md"
         text = readme.read_text()
         assert "general-purpose" in text
-        assert "WebFetch" in text or "WebSearch" in text
+        # Both network tools must be named — either alone is incomplete.
+        assert "WebFetch" in text
+        assert "WebSearch" in text
+
+    def test_readme_explains_setting_sources_inheritance(self) -> None:
+        """SC-11 sub-requirement (c): the section must state the mechanism
+        (inherited setting_sources) by which subagents see CLAUDE.md."""
+        readme = PACK_DIR / "README.md"
+        text = readme.read_text()
+        assert "setting_sources" in text, (
+            "README must name the inheritance mechanism (setting_sources)"
+        )
 
     def test_readme_recommends_audit(self) -> None:
         readme = PACK_DIR / "README.md"
@@ -263,20 +312,6 @@ def _read_body(path: Path) -> str:
 
 
 # ---------- Task 2: SdkTeammate integration ----------
-
-import asyncio  # noqa: E402
-
-from claude_crew import sdk_teammate as sdk_module  # noqa: E402
-from claude_crew.broker import LEAD_ID, Broker  # noqa: E402
-from claude_crew.envelope import Envelope, new_message_id  # noqa: E402
-from claude_crew.factories import sdk_factory  # noqa: E402
-from claude_crew.sdk_teammate import SdkTeammate  # noqa: E402
-from tests.fakes.sdk import (  # noqa: E402
-    FakeSDKClient,
-    task_failure_response,
-    task_failure_then_text,
-    text_response,
-)
 
 
 def _agent(**overrides) -> AgentDefinition:
@@ -330,10 +365,6 @@ async def _drive_one_noop_turn(
             return
         await asyncio.sleep(0.01)
     raise AssertionError("timed out waiting for teammate reply")
-
-
-# Marker: the agents parameter explicitly set to {} should pass through.
-_EXPLICIT_EMPTY = "EXPLICIT_EMPTY"
 
 
 class TestSdkTeammateIntegration:
@@ -529,12 +560,9 @@ class TestFailureHandling:
     ) -> None:
         """(α): last subagent fails, parent never produced text → envelope from last summary."""
         # Two TaskNotificationMessages, the second failed; no AssistantMessage.
-        from claude_agent_sdk.types import ResultMessage
-        from tests.fakes.sdk import _task_notification
-
         scripted = [
-            _task_notification(status="completed", summary="first ok"),
-            _task_notification(status="failed", summary="second bad"),
+            task_notification(status="completed", summary="first ok"),
+            task_notification(status="failed", summary="second bad"),
             ResultMessage(
                 subtype="success", duration_ms=0, duration_api_ms=0,
                 is_error=False, num_turns=1, session_id="default",

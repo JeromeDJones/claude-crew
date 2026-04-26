@@ -4,6 +4,7 @@ model: sonnet
 tools: [Read, Grep, Glob, Write]
 effort: high
 maxTurns: 20
+background: false
 initialPrompt: Begin by restating the task in your own words and naming the acceptance criteria you will satisfy. Then proceed.
 ---
 

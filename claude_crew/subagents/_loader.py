@@ -27,7 +27,7 @@ class PackFrontmatter:
     """Validated frontmatter fields for a pack file.
 
     Required: description, model, tools.
-    Optional: effort, maxTurns, initialPrompt.
+    Optional: effort, maxTurns, initialPrompt, background.
     Unknown fields are ignored (forward-compat).
     """
 
@@ -37,10 +37,11 @@ class PackFrontmatter:
     effort: str | None = None
     maxTurns: int | None = None
     initialPrompt: str | None = None
+    background: bool | None = None
 
 
 _REQUIRED = ("description", "model", "tools")
-_OPTIONAL = ("effort", "maxTurns", "initialPrompt")
+_OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background")
 
 
 def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
@@ -74,6 +75,7 @@ def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
         effort=fm.effort,
         maxTurns=fm.maxTurns,
         initialPrompt=fm.initialPrompt,
+        background=fm.background,
     )
     return key, agent
 
@@ -121,4 +123,5 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
         initialPrompt=(
             str(d["initialPrompt"]) if d.get("initialPrompt") is not None else None
         ),
+        background=bool(d["background"]) if d.get("background") is not None else None,
     )
