@@ -260,3 +260,156 @@ def _read_body(path: Path) -> str:
     if len(parts) < 3:
         raise AssertionError(f"{path} does not have YAML frontmatter")
     return parts[2]
+
+
+# ---------- Task 2: SdkTeammate integration ----------
+
+import asyncio  # noqa: E402
+
+from claude_crew import sdk_teammate as sdk_module  # noqa: E402
+from claude_crew.broker import LEAD_ID, Broker  # noqa: E402
+from claude_crew.envelope import Envelope, new_message_id  # noqa: E402
+from claude_crew.factories import sdk_factory  # noqa: E402
+from claude_crew.sdk_teammate import SdkTeammate  # noqa: E402
+from tests.fakes.sdk import FakeSDKClient, text_response  # noqa: E402
+
+
+def _agent(**overrides) -> AgentDefinition:
+    defaults = {"description": "x", "prompt": "y", "model": "sonnet"}
+    return AgentDefinition(**{**defaults, **overrides})
+
+
+def _patch_sdk(monkeypatch, fake: FakeSDKClient):
+    """Patch claude_crew.sdk_teammate.ClaudeSDKClient with a constructor
+    that returns `fake` and stores the options on it."""
+    captured: dict = {}
+
+    def _ctor(options=None):
+        captured["options"] = options
+        fake.options = options
+        return fake
+
+    monkeypatch.setattr(sdk_module, "ClaudeSDKClient", _ctor)
+    return captured
+
+
+@pytest.fixture
+async def broker():
+    b = Broker()
+    yield b
+    await b.shutdown_all()
+
+
+async def _drive_one_noop_turn(
+    broker: Broker, role: str, *, agents=None, system_prompt: str | None = None,
+) -> None:
+    """Spawn an SdkTeammate via the broker (using a closure factory) and
+    deliver one envelope to completion."""
+    def _factory(id, name, role, **_kwargs):
+        kwargs = {}
+        if agents is not None:
+            kwargs["agents"] = agents
+        if system_prompt is not None:
+            kwargs["system_prompt"] = system_prompt
+        return SdkTeammate(id=id, name=name, role=role, **kwargs)
+
+    tid = await broker.spawn_teammate(role=role, name=None, factory=_factory)
+    await broker.send(Envelope(
+        id=new_message_id(), seq=0,
+        sender=LEAD_ID, recipient=tid, timestamp=0.0,
+        payload="hello",
+    ))
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline:
+        if broker.get_messages(recipient=LEAD_ID):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for teammate reply")
+
+
+# Marker: the agents parameter explicitly set to {} should pass through.
+_EXPLICIT_EMPTY = "EXPLICIT_EMPTY"
+
+
+class TestSdkTeammateIntegration:
+    """Task 2 — SC-2 (always-runs), SC-6, SC-9 (a) and (b)."""
+
+    async def test_default_pack_auto_registered_on_spawn(
+        self, monkeypatch, broker: Broker
+    ) -> None:
+        """SC-6: a teammate spawned with no override gets all three pack keys."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        await _drive_one_noop_turn(broker, role="planner")
+
+        assert "options" in captured, "ClaudeSDKClient was never constructed"
+        agents = captured["options"].agents
+        assert set(agents.keys()) == {"explorer", "planner", "general-purpose"}
+
+    async def test_internal_seam_custom_agents_dict(
+        self, monkeypatch, broker: Broker
+    ) -> None:
+        """SC-9 case (a): explicit agents dict replaces default pack."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        custom = {"reviewer": _agent(description="reviews things")}
+        await _drive_one_noop_turn(broker, role="reviewer", agents=custom)
+
+        assert captured["options"].agents == custom
+        assert "planner" not in captured["options"].agents
+
+    async def test_internal_seam_explicit_empty_distinct_from_none(
+        self, monkeypatch, broker: Broker
+    ) -> None:
+        """SC-9 case (b), A5: agents={} ≠ agents=None.
+
+        Empty dict means "this teammate has no pack." The SDK receives
+        the empty dict; the default pack is NOT loaded as a fallback.
+        """
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        await _drive_one_noop_turn(broker, role="planner", agents={})
+
+        assert captured["options"].agents == {}
+
+    async def test_parent_system_prompt_does_not_leak_into_pack(
+        self, monkeypatch, broker: Broker
+    ) -> None:
+        """SC-2 always-runs: parent's system_prompt must not appear in any
+        AgentDefinition field of the registered pack."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        marker = "PARENT_MARKER_X9F2_DO_NOT_LEAK"
+        await _drive_one_noop_turn(broker, role="planner", system_prompt=marker)
+
+        for name, agent_def in captured["options"].agents.items():
+            for field_name in (
+                "description", "prompt", "model", "effort",
+                "initialPrompt",
+            ):
+                value = getattr(agent_def, field_name)
+                assert value is None or marker not in str(value), (
+                    f"parent system_prompt leaked into {name}.{field_name}"
+                )
+            assert marker not in str(agent_def.tools or [])
+
+    def test_sdk_factory_passes_agents_through(self) -> None:
+        """Factory accepts agents kwarg and threads it to SdkTeammate."""
+        custom = {"reviewer": _agent()}
+        teammate = sdk_factory(
+            "id-1", "alice", "planner", agents=custom,
+        )
+        assert isinstance(teammate, SdkTeammate)
+        assert teammate._agents == custom
+
+    def test_sdk_factory_no_agents_kwarg_loads_default(self) -> None:
+        """Factory called without agents kwarg → SdkTeammate loads default pack."""
+        teammate = sdk_factory("id-2", "bob", "explorer")
+        assert isinstance(teammate, SdkTeammate)
+        assert set(teammate._agents.keys()) == {
+            "explorer", "planner", "general-purpose",
+        }

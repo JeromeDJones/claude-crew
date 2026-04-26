@@ -123,6 +123,7 @@ class SdkTeammate(Teammate):
         effort: str | None = None,
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
+        agents: "dict[str, Any] | None" = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -133,6 +134,14 @@ class SdkTeammate(Teammate):
         self._setting_sources = (
             setting_sources if setting_sources is not None else ["user", "project"]
         )
+        # `agents=None` → load the bundled default pack. `agents={}` → explicit
+        # empty (this teammate cannot delegate). `agents={...}` → custom pack
+        # (Feature #3b's seam ride-along).
+        if agents is None:
+            from claude_crew.subagents import load_default_pack
+            self._agents = load_default_pack()
+        else:
+            self._agents = agents
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
@@ -147,6 +156,7 @@ class SdkTeammate(Teammate):
             "model": self._model,
             "system_prompt": self._system_prompt,
             "setting_sources": self._setting_sources,
+            "agents": self._agents,
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort

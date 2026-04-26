@@ -27,6 +27,7 @@ stub_factory.requires_auth = False  # type: ignore[attr-defined]
 def sdk_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
+    agents: "dict | None" = None,
 ) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
@@ -35,6 +36,8 @@ def sdk_factory(
         kwargs["model"] = model
     if effort is not None:
         kwargs["effort"] = effort
+    if agents is not None:
+        kwargs["agents"] = agents
     return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
