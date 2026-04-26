@@ -271,7 +271,12 @@ from claude_crew.broker import LEAD_ID, Broker  # noqa: E402
 from claude_crew.envelope import Envelope, new_message_id  # noqa: E402
 from claude_crew.factories import sdk_factory  # noqa: E402
 from claude_crew.sdk_teammate import SdkTeammate  # noqa: E402
-from tests.fakes.sdk import FakeSDKClient, text_response  # noqa: E402
+from tests.fakes.sdk import (  # noqa: E402
+    FakeSDKClient,
+    task_failure_response,
+    task_failure_then_text,
+    text_response,
+)
 
 
 def _agent(**overrides) -> AgentDefinition:
@@ -413,3 +418,170 @@ class TestSdkTeammateIntegration:
         assert set(teammate._agents.keys()) == {
             "explorer", "planner", "general-purpose",
         }
+
+
+# ---------- Task 3: Failure handling ----------
+
+
+async def _drive_with_scripted(
+    broker: Broker, monkeypatch, scripted: list,
+) -> list:
+    """Run one envelope through an SdkTeammate whose stream is `scripted`,
+    return broker's lead-recipient messages."""
+    fake = FakeSDKClient(scripted_responses=[scripted])
+    _patch_sdk(monkeypatch, fake)
+
+    def _factory(id, name, role, **_kwargs):
+        return SdkTeammate(id=id, name=name, role=role)
+
+    tid = await broker.spawn_teammate(role="planner", name=None, factory=_factory)
+    await broker.send(Envelope(
+        id=new_message_id(), seq=0,
+        sender=LEAD_ID, recipient=tid, timestamp=0.0,
+        payload="hello",
+    ))
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline:
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        if msgs:
+            return msgs
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for teammate reply")
+
+
+class TestFailureHandling:
+    """Task 3 — SC-8(a), SC-8(b), multi-subagent (α) and (β)."""
+
+    async def test_sc8a_graceful_failure_with_summary(
+        self, monkeypatch, broker: Broker, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """SC-8(a): failed task notif + empty parent text → synthesized envelope."""
+        caplog.set_level("WARNING", logger="claude_crew.sdk_teammate")
+        msgs = await _drive_with_scripted(
+            broker, monkeypatch,
+            task_failure_response("ran out of turns"),
+        )
+        assert len(msgs) == 1
+        payload = msgs[0].payload
+        assert payload["error"] == "invalid_response"
+        assert "ran out of turns" in payload["message"]
+        # WARNING log fired during the drain.
+        assert any("subagent failure" in r.message for r in caplog.records)
+
+    async def test_sc8a_graceful_failure_empty_summary_uses_default(
+        self, monkeypatch, broker: Broker,
+    ) -> None:
+        """SC-8(a) edge: empty summary → default message in envelope."""
+        msgs = await _drive_with_scripted(
+            broker, monkeypatch,
+            task_failure_response(""),  # empty summary
+        )
+        assert len(msgs) == 1
+        payload = msgs[0].payload
+        assert payload["error"] == "invalid_response"
+        assert "subagent run did not complete" in payload["message"]
+
+    async def test_sc8b_stream_level_exception(
+        self, monkeypatch, broker: Broker, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """SC-8(b): receive_response raises mid-stream → code=internal envelope."""
+        caplog.set_level("WARNING", logger="claude_crew.sdk_teammate")
+
+        # Hand-build a fake whose receive_response raises on first iteration.
+        class RaisingFake(FakeSDKClient):
+            async def receive_response(self):
+                raise RuntimeError("subprocess crashed mid-stream")
+                yield  # pragma: no cover  (make this a generator)
+
+        fake = RaisingFake()
+        _patch_sdk(monkeypatch, fake)
+
+        def _factory(id, name, role, **_kwargs):
+            return SdkTeammate(id=id, name=name, role=role)
+
+        tid = await broker.spawn_teammate(role="planner", name=None, factory=_factory)
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hello",
+        ))
+        # Wait for envelope.
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            msgs = broker.get_messages(recipient=LEAD_ID)
+            if msgs:
+                break
+            await asyncio.sleep(0.01)
+        assert len(msgs) == 1
+        payload = msgs[0].payload
+        assert payload["error"] == "internal"
+        assert "subprocess crashed mid-stream" in payload["message"]
+        # Worker task must still be alive — survives one bad turn.
+        teammate = broker._teammates[tid]
+        assert teammate._task is not None and not teammate._task.done()
+        # WARNING logged.
+        assert any(
+            "stream-level failure" in r.message for r in caplog.records
+        )
+
+    async def test_multi_subagent_alpha_last_fails_empty_text(
+        self, monkeypatch, broker: Broker,
+    ) -> None:
+        """(α): last subagent fails, parent never produced text → envelope from last summary."""
+        # Two TaskNotificationMessages, the second failed; no AssistantMessage.
+        from claude_agent_sdk.types import ResultMessage
+        from tests.fakes.sdk import _task_notification
+
+        scripted = [
+            _task_notification(status="completed", summary="first ok"),
+            _task_notification(status="failed", summary="second bad"),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]
+        msgs = await _drive_with_scripted(broker, monkeypatch, scripted)
+        assert len(msgs) == 1
+        payload = msgs[0].payload
+        assert payload["error"] == "invalid_response"
+        # Last failure ("second bad") wins over an absent earlier one.
+        assert "second bad" in payload["message"]
+
+    async def test_multi_subagent_beta_failure_with_recovery(
+        self, monkeypatch, broker: Broker, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(β): subagent fails, parent narrates over → normal envelope + WARNING log.
+
+        Load-bearing for the recovery-wins contract: if a refactor only
+        logs on no-recovery, this test fails because the WARNING isn't
+        emitted on the recovery path.
+        """
+        caplog.set_level("WARNING", logger="claude_crew.sdk_teammate")
+        msgs = await _drive_with_scripted(
+            broker, monkeypatch,
+            task_failure_then_text("bad subagent", "ok, here's the answer"),
+        )
+        assert len(msgs) == 1
+        payload = msgs[0].payload
+        # Recovery wins — payload is normal text, not error.
+        assert "error" not in payload
+        assert payload["text"] == "ok, here's the answer"
+        # But the warning log fired regardless — operator visibility preserved.
+        assert any("bad subagent" in r.message for r in caplog.records)
+
+    async def test_successful_turn_no_warning(
+        self, monkeypatch, broker: Broker, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """No TaskNotificationMessage → no WARNING log, normal envelope."""
+        caplog.set_level("WARNING", logger="claude_crew.sdk_teammate")
+        msgs = await _drive_with_scripted(
+            broker, monkeypatch, text_response("clean reply"),
+        )
+        assert len(msgs) == 1
+        assert msgs[0].payload["text"] == "clean reply"
+        # No warnings from our logger.
+        sdk_warnings = [
+            r for r in caplog.records
+            if r.name == "claude_crew.sdk_teammate" and r.levelname == "WARNING"
+        ]
+        assert sdk_warnings == []
