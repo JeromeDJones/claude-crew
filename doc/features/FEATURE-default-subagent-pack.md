@@ -1,7 +1,8 @@
 # Feature: Default Subagent Pack
 
-**Status**: In Progress (Phase 1)
+**Status**: In Progress (Phase 5 — awaiting Jerome's manual verification)
 **Created**: 2026-04-25
+**Branch**: `feat/default-subagent-pack`
 
 ---
 
@@ -1031,9 +1032,32 @@ Fails before this task because the file does not exist; cannot pass without Task
 
 ## Phase 4: Implementation
 
-*Execution driven by SKILL.md. Update status in header as tasks complete.*
+### Tasks shipped
 
-**Gate**: All tasks complete, quality gates passing, Sentinel review done.
+| | Task | Commit | Tests added | SCs covered |
+|---|---|---|---|---|
+| T1 | Pack package + loader + .md files + security doc | `4bb65fd` | 22 | SC-3, SC-4, SC-5, SC-7, SC-11 |
+| T2 | SdkTeammate integration (`agents` kwarg + factory) | `e85fb87` | 6 | SC-2 (always-runs), SC-6, SC-9 (a)+(b) |
+| T3 | SC-8 failure handling (`TurnDrainResult` + synthesis + WARNING) | `34f8748` | 6 | SC-8 (a)+(b), multi-subagent (α)+(β) |
+| Sentinel fixes | `background=False` enforced, SC-11 tests tightened, hygiene | `637a8fb` | 3 | (sharpening) |
+| T4 | Live E2E — tool-name correctness + isolation regression | `1c5636c` | 1 | SC-1, SC-10 |
+
+### Sentinel pass (autonomous, post-T3)
+
+Five fix-now items folded into `637a8fb`:
+- `background=False` was lost between Phase 1 contract and loader output (silent contract drift); loader + frontmatter + each pack file now set it explicitly + a regression test asserts it.
+- SC-11 README test was too loose: `WebFetch or WebSearch` → `WebFetch and WebSearch`; added an assertion that `setting_sources` inheritance mechanism is named.
+- `merge_packs` returned the same default object on no-op (potential future-mutation footgun for #3b); now always returns a fresh dict; added a mutation-isolation test.
+- Lazy import of `load_default_pack` in `SdkTeammate.__init__` violated `feedback_lazy_imports.md` (project rule). Moved to module scope.
+- Test hygiene: imports consolidated at top of file; renamed `_task_notification` → `task_notification` (was being imported across modules); removed dead `_EXPLICIT_EMPTY` constant.
+
+### Live E2E note
+
+First live run (`52s`, ~$0.30 actual) failed on the conversation-isolation probe — but the failure was a test-design flaw, not an implementation bug. The probe embedded the UUID in the subagent's own prompt, so the subagent saw it in its input and repeated it. Reworked the probe to plant a secret in the parent's T1 and ask the subagent in T2 *without* including the answer — second run passed in 53s.
+
+Captured in T4's commit message so the lesson sticks for future live tests against the SDK.
+
+**Gate**: All tasks complete; Sentinel review done; full suite green (156 + 1 live).
 
 ---
 
