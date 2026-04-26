@@ -1064,23 +1064,39 @@ Captured in T4's commit message so the lesson sticks for future live tests again
 ## Phase 5: Completion
 
 ### Verification
-- [ ] Feature works against Phase 1 success criteria
-- [ ] No regressions — full test suite passes
-- [ ] Spec updated to match implementation
-- [ ] Docs updated if user-facing behavior changed
+
+- [x] Feature works against Phase 1 success criteria — all 11 SCs covered, including SC-10 live E2E
+- [x] No regressions — 156 unit/integration passed, 0 changed in unrelated areas
+- [x] Spec updated to match implementation — Phase 4 implementation log added; Resolved Decisions match what shipped
+- [x] PRODUCT-VISION.md updated — #3a → done, product journal entry added, verification items resolved including the post-merge auto-memory probe
+- [x] Branch merged to master (`a7ae0ec`); follow-up commits `faab70d` (vision), `f5ee7d7` (auto-memory probe research)
 
 ### Retrospective
 
-**What went well**:
+**What went well**
 
-**What was friction**:
+- **Pre-Phase-1 spike was decisive.** ~90 minutes, ~$0.20, two probe runs. Without it we'd have written Phase 1 against assumptions that didn't survive contact with the SDK (e.g., that `setting_sources=[]` could clean-room subagents — it can't, the field doesn't exist on `AgentDefinition`). Same shape as `sdk-memory.md` for #2; it's the third feature where "research doc → cited as authority in spec" has paid off. **Pattern: when a feature rests on a third-party API contract, a half-day spike is not optional, it's load-bearing.**
+- **Co-architect at every gate, not just at the end.** Phase 1 framing → spike result review → Phase 2 design read → Phase 2 sentinel-fix review. Each pass caught something different (loader split, planner=Sonnet-not-Opus reasoning, tool allowlist sharpening, recovery-wins multi-subagent test split). Persistent across the whole feature kept context warm; spawning a fresh review subagent each phase would have lost that continuity.
+- **Sentinel + co-architect are complementary, not redundant.** Co-architect pushes on design intent and tradeoffs. Sentinel pushes on testability and behavior coverage. The Phase-2 sentinel pass caught the `_collect_response_text` composition bug that co-architect's design read had missed — sentinel was reading the actual code, co-architect was reading the spec. Different vantage points found different things.
+- **The auto-memory probe paid back the planning investment.** Logged as a follow-up during Phase 1 (cost: one line). Resolved post-merge in 2 turns (~$0.02). Surfaced a meaningful capability finding (cross-session memory is cheap, not v2-rebuild) that reframes a v2 roadmap item. **Pattern: cheap probes you write down during planning are basically free; running them reliably surfaces signal.**
 
-**Improvements**:
-1. [Specific, actionable change to workflow]
+**What was friction**
 
-**Workflow updates made**:
-- [ ] TEMPLATE.md or SKILL.md updated
-- [ ] Project knowledge base updated (`.claude/rules/`)
-- [ ] MEMORY.md updated (if cross-project insight)
+- **Live isolation probe had a design flaw not caught before the run.** First live execution (~$0.30 burned) failed because the subagent's prompt embedded the UUID it was asked about — subagent saw it in its own input and repeated it, looking like a conversation-isolation leak. Spike script had identical wording but different model behavior masked the flaw. **Root cause:** when designing isolation probes, "the answer key must not be in the subagent's prompt" wasn't an explicit checklist item.
+- **Phase 2 had a silent contract drift on `background=False`.** Phase 1 locked the decision; Phase 2's Resolved Decisions section restated it; but neither the data-structure spec nor the test plan carried `background` forward, so the loader shipped without setting it. Sentinel caught it post-T3. **Root cause:** Resolved Decisions in Phase 2 are not automatically traced into the Phase 2 contracts/types or Phase 3 test scenarios.
+- **Lazy import slipped past me despite the memory file warning against it.** `feedback_lazy_imports.md` in `memory/` exists *because* of a prior incident. I wrote it inline anyway in `SdkTeammate.__init__`; sentinel caught it. The memory was loaded but didn't fire as pattern recognition while I was deciding where to put the import.
 
-**Gate**: Feature verified, retrospective captured, workflow improved.
+**Improvements**
+
+1. **For SDD Phase 3 BDD scenarios involving live LLM probes, add a specific check:** "If the test plants a value and asks the agent about it later, the question prompt must not contain the answer." Goes into TEMPLATE.md as a sub-bullet under the dedicated E2E task section. Cheap to enforce; catches the exact class of bug that cost us the first live run.
+2. **For SDD Phase 2 Resolved Decisions, require a "carried-into" pointer:** every Resolved Decision should name the contract/type/test that enforces it. If nothing enforces it, the decision is documentation only. Add to TEMPLATE.md's Phase 2 Resolved Decisions guidance.
+3. **For the lazy-import miss specifically:** the memory file is doing its job (sentinel referenced it explicitly when flagging the violation). The miss was mine. Action: when about to write an import inside a function body, treat that as a yellow flag and check `memory/MEMORY.md` index for relevant feedback before continuing. *Self-correction, not workflow change.*
+
+**Workflow updates made**
+
+- [ ] TEMPLATE.md updated — add the live-probe answer-key checklist (Improvement 1) and the carried-into pointer requirement (Improvement 2). *Deferred to a small workflow PR; not blocking on this feature.*
+- [x] Project knowledge base — `doc/research/sdk-subagents.md` (new) captures empirical SDK behavior; `doc/research/sdk-memory.md` updated with auto-memory probe finding.
+- [x] PRODUCT-VISION.md updated — vision verification items resolved, product journal entry added, follow-up auto-memory finding folded back in.
+- [ ] MEMORY.md (cross-project) — no entry warranted; the feedback already exists (`feedback_lazy_imports.md`); the lessons here are specific to this codebase's SDD process.
+
+**Gate**: Feature verified, retrospective captured, workflow improvements identified (TEMPLATE.md edits queued separately).
