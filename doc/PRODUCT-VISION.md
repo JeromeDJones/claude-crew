@@ -148,9 +148,10 @@ claude-crew is *not* an alternative to RepoReactor, BMAD, or workflow products i
 
 These are claims the architecture leans on but that we haven't empirically confirmed yet. Each should be a small spike before or during the feature it gates.
 
-- **SDK memory behavior** — confirm what persists across `ClaudeSDKClient` calls within a session, what loads from `~/.claude/CLAUDE.md` and project `CLAUDE.md` (likely via `setting_sources`), and whether Claude Code's auto-memory subsystem (`~/.claude/projects/<encoded>/memory/`) is active for SDK programs running outside the CLI. Verify before Feature #2.
-- **Subagent context isolation** — confirm subagents do not auto-inherit parent context, CLAUDE.md, or memory unless explicitly configured. Verify before Feature #3a.
-- **Token budget knobs per subagent** — confirm `max_turns` and `max_thinking_tokens` are per-subagent, not session-wide. Verify before Feature #3a.
+- **SDK memory behavior** — confirm what persists across `ClaudeSDKClient` calls within a session, what loads from `~/.claude/CLAUDE.md` and project `CLAUDE.md` (likely via `setting_sources`), and whether Claude Code's auto-memory subsystem (`~/.claude/projects/<encoded>/memory/`) is active for SDK programs running outside the CLI. Verify before Feature #2. **Resolved** in `doc/research/sdk-memory.md` — auto-memory not active at parent level; CLAUDE.md loaded by CLI default.
+- **Subagent context isolation** — confirm subagents do not auto-inherit parent context, CLAUDE.md, or memory unless explicitly configured. Verify before Feature #3a. **Resolved** in `doc/research/sdk-subagents.md` — conversation history and `system_prompt` isolated; CLAUDE.md inherits via parent's `setting_sources` (intentional product stance per #3a).
+- **Token budget knobs per subagent** — confirm `max_turns` and `max_thinking_tokens` are per-subagent, not session-wide. Verify before Feature #3a. **Resolved** in `doc/research/sdk-subagents.md` — `AgentDefinition.maxTurns` and `effort` are per-subagent and enforced.
+- **Top-level teammate auto-memory access** — `sdk-memory.md` concluded the SDK does not activate Claude Code's auto-memory subsystem, but the test was indirect. After Feature #3a, run a direct read/write probe via a live teammate (e.g., the co-architect). If positive, plumb it; if no-op, document and move on. Two-turn probe, ~$0.02.
 
 ---
 
