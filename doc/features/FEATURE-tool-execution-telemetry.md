@@ -1055,4 +1055,51 @@ Scenario: Adversarial redaction round-trip (SC-15 full-stack)
 
 ## Phase 5: Completion
 
-*To be filled.*
+### Verification
+
+- [x] Feature works against Phase 1 success criteria — all 16 SCs covered by tests; sentinel-f8-p1 PASS verdict on coverage map at final review.
+- [x] No regressions — full suite 295 passed, 8 skipped (8 = 7 pre-existing live-API-gated + 1 new live SDK A2 probe). Up from F6's baseline 218.
+- [x] Live SDK A2 probe PASS — 7.9s, ~$0.05, real Haiku 4.5 ClaudeSDKClient driven through one Bash echo, transcript records verified.
+- [x] FEATURE.md spec updated to match implementation (D6 short-flag regex errata noted, Bash extractor reconciled to command-only, `outcome="orphan_post"` documented in retro below).
+- [x] PRODUCT-VISION.md updated — #8 row marked done; Post-MVP Substrate (v1.1) header reflects revised build order (#6 → #8 → #7 instead of original #6 → #7 → #8).
+- [x] BACKLOG entries routed for the three deferred items + this session's process observations.
+- [x] No `.claude/rules/` updates needed — F6 established the pattern, F8 stayed within it.
+
+### Retrospective
+
+**What went well:**
+- **Parallel two-track review at every gate** (sentinel-f8-p1 + co-architect-f8) caught load-bearing bugs at design-time, not implementation-time. Independent convergence on the duplicate-`tool_end` gap (D8 fifth guard) is the second time this pattern produced a "would-have-bit-us-in-production" catch (first was F6's in-flight envelope handoff). The signal isn't "we have good reviewers" — it's that **two-track gate review beats either track alone**. Worth elevating from per-feature pattern to formalized process.
+- **Pre-design empirical spikes** for every load-bearing assumption: SDK hook API surface (resolved Phase 1), hook ordering (live probe Phase 1), subagent propagation (live probe Phase 1), parallel-tool (live probe Phase 2), PermissionRequest interleave (live probe Phase 2). Five spikes across two phases, total cost ~$0.20. Pattern: "load-bearing assumptions get an empirical resolution before designing against them" is now established.
+- **The Q3 inversion (Bash on the args_summary allowlist)** + co-architect's pushback + structural strengthening (versioned redactor + per-tool extractor registry + redact-then-cap order) is the cleanest example yet of the SDD workflow producing a better answer than any participant's first instinct. Lead said "exclude Bash, safety-first." Jerome inverted to "include Bash, that's the whole point of the feature." Co-architect ratified the inversion, then counter-proposed the safety scaffolding to make it work.
+- **F6's post-Phase-3 grep audit pattern** (contract-change blast radius before task breakdown) repeated here without surprise. Cheap, mechanical, prevented Phase 4 surprises.
+- **Substrate dogfooding worked** this session. F6's telemetry-based liveness held throughout the F8 build — zero S1 fires, zero stale responses, zero rescue tripwires. The fix worked on itself.
+
+**What was friction:**
+- **Lead-side polling discipline.** Three times across the session, Jerome had to ask "did we check back in?" because I dispatched teammates and didn't poll. The substrate's notification model (notifications surface via tool results when a teammate sends a message) doesn't surface to the lead unless the lead polls — and dispatch-then-keep-working produces stale state. Fix: bake polling into the post-dispatch checklist; consider a hook or env nudge that surfaces incoming teammate envelopes more aggressively.
+- **`get_messages` cursor mismanagement.** Polled with `since_seq=76` after retrieving seq=76, missing sentinel-f8-p1's reply at seq=71 (sent ~17 minutes earlier; just hadn't been polled in time). Fix: poll from a much earlier cursor when uncertain, or get a "highest seq seen by lead" cursor maintained somewhere.
+- **D11 spec drift via the orphan-post sentinel.** Phase 2 D11 listed five outcome values for `tool_end`. Sentinel inner-4 fix introduced a sixth (`"orphan_post"`) for the audit case. Documented in this retro but a reader of D11 alone wouldn't know.
+
+**Improvements** (specific, actionable):
+1. **Lead polling cadence** — after every `mcp__claude-crew__send_to` to a teammate that's expected to reply, set an explicit "poll back in ≤3 min" checkpoint. If conversation continues past that, poll first, then proceed.
+2. **`get_messages` cursor discipline** — when uncertain about cursor state, poll from `since_seq=0` and slice client-side. Cost is one extra read, value is correct visibility.
+3. **D11 enum drift** — when adding a new `outcome` value during implementation (or any closed-set field value), update the design decision in the FEATURE doc as part of the same commit. Caught here in Phase 5 review; should be caught in the implementation commit.
+
+**Workflow updates made:**
+- [ ] TEMPLATE.md or SKILL.md updated — N/A (no template/skill changes needed)
+- [ ] Project knowledge base updated (`.claude/rules/`) — N/A (claude-crew has no `.claude/rules/` dir; project-level patterns stay in PRODUCT-VISION's "Product Journal" section)
+- [ ] MEMORY.md updated — N/A (no cross-project insight beyond what's already in `~/.claude/SESSION.md`)
+
+**Process patterns to formalize** (not yet routed — flagged for retro discussion):
+- **Two-track gate review (sentinel + co-architect, parallel) at Phase 1 + Phase 2.** Two convergent catches across two features. Strong signal.
+- **Pre-design empirical spikes** for load-bearing assumptions, before Phase 2 designs against them. Five spikes this feature; pattern works.
+- **`outcome="orphan_post"` as a sixth `tool_end.outcome` value** — formal D11 erratum below.
+
+### D11 Erratum: `tool_end.outcome` enum is six values, not five
+
+The Phase 2 D11 spec lists five `tool_end.outcome` values: `ok` / `failed` / `interrupted` / `abandoned` / `killed`. The inner-4 fix-up commit (`31e00bf`) introduced a sixth value:
+
+- **`orphan_post`** — emitted by the post-without-pre audit-line writer in `sdk_teammate.py:_on_post_common` when a `PostToolUse` arrives for a `tool_use_id` that was never observed by `PreToolUse` AND is not in `_recently_closed_tool_use_ids`. Carries `duration_seconds: None` (no started_at to subtract) and `error_summary: "post fired without matching pre"`.
+
+Replay tooling joining `tool_start` and `tool_end` records by `tool_use_id` should treat `orphan_post` as an audit signal: a `tool_end` with no matching `tool_start` indicates the SDK fired Post without Pre, which is a signal worth surfacing to operators (likely SDK quirk; possibly missed Pre due to hook timeout). Distinct from `failed` (real tool failure) or `abandoned` (graceful close after dropped Post).
+
+D11 in the FEATURE doc is the source of truth going forward; this errata note is preserved here so future readers understand the drift.
