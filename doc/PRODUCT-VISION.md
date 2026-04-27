@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-04-25
-**Features Implemented**: 3
+**Last Updated**: 2026-04-26
+**Features Implemented**: 5 (MVP complete); 2 post-MVP substrate items (#6, #7) routed next from Feature #5 retro
 
 ---
 
@@ -170,6 +170,15 @@ These are claims the architecture leans on but that we haven't empirically confi
 | 3c | **Cross-session teammate memory (full mirror).** Teammates read and write `~/.claude/projects/<encoded>/memory/MEMORY.md` and per-entry `*.md` files using the same structure Claude Code's auto-memory subsystem uses (index file + frontmatter-tagged entries with `name`/`description`/`type`). Loaded into the teammate on spawn via system prompt or initialPrompt; appended-to during work via explicit instructions in the pack's prompts. Same path Claude Code uses, so a teammate's memory stays compatible if the SDK ever activates auto-memory natively. Per-teammate-identity scoping (each role gets its own memory file) is the default; an opt-in shared mode is a follow-up. | 1 | 1 | M | deferred (gate not triggered by #5 retro) | **Gate evaluation (2026-04-26 post-#5 retro):** Memory was NOT the load-bearing gap in the real-task run. What WAS load-bearing: (a) substrate observability — bus doesn't see subagent activity inside teammates; (b) timeout policy — hard-walled SDK turn timeout vs telemetry-based liveness. #3c stays deferred. Revisit ONLY if a future real-task run actually surfaces a memory gap (e.g., teammates losing context mid-multi-session work). Empirical findings in `doc/research/sdk-memory.md`. |
 | 4 | **JSONL transcript per crew.** Every message that crosses the bus (lead ↔ teammate ↔ subagent) appended to a structured JSONL file per crew, with sender, recipient, timestamp, payload, message id. Floor for observability — `tail -f` is the v1 dashboard. | 4 | 4 | S | done | Per-line schema with `kind` discriminator (envelope vs lifecycle), crew_id primary key, XDG_STATE_HOME path. v1 covers lead↔teammate; subagent activity inside SDK does not cross the broker (documented limitation). 119 tests. |
 | 5 | **Real-task validation.** Use claude-crew on a non-trivial real task at home with one of Jerome's existing roles. Pass criterion: task completes end-to-end without operator intervention beyond directing the lead, and "needed manual rescue?" flag is false. | all | 5 | M | done | The proof point. PASSED on 2026-04-26 with MMM-35 (Bank CSV import backend slice). All 8 tripwires clean; capability #2 verified twice (sentinel teammates spawned subagents). Retro in Product Journal. Substrate findings (S1 timeout, S2 stale-response, observability gap on subagent activity) drive the next claude-crew work block. |
+
+### Post-MVP Substrate (v1.1)
+
+Routed from Feature #5's retro substrate findings. Both items are direct responses to bugs/gaps that paced the MMM-35 real-task run. Build order: #6 first (eliminates the broker-eats-replies pattern that paced every turn of #5), then #7 (closes the smaller observability gap; cheap follow-up).
+
+| # | Feature | Capability | Crit | Size | Status | Notes |
+|---|---|---|---|---|---|---|
+| 6 | **Telemetry-based teammate liveness.** Replace `TURN_TIMEOUT_SECONDS` hard wall in `claude_crew/sdk_teammate.py` with stream-activity stamping — every event yielded by `receive_response` updates `last_activity_at`. New MCP tool `get_teammate_status(id)` returns `{alive, last_activity_at, current_turn_started_at}`. Add a subprocess-PID liveness probe so genuine death emits `lifecycle: died`. Drop the wall timeout (or move to a 1hr backstop). Operator policy ("no activity > X min → ping") moves to lead code where it belongs. | 1, 4 | 5 | M | next | The structural fix for S1/S2 substrate findings from #5. Tactical fix already shipped at 600s in `b9bc611`; that band-aid still let two timeouts fire during Phase 4. As long as a hard timeout exists on the wire, S2 (stale-response delivery) stays latent and reappears on any teammate doing long work. Eliminating the timeout makes S2 a non-issue by construction. Probably warrants a full SDD pass. |
+| 7 | **Subagent-activity envelopes.** Emit `subagent-spawn` and `subagent-result` envelopes from teammates so the lead can observe capability #2 in real time. Closes the Feature #4 v1 documented limit ("subagent activity does not cross the broker"). Verified in #5 retro that capability #2 IS being exercised in real production work — just not bus-observable; we had to confirm by directly asking each sentinel teammate after the fact. | 2, 4 | 5 | S | next | Smaller than #6. Plan-mode-sized. Sequence: ship #6 first, then run a real-task validation (MMM-4b is a clean candidate), then ship #7 once we have a second real-task data point's worth of signal on what the bus should surface. |
 
 ### Deferred (v2+)
 
