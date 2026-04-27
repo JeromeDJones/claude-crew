@@ -70,7 +70,10 @@ class TestStubShutdown:
         tid = await broker.spawn_teammate(role="parrot", name=None, factory=_stub_factory)
         await broker.kill_teammate(tid)
         # If shutdown didn't complete, the test would hang here.
-        assert broker.list_crew() == []
+        # D11: kill_teammate tombstones (alive=False) rather than evicting from list_crew.
+        crew = broker.list_crew()
+        assert len(crew) == 1
+        assert crew[0].alive is False
 
     async def test_shutdown_is_idempotent(self, broker: Broker) -> None:
         teammate = StubTeammate(id="t-x", name="x", role="r")

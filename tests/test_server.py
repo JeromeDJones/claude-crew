@@ -191,7 +191,7 @@ class TestListCrewTool:
 # ---------- kill_teammate ----------
 
 class TestKillTeammateTool:
-    async def test_kill_then_send_returns_unknown(self) -> None:
+    async def test_kill_then_send_returns_teammate_dead(self) -> None:
         async with _client() as s:
             await s.initialize()
             spawn = _content_json(await s.call_tool("spawn_teammate", {"role": "r"}))
@@ -201,7 +201,7 @@ class TestKillTeammateTool:
             send = _content_json(await s.call_tool(
                 "send_to", {"teammate_id": tid, "payload": "x"},
             ))
-            assert send.get("error") == "unknown_teammate"
+            assert send.get("error") == "teammate_dead"
 
     async def test_kill_unknown_returns_error(self) -> None:
         async with _client() as s:
@@ -210,3 +210,68 @@ class TestKillTeammateTool:
                 "kill_teammate", {"teammate_id": "ghost"},
             ))
             assert result.get("error") == "unknown_teammate"
+
+
+# ---------- get_teammate_status ----------
+
+class TestGetTeammateStatusTool:
+    async def test_unknown_id_returns_unknown_teammate_error(self) -> None:
+        async with _client() as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool(
+                "get_teammate_status", {"teammate_id": "ghost"},
+            ))
+            assert result.get("error") == "unknown_teammate"
+            assert "ghost" in result.get("message", "")
+
+    async def test_alive_teammate_returns_full_status(self) -> None:
+        async with _client() as s:
+            await s.initialize()
+            spawn = _content_json(await s.call_tool(
+                "spawn_teammate", {"role": "planner", "name": "alice"},
+            ))
+            tid = spawn["teammate_id"]
+            status = _content_json(await s.call_tool(
+                "get_teammate_status", {"teammate_id": tid},
+            ))
+            assert status["alive"] is True
+            assert status["teammate_id"] == tid
+            assert status["role"] == "planner"
+            assert status["name"] == "alice"
+            assert status["died_at_wallclock"] is None
+            assert status["exit_code"] is None
+            assert "idle_seconds" in status
+
+    async def test_killed_teammate_returns_dead_status(self) -> None:
+        """D11: get_teammate_status after kill returns alive=False with death record."""
+        async with _client() as s:
+            await s.initialize()
+            spawn = _content_json(await s.call_tool("spawn_teammate", {"role": "r"}))
+            tid = spawn["teammate_id"]
+            await s.call_tool("kill_teammate", {"teammate_id": tid})
+            status = _content_json(await s.call_tool(
+                "get_teammate_status", {"teammate_id": tid},
+            ))
+            assert status["alive"] is False
+            assert status["died_at_wallclock"] is not None
+            assert status["exit_code"] is None
+            assert status["current_turn_started_at_wallclock"] is None
+
+
+# ---------- broadcast with skipped_dead ----------
+
+class TestBroadcastSkippedDead:
+    async def test_broadcast_skipped_dead_in_response(self) -> None:
+        """D12: killed teammate is listed in skipped_dead, not delivered_to."""
+        async with _client() as s:
+            await s.initialize()
+            spawn_a = _content_json(await s.call_tool("spawn_teammate", {"role": "r"}))
+            spawn_b = _content_json(await s.call_tool("spawn_teammate", {"role": "r"}))
+            spawn_c = _content_json(await s.call_tool("spawn_teammate", {"role": "r"}))
+            tid_c = spawn_c["teammate_id"]
+            await s.call_tool("kill_teammate", {"teammate_id": tid_c})
+
+            result = _content_json(await s.call_tool("broadcast", {"payload": "hi"}))
+            assert result["delivered_to"] == 2
+            assert len(result["message_ids"]) == 2
+            assert tid_c in result["skipped_dead"]

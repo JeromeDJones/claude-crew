@@ -8,6 +8,8 @@ dedup. All state mutations happen on the asyncio event loop; no threads.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -19,19 +21,15 @@ from claude_crew.transcript import TranscriptSink
 
 LEAD_ID = "lead"
 
+logger = logging.getLogger(__name__)
+
 
 class UnknownTeammateError(KeyError):
     """Raised when a teammate id is not registered."""
 
 
 class TeammateAlreadyDeadError(RuntimeError):
-    """Raised when attempting to send to a killed teammate.
-
-    (Currently the broker uses ``UnknownTeammateError`` for both cases
-    since killed teammates are removed from the registry. This class is
-    reserved for a future state where killed teammates remain registered
-    in a tombstoned form.)
-    """
+    """Raised when attempting to send to a tombstoned (killed/dead) teammate."""
 
 
 @dataclass(frozen=True)
@@ -41,6 +39,11 @@ class TeammateInfo:
     role: str
     spawned_at: float
     alive: bool
+    # Death-record fields (all None for alive teammates)
+    died_at_wallclock: float | None = None
+    exit_code: int | None = None
+    last_activity_at_wallclock_at_death: float | None = None
+    idle_seconds_at_death: float | None = None
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -97,20 +100,164 @@ class Broker:
         })
         return teammate_id
 
+    async def _tombstone_teammate(
+        self,
+        teammate_id: str,
+        exit_code: int | None,
+        lifecycle_event_name: str,
+        **lifecycle_extra: Any,
+    ) -> None:
+        """Shared tombstone code path for kill and death detection.
+
+        Idempotent — silently returns if already tombstoned or unknown.
+
+        Execution order (D2):
+        1. Idempotency check
+        2. End turn on teammate
+        3. Capture in-flight envelope (SdkTeammate only)
+        4. Snapshot activity at death
+        5. Write frozen tombstone to _info (BEFORE pop — ensures concurrent
+           send sees alive=False → TeammateAlreadyDeadError, not UnknownTeammateError)
+        6. Pop from _teammates active set
+        7. Bounce in-flight envelope (if any)
+        8. Drain inbox and bounce each pending envelope
+        9. Emit lifecycle event
+        10. Detached shutdown (fire-and-forget, must NOT await own task)
+        """
+        # 1. Idempotency check
+        info = self._info.get(teammate_id)
+        if info is None or not info.alive:
+            return
+
+        teammate = self._teammates.get(teammate_id)
+
+        # 2. End turn (clears current_turn_started_at_wallclock)
+        if teammate is not None:
+            teammate._end_turn()
+
+        # 3. Capture in-flight envelope (SdkTeammate sets this; others don't)
+        in_flight = (
+            getattr(teammate, "_death_in_flight_envelope", None)
+            if teammate is not None
+            else None
+        )
+
+        # 4. Snapshot activity at death.
+        # SdkTeammate gains these fields in T4; guard for backward compat.
+        if teammate is not None:
+            try:
+                snap = teammate.status_snapshot()
+                last_activity = snap.get("last_activity_at_wallclock")
+                idle_at_death = snap.get("idle_seconds", 0.0)
+            except AttributeError:
+                last_activity = None
+                idle_at_death = None
+        else:
+            last_activity = None
+            idle_at_death = None
+
+        # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
+        self._info[teammate_id] = dataclasses.replace(
+            info,
+            alive=False,
+            died_at_wallclock=time.time(),
+            exit_code=exit_code,
+            last_activity_at_wallclock_at_death=last_activity,
+            idle_seconds_at_death=idle_at_death,
+        )
+
+        # 6. Pop from active set
+        self._teammates.pop(teammate_id, None)
+
+        # 7. Bounce in-flight envelope (if any)
+        if in_flight is not None and isinstance(in_flight, Envelope):
+            await self._bounce_dead(in_flight, teammate_id, exit_code)
+
+        # 8. Drain inbox; bounce each pending envelope
+        inbox = self._inboxes.pop(teammate_id, None)
+        while inbox is not None:
+            try:
+                pending = inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(pending, Envelope):
+                await self._bounce_dead(pending, teammate_id, exit_code)
+
+        # 9. Emit lifecycle event
+        lifecycle_fields: dict[str, Any] = {"teammate_id": teammate_id}
+        if lifecycle_event_name == "died":
+            lifecycle_fields.update({
+                "exit_code": exit_code,
+                "idle_seconds_at_death": idle_at_death,
+                "last_activity_at_wallclock": last_activity,
+            })
+        else:
+            # "kill" and others preserve event-specific fields (e.g., reason)
+            lifecycle_fields.update(lifecycle_extra)
+        self._sink.write_lifecycle(lifecycle_event_name, lifecycle_fields)
+
+        # 10. Detached shutdown — do NOT await (handler must not cancel its own task)
+        if teammate is not None:
+            loop = asyncio.get_event_loop()
+            _t = teammate  # capture for closure
+
+            async def _safe_shutdown() -> None:
+                try:
+                    await _t.shutdown()
+                except Exception as exc:
+                    logger.warning(
+                        "shutdown error for teammate %s: %s", teammate_id, exc
+                    )
+
+            loop.create_task(_safe_shutdown())
+
+    async def _bounce_dead(
+        self,
+        env: Envelope,
+        dead_id: str,
+        exit_code: int | None,
+    ) -> None:
+        """Send a teammate_dead error envelope back to env's sender."""
+        info = self._info.get(dead_id)
+        died_at = info.died_at_wallclock if info else None
+        msg = f"teammate {dead_id!r} is dead"
+        if died_at is not None:
+            msg += f"; died_at={died_at:.3f}"
+        if exit_code is not None:
+            msg += f"; exit_code={exit_code}"
+        bounce = Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=dead_id,
+            recipient=env.sender,
+            timestamp=time.time(),
+            payload={"error": "teammate_dead", "message": msg},
+        )
+        try:
+            await self.send(bounce)
+        except (UnknownTeammateError, TeammateAlreadyDeadError):
+            # Sender is also dead or unknown — log at INFO and drop.
+            logger.info(
+                "dead-bounce to %r dropped: sender is dead or unknown", env.sender
+            )
+
+    async def _handle_teammate_death(
+        self,
+        teammate_id: str,
+        exit_code: int | None,
+    ) -> None:
+        """Single-writer death handler for unexpected subprocess death. Idempotent."""
+        await self._tombstone_teammate(teammate_id, exit_code, "died")
+
     async def kill_teammate(
         self, teammate_id: str, reason: str = "explicit",
     ) -> None:
         if teammate_id not in self._teammates:
+            # Already tombstoned → distinct error from never-existed
+            if teammate_id in self._info:
+                raise TeammateAlreadyDeadError(teammate_id)
             raise UnknownTeammateError(teammate_id)
-        teammate = self._teammates.pop(teammate_id)
-        self._info.pop(teammate_id, None)
-        try:
-            await teammate.shutdown()
-        finally:
-            self._inboxes.pop(teammate_id, None)
-            self._sink.write_lifecycle("kill", {
-                "teammate_id": teammate_id, "reason": reason,
-            })
+        await self._tombstone_teammate(teammate_id, None, "kill", reason=reason)
 
     async def shutdown_all(self) -> None:
         teammate_ids = list(self._teammates.keys())
@@ -134,6 +281,12 @@ class Broker:
         """
         if env.id in self._seen_ids:
             return None
+
+        # D6: check tombstone BEFORE _teammates (tombstoned = in _info but NOT in _teammates)
+        info = self._info.get(env.recipient)
+        if info is not None and not info.alive:
+            raise TeammateAlreadyDeadError(env.recipient)
+
         if env.recipient != LEAD_ID and env.recipient not in self._teammates:
             raise UnknownTeammateError(env.recipient)
 
@@ -158,18 +311,23 @@ class Broker:
         sender: str,
         payload: Any,
         id: str | None = None,
-    ) -> list[str]:
-        """Fan-out one envelope per teammate (sender excluded). Returns message ids."""
-        recipients = [tid for tid in self._teammates.keys() if tid != sender]
+    ) -> dict[str, Any]:
+        """Fan-out one envelope per alive teammate (sender excluded).
+
+        Returns dict with ``message_ids`` (delivered ids) and
+        ``skipped_dead`` (list of tombstoned teammate ids skipped).
+        """
+        # D12: filter to alive recipients only
+        alive_recipients = [tid for tid in self._teammates if tid != sender]
+        dead_recipients = [
+            tid for tid, info in self._info.items()
+            if not info.alive and tid != sender
+        ]
+
         out_ids: list[str] = []
-        for rid in recipients:
+        for rid in alive_recipients:
             mid = id if id is not None else new_message_id()
-            # If a single id was supplied for broadcast, only the first
-            # recipient receives it; subsequent are deduped. Generate
-            # fresh ids per-recipient unless caller intends dedup.
             if id is not None:
-                # Per-recipient id derivation keeps each delivery distinct
-                # while preserving the "supplied root id" for tracing.
                 mid = f"{id}:{rid}"
             env = Envelope(
                 id=mid,
@@ -182,7 +340,7 @@ class Broker:
             stamped = await self.send(env)
             if stamped is not None:
                 out_ids.append(stamped.id)
-        return out_ids
+        return {"message_ids": out_ids, "skipped_dead": dead_recipients}
 
     # ---------- reads ----------
 
@@ -198,4 +356,62 @@ class Broker:
         return result
 
     def list_crew(self) -> list[TeammateInfo]:
+        """Return all TeammateInfo entries, including tombstoned (alive=False) teammates."""
         return list(self._info.values())
+
+    def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
+        """Read-only status for alive or tombstoned teammates.
+
+        Returns a uniform payload shape regardless of alive/dead status.
+        Unknown id returns an error dict matching the existing unknown_teammate shape.
+
+        Note: For alive teammates, ``idle_seconds`` reflects SDK stream
+        activity only. Long-running tool execution (Bash, file IO, MCP calls)
+        appears as idle because ``receive_response()`` yields no events during
+        tool execution. Use ``current_turn_started_at_wallclock`` alongside
+        ``alive`` to distinguish "working but quiet" from "genuinely wedged".
+        Tool-level telemetry is Feature #8.
+        """
+        info = self._info.get(teammate_id)
+        if info is None:
+            return {
+                "error": "unknown_teammate",
+                "message": f"no teammate with id {teammate_id!r}",
+            }
+
+        if not info.alive:
+            # Short-circuit: all data comes from the frozen tombstone (D3).
+            # Do NOT call status_snapshot() — the teammate was popped from _teammates.
+            # Force current_turn_started_at_wallclock=None (D3 defense-in-depth on top of
+            # _end_turn() in the death handler).
+            return {
+                "teammate_id": teammate_id,
+                "name": info.name,
+                "role": info.role,
+                "alive": False,
+                "spawned_at": info.spawned_at,
+                "last_activity_at_wallclock": info.last_activity_at_wallclock_at_death,
+                "current_turn_started_at_wallclock": None,
+                "idle_seconds": info.idle_seconds_at_death,
+                "died_at_wallclock": info.died_at_wallclock,
+                "exit_code": info.exit_code,
+                "last_activity_at_wallclock_at_death": info.last_activity_at_wallclock_at_death,
+            }
+
+        # Alive: combine TeammateInfo lifecycle fields with live activity snapshot
+        teammate = self._teammates.get(teammate_id)
+        snap = teammate.status_snapshot() if teammate is not None else {}
+
+        return {
+            "teammate_id": teammate_id,
+            "name": info.name,
+            "role": info.role,
+            "alive": True,
+            "spawned_at": info.spawned_at,
+            "last_activity_at_wallclock": snap.get("last_activity_at_wallclock"),
+            "current_turn_started_at_wallclock": snap.get("current_turn_started_at_wallclock"),
+            "idle_seconds": snap.get("idle_seconds"),
+            "died_at_wallclock": None,
+            "exit_code": None,
+            "last_activity_at_wallclock_at_death": None,
+        }
