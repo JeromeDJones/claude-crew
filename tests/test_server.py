@@ -241,6 +241,16 @@ class TestGetTeammateStatusTool:
             assert status["died_at_wallclock"] is None
             assert status["exit_code"] is None
             assert "idle_seconds" in status
+            # F8 additions (T4): tool-tracking fields must be present
+            assert "current_tools" in status
+            assert "current_tool" in status
+            assert "current_tool_count" in status
+            assert "last_tool_completed" in status
+            assert "redaction_version" in status
+            assert status["current_tools"] == []
+            assert status["current_tool"] is None
+            assert status["current_tool_count"] == 0
+            assert status["last_tool_completed"] is None
 
     async def test_killed_teammate_returns_dead_status(self) -> None:
         """D11: get_teammate_status after kill returns alive=False with death record."""

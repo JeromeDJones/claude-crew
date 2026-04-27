@@ -12,7 +12,7 @@ import dataclasses
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from claude_crew.envelope import Envelope, new_message_id
@@ -44,6 +44,11 @@ class TeammateInfo:
     exit_code: int | None = None
     last_activity_at_wallclock_at_death: float | None = None
     idle_seconds_at_death: float | None = None
+    # F8: last cleanly-bracketed tool (Pre→Post pair) observed before death/kill.
+    # Populated by _tombstone_teammate from status_snapshot() BEFORE _close_open_tools
+    # runs, so abandoned tools (outcome="abandoned"/"killed") never update this field
+    # (SC-14 / D9). None if no tool completed cleanly before death.
+    last_tool_completed_at_death: dict[str, Any] | None = None
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -143,18 +148,26 @@ class Broker:
         )
 
         # 4. Snapshot activity at death.
-        # SdkTeammate gains these fields in T4; guard for backward compat.
+        # Called BEFORE _close_open_tools (between steps 8-9) so that
+        # last_tool_completed reflects the last *clean* Pre→Post pair — not
+        # the abandoned/killed tools that _close_open_tools is about to emit.
+        # (SC-14 / D9: abandoned tools go to the transcript, not status payload.)
         if teammate is not None:
             try:
                 snap = teammate.status_snapshot()
                 last_activity = snap.get("last_activity_at_wallclock")
                 idle_at_death = snap.get("idle_seconds", 0.0)
+                last_tool_completed_at_death: dict[str, Any] | None = snap.get(
+                    "last_tool_completed"
+                )
             except AttributeError:
                 last_activity = None
                 idle_at_death = None
+                last_tool_completed_at_death = None
         else:
             last_activity = None
             idle_at_death = None
+            last_tool_completed_at_death = None
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(
@@ -164,6 +177,7 @@ class Broker:
             exit_code=exit_code,
             last_activity_at_wallclock_at_death=last_activity,
             idle_seconds_at_death=idle_at_death,
+            last_tool_completed_at_death=last_tool_completed_at_death,
         )
 
         # 6. Pop from active set
@@ -182,6 +196,16 @@ class Broker:
                 break
             if isinstance(pending, Envelope):
                 await self._bounce_dead(pending, teammate_id, exit_code)
+
+        # 8b. Close open tools before lifecycle event (SC-14 / D9).
+        # Emits one tool_end transcript record (outcome="abandoned" for death,
+        # "killed" for kill) per still-open tool_use_id.  Must run BEFORE the
+        # lifecycle line so transcript replay sees tool_end < lifecycle:died/kill.
+        if teammate is not None:
+            close_reason: Literal["death", "kill"] = (
+                "death" if lifecycle_event_name == "died" else "kill"
+            )
+            teammate._close_open_tools(reason=close_reason)
 
         # 9. Emit lifecycle event
         lifecycle_fields: dict[str, Any] = {"teammate_id": teammate_id}
@@ -365,12 +389,18 @@ class Broker:
         Returns a uniform payload shape regardless of alive/dead status.
         Unknown id returns an error dict matching the existing unknown_teammate shape.
 
-        Note: For alive teammates, ``idle_seconds`` reflects SDK stream
-        activity only. Long-running tool execution (Bash, file IO, MCP calls)
-        appears as idle because ``receive_response()`` yields no events during
-        tool execution. Use ``current_turn_started_at_wallclock`` alongside
-        ``alive`` to distinguish "working but quiet" from "genuinely wedged".
-        Tool-level telemetry is Feature #8.
+        F8 additions — always present on alive and tombstoned payloads:
+            current_tools: list of in-flight tool dicts, each with
+                {tool_name, tool_use_id, started_at_wallclock, args_summary}.
+                Empty list for tombstoned teammates.
+            current_tool: convenience accessor — last-started tool name, or
+                null if no tool is in flight (SC-9 last-started semantics).
+            current_tool_count: len(current_tools).
+            last_tool_completed: dict from the most recent fully-bracketed
+                Pre→Post pair, or null if none completed cleanly.  Tombstoned
+                teammates preserve the last clean value captured before death.
+            redaction_version: active redaction schema version, or null for
+                tombstoned teammates.
         """
         info = self._info.get(teammate_id)
         if info is None:
@@ -396,6 +426,13 @@ class Broker:
                 "died_at_wallclock": info.died_at_wallclock,
                 "exit_code": info.exit_code,
                 "last_activity_at_wallclock_at_death": info.last_activity_at_wallclock_at_death,
+                # F8 additions (D11 / SC-7): tools are gone after death; last
+                # cleanly-finished tool is preserved in the tombstone (SC-14).
+                "current_tools": [],
+                "current_tool": None,
+                "current_tool_count": 0,
+                "last_tool_completed": info.last_tool_completed_at_death,
+                "redaction_version": None,
             }
 
         # Alive: combine TeammateInfo lifecycle fields with live activity snapshot
@@ -414,4 +451,12 @@ class Broker:
             "died_at_wallclock": None,
             "exit_code": None,
             "last_activity_at_wallclock_at_death": None,
+            # F8 additions (D11 / SC-7): surface tool-tracking fields from
+            # status_snapshot().  All keys are always present; values are null
+            # when no tool has fired yet.
+            "current_tools": snap.get("current_tools", []),
+            "current_tool": snap.get("current_tool"),
+            "current_tool_count": snap.get("current_tool_count", 0),
+            "last_tool_completed": snap.get("last_tool_completed"),
+            "redaction_version": snap.get("redaction_version"),
         }
