@@ -198,7 +198,7 @@ class Broker:
 
         # 10. Detached shutdown — do NOT await (handler must not cancel its own task)
         if teammate is not None:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             _t = teammate  # capture for closure
 
             async def _safe_shutdown() -> None:

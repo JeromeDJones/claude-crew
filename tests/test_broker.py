@@ -8,6 +8,7 @@ own contract.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -20,7 +21,7 @@ from claude_crew.broker import (
     UnknownTeammateError,
 )
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.teammate import Teammate
+from claude_crew.teammate import StubTeammate, Teammate
 
 
 class _NoopTeammate(Teammate):
@@ -505,3 +506,78 @@ class TestTombstoneSemantics:
             "last_activity_at_wallclock_at_death",
         ):
             assert key in status, f"missing field: {key}"
+
+
+# ---------- T5 FIX-NOW: transcript assertions (sentinel inner-4) ----------
+
+
+def _stub_factory_for_transcript(id: str, name: str, role: str, **kw: Any) -> StubTeammate:
+    return StubTeammate(id=id, name=name, role=role)
+
+
+def _read_transcript_lines(tmp_path) -> list[dict]:
+    files = list(tmp_path.iterdir())
+    assert files, "no transcript file found"
+    return [json.loads(line) for line in files[0].read_text().splitlines() if line.strip()]
+
+
+class TestTranscriptAssertions:
+    """SC-6 and SC-9: transcript content verification (FIX-NOW from sentinel inner-4)."""
+
+    async def test_kill_transcript_writes_kill_not_died(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """SC-6: explicit kill emits lifecycle event 'kill', NOT 'died'."""
+        monkeypatch.delenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", raising=False)
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(
+                role="r", name=None, factory=_stub_factory_for_transcript,
+            )
+            await b.kill_teammate(tid)
+        finally:
+            await b.shutdown_all()
+
+        lines = _read_transcript_lines(tmp_path)
+        lifecycle_events = [
+            l["event"] for l in lines if l.get("kind") == "lifecycle"
+        ]
+        assert "kill" in lifecycle_events, f"expected 'kill' in events, got {lifecycle_events}"
+        assert "died" not in lifecycle_events, (
+            f"'died' must not appear for explicit kill, got {lifecycle_events}"
+        )
+        kill_line = next(
+            l for l in lines
+            if l.get("kind") == "lifecycle" and l.get("event") == "kill"
+        )
+        assert kill_line["teammate_id"] == tid
+
+    async def test_lifecycle_died_carries_death_record_fields(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """SC-9: _handle_teammate_death emits 'died' with exit_code,
+        idle_seconds_at_death, and last_activity_at_wallclock.
+        """
+        monkeypatch.delenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", raising=False)
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(
+                role="r", name=None, factory=_stub_factory_for_transcript,
+            )
+            await b._handle_teammate_death(tid, exit_code=137)
+        finally:
+            await b.shutdown_all()
+
+        lines = _read_transcript_lines(tmp_path)
+        died_lines = [
+            l for l in lines
+            if l.get("kind") == "lifecycle" and l.get("event") == "died"
+        ]
+        assert len(died_lines) == 1, f"expected exactly 1 'died' line, got {len(died_lines)}"
+        d = died_lines[0]
+        assert d["exit_code"] == 137, f"exit_code mismatch: {d}"
+        assert "idle_seconds_at_death" in d, f"missing idle_seconds_at_death: {d}"
+        assert "last_activity_at_wallclock" in d, f"missing last_activity_at_wallclock: {d}"
+        assert d["teammate_id"] == tid
