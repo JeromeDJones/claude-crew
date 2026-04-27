@@ -1,7 +1,8 @@
 # Feature: Tool-Execution Telemetry via SDK Hooks (Feature #8)
 
-**Status**: Planning (Phase 1)
+**Status**: Phase 4 complete; awaiting Jerome's manual test → merge.
 **Created**: 2026-04-27
+**Phase 4 completed**: 2026-04-27 (same day; Phases 1–4 all in one session via SDD with parallel-track sentinel + co-architect review at every gate).
 
 ---
 
