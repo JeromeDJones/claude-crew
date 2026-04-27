@@ -8,6 +8,7 @@ own contract.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import time
 from typing import Any
@@ -39,8 +40,14 @@ class _NoopTeammate(Teammate):
         self._last_activity_monotonic = time.monotonic()
         self._last_activity_wallclock = time.time()
         self._current_turn_started_at_wallclock: float | None = None
+        # F8: tool-tracking fields (required by status_snapshot())
+        self._broker = None
+        self._tool_uses: dict = {}
+        self._recently_closed_tool_use_ids: collections.deque = collections.deque(maxlen=64)
+        self._last_tool_completed = None
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
+        self._broker = broker
         self._inbox = inbox
         self._task = asyncio.create_task(self._run())
 

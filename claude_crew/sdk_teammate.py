@@ -21,6 +21,7 @@ liveness poll task.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -194,6 +195,11 @@ class SdkTeammate(Teammate):
         self._last_activity_monotonic = time.monotonic()
         self._last_activity_wallclock = time.time()
         self._current_turn_started_at_wallclock: float | None = None
+        # F8: tool-tracking state (base class fields — T3 hooks populate these).
+        # Mirror what StubTeammate.__init__ does; T3 will consume these.
+        self._tool_uses: dict[str, Any] = {}
+        self._recently_closed_tool_use_ids: collections.deque[str] = collections.deque(maxlen=64)
+        self._last_tool_completed: dict[str, Any] | None = None
 
         # Liveness state (T4/D2/D4).
         self._death_suspected: bool = False

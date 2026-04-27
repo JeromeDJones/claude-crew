@@ -244,3 +244,72 @@ class TestTranscriptSinkWrites:
             assert list(tmp_path.iterdir()) == []
         finally:
             sink.close()
+
+    def test_write_tool_event_appends_jsonl_line(self, enable_transcripts) -> None:
+        """SC-5: write_tool_event appends a well-formed JSONL line.
+
+        BDD scenario: TranscriptSink.write_tool_event appends a JSONL line.
+          When write_tool_event("tool_start", {...}) is called
+          Then the transcript file gains one line
+          And that line is valid JSON with kind="tool_start", v=1, ts present, crew_id present
+        """
+        sink = TranscriptSink(crew_id="abc12345")
+        try:
+            sink.write_tool_event("tool_start", {
+                "teammate_id": "t-x",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_01abc",
+                "started_at_wallclock": 1000.0,
+                "args_summary": "command=pytest tests/ -v",
+                "redaction_version": "v1",
+            })
+            content = sink.path.read_text()
+            lines = [ln for ln in content.splitlines() if ln]
+            assert len(lines) == 1
+            obj = json.loads(lines[0])
+            assert obj["v"] == 1
+            assert obj["kind"] == "tool_start"
+            assert obj["crew_id"] == "abc12345"
+            assert "ts" in obj
+            assert obj["teammate_id"] == "t-x"
+            assert obj["tool_name"] == "Bash"
+            assert obj["tool_use_id"] == "toolu_01abc"
+            assert obj["args_summary"] == "command=pytest tests/ -v"
+            assert obj["redaction_version"] == "v1"
+        finally:
+            sink.close()
+
+    def test_write_tool_end_event(self, enable_transcripts) -> None:
+        """write_tool_event works for tool_end events with outcome/duration fields."""
+        sink = TranscriptSink(crew_id="abc12345")
+        try:
+            sink.write_tool_event("tool_end", {
+                "teammate_id": "t-x",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_01abc",
+                "finished_at_wallclock": 1005.0,
+                "duration_seconds": 5.0,
+                "outcome": "ok",
+                "error_summary": None,
+                "redaction_version": "v1",
+            })
+            obj = json.loads(sink.path.read_text().strip())
+            assert obj["kind"] == "tool_end"
+            assert obj["outcome"] == "ok"
+            assert obj["duration_seconds"] == 5.0
+            assert obj["error_summary"] is None
+        finally:
+            sink.close()
+
+    def test_write_tool_event_disabled_is_silent_no_op(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """write_tool_event honours CLAUDE_CREW_TRANSCRIPT_DISABLED=1."""
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", "1")
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        sink = TranscriptSink(crew_id="abc12345")
+        try:
+            sink.write_tool_event("tool_start", {"teammate_id": "t-x", "tool_name": "Bash"})
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            sink.close()

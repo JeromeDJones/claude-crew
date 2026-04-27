@@ -26,7 +26,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO
 
 
 def resolve_transcript_dir() -> Path:
@@ -100,6 +100,35 @@ class TranscriptSink:
             "ts": time.time(),
             "crew_id": self.crew_id,
             "event": event,
+        }
+        if fields:
+            record.update(fields)
+        self._write(record)
+
+    def write_tool_event(
+        self,
+        event: Literal["tool_start", "tool_end"],
+        fields: dict[str, Any],
+    ) -> None:
+        """Append a tool-event record to the transcript.
+
+        Mirrors ``write_lifecycle`` shape exactly — synchronous, best-effort,
+        line-buffered append.  The ``event`` value becomes the ``kind`` field
+        so downstream consumers can distinguish ``tool_start`` / ``tool_end``
+        from ``lifecycle`` / ``envelope`` records without a sub-field lookup.
+
+        Args:
+            event: ``"tool_start"`` (PreToolUse) or ``"tool_end"`` (Post* / abandon / kill).
+            fields: Event-specific data — ``teammate_id``, ``tool_name``,
+                ``tool_use_id``, timestamps, outcome, etc.
+        """
+        if self.disabled or self._fp is None:
+            return
+        record: dict[str, Any] = {
+            "v": 1,
+            "kind": event,
+            "ts": time.time(),
+            "crew_id": self.crew_id,
         }
         if fields:
             record.update(fields)
