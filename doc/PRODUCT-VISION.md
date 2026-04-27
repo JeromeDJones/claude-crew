@@ -2,7 +2,7 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-26
-**Features Implemented**: 5 (MVP complete); 2 post-MVP substrate items (#6, #7) routed next from Feature #5 retro
+**Features Implemented**: 5 (MVP complete); 3 post-MVP substrate items (#6, #7, #8) routed next from Feature #5 retro + Feature #6 Phase 2 design discussion
 
 ---
 
@@ -173,12 +173,13 @@ These are claims the architecture leans on but that we haven't empirically confi
 
 ### Post-MVP Substrate (v1.1)
 
-Routed from Feature #5's retro substrate findings. Both items are direct responses to bugs/gaps that paced the MMM-35 real-task run. Build order: #6 first (eliminates the broker-eats-replies pattern that paced every turn of #5), then #7 (closes the smaller observability gap; cheap follow-up).
+Routed from Feature #5's retro substrate findings, plus #8 added during Feature #6 Phase 2 design (tool-execution opacity surfaced as a real gap). Build order: **#6 first** (eliminates the broker-eats-replies pattern that paced every turn of #5), **then #7** (closes the smaller observability gap; cheap follow-up), **then #8** (closes the tool-execution opacity gap; depends on #6's `get_teammate_status` surface). All three together = full substrate observability for the next real-task run.
 
 | # | Feature | Capability | Crit | Size | Status | Notes |
 |---|---|---|---|---|---|---|
 | 6 | **Telemetry-based teammate liveness.** Replace `TURN_TIMEOUT_SECONDS` hard wall in `claude_crew/sdk_teammate.py` with stream-activity stamping — every event yielded by `receive_response` updates `last_activity_at`. New MCP tool `get_teammate_status(id)` returns `{alive, last_activity_at, current_turn_started_at}`. Add a subprocess-PID liveness probe so genuine death emits `lifecycle: died`. Drop the wall timeout (or move to a 1hr backstop). Operator policy ("no activity > X min → ping") moves to lead code where it belongs. | 1, 4 | 5 | M | next | The structural fix for S1/S2 substrate findings from #5. Tactical fix already shipped at 600s in `b9bc611`; that band-aid still let two timeouts fire during Phase 4. As long as a hard timeout exists on the wire, S2 (stale-response delivery) stays latent and reappears on any teammate doing long work. Eliminating the timeout makes S2 a non-issue by construction. Probably warrants a full SDD pass. |
 | 7 | **Subagent-activity envelopes.** Emit `subagent-spawn` and `subagent-result` envelopes from teammates so the lead can observe capability #2 in real time. Closes the Feature #4 v1 documented limit ("subagent activity does not cross the broker"). Verified in #5 retro that capability #2 IS being exercised in real production work — just not bus-observable; we had to confirm by directly asking each sentinel teammate after the fact. | 2, 4 | 5 | S | next | Smaller than #6. Plan-mode-sized. Sequence: ship #6 first, then run a real-task validation (MMM-4b is a clean candidate), then ship #7 once we have a second real-task data point's worth of signal on what the bus should surface. |
+| 8 | **Tool-execution telemetry via SDK hooks.** Register `PreToolUse` and `PostToolUse` hooks on every `SdkTeammate` so the substrate observes tool boundaries directly instead of inferring them from stream gaps. Adds `current_tool`, `current_tool_started_at_wallclock`, `current_tool_args_summary`, `last_tool_duration` to the teammate status payload. Each tool start/end is also stamped as activity (closes the "Bash runs for 20min, SDK stream is silent" gap), and each tool call lands in the JSONL transcript with name + duration + outcome. | 1, 4 | 5 | S-M | next | Identified during Feature #6 Phase 2 design discussion (2026-04-26): the substrate's only observability gap after #6 is *tool execution opacity* — `idle_seconds` climbs during a long Bash invocation even though the subprocess is healthy and working. Hooks fix this directly. Depends on #6 shipping (extends `get_teammate_status` surface). 30-min Phase 1 spike: confirm Agent SDK exposes hooks the same way Claude Code does (95% sure it does via `ClaudeAgentOptions(hooks=...)` — verify before committing). |
 
 ### Deferred (v2+)
 

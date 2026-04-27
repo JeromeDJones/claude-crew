@@ -1,13 +1,15 @@
 """Implementation-level tests for SdkTeammate.
 
-The SDK's ClaudeSDKClient is monkey-patched with FakeSDKClient. Tests
-exercise the SdkTeammate against a real Broker — same approach as
-test_stub_teammate.py.
+The SDK's ClaudeSDKClient is monkey-patched with FakeSDKClient or
+ProgrammableSDKClient. Tests exercise the SdkTeammate against a real
+Broker — same approach as test_stub_teammate.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+import types
 from typing import Any
 
 import pytest
@@ -16,6 +18,7 @@ from claude_agent_sdk.types import (
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
+    TaskNotificationMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -24,6 +27,7 @@ from claude_crew import sdk_teammate as sdk_module
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.sdk_teammate import (
+    INTERRUPT_GRACE_SECONDS,
     SHUTDOWN_TIMEOUT_SECONDS,
     SdkTeammate,
     _classify_error,
@@ -31,6 +35,7 @@ from claude_crew.sdk_teammate import (
     RateLimitedError,
 )
 from tests.fakes.sdk import FakeSDKClient, text_response
+from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
 
 
 # ---------- helpers ----------
@@ -328,18 +333,25 @@ class TestErrorPaths:
         assert "empty prompt" in msgs[0].payload.get("message", "")
         assert fake.queries_received == []  # SDK not called
 
-    async def test_response_hangs_produces_timeout_error(
+    async def test_response_hangs_produces_backstop_timeout_error(
         self, broker, monkeypatch,
     ) -> None:
-        # Patch the timeout to a small value so the test runs fast.
-        monkeypatch.setattr(sdk_module, "TURN_TIMEOUT_SECONDS", 0.1)
+        """Backstop fires when response hangs; backstop_timeout error sent.
 
-        fake = FakeSDKClient(
-            scripted_responses=[
-                [],  # turn 1 hangs (no response yielded)
-                text_response("turn-2-ok"),  # turn 2 succeeds
-            ],
-            response_hangs=[True, False],
+        Updated from the old TURN_TIMEOUT_SECONDS-based test. Now uses
+        ProgrammableSDKClient (which has interrupt()) and env-var backstop
+        override so the test completes in under a second.
+        """
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "0.1")
+        # Keep POST_INTERRUPT_DRAIN short so the drain attempt doesn't delay
+        # the test — FakeSDKClient's _hang stays True after interrupt(), so
+        # the drain would also hang for the full POST_INTERRUPT_DRAIN_SECONDS.
+        monkeypatch.setattr(sdk_module, "POST_INTERRUPT_DRAIN_SECONDS", 0.05)
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[[]],
+            response_hangs=[True],
+            interrupt_behavior="normal",
         )
         _patch_sdk(monkeypatch, fake)
 
@@ -350,20 +362,12 @@ class TestErrorPaths:
             id=new_message_id(), seq=0,
             sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="q1",
         ))
-        await _wait_for_lead_messages(broker, 1, timeout=1.0)
+        await _wait_for_lead_messages(broker, 1, timeout=3.0)
 
         msgs = broker.get_messages(recipient=LEAD_ID)
-        assert msgs[0].payload.get("error") == "invalid_response"
-        assert "no response" in msgs[0].payload.get("message", "").lower()
-
-        # Confirm the loop is still alive: send another message.
-        await broker.send(Envelope(
-            id=new_message_id(), seq=0,
-            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="q2",
-        ))
-        await _wait_for_lead_messages(broker, 2, timeout=1.0)
-        msgs = broker.get_messages(recipient=LEAD_ID)
-        assert msgs[1].payload.get("text") == "turn-2-ok"
+        assert msgs[0].payload.get("error") == "backstop_timeout"
+        assert "backstop fired" in msgs[0].payload.get("message", "")
+        assert len(fake.interrupt_calls) == 1
 
     async def test_empty_text_response_yields_invalid_response(
         self, broker, monkeypatch,
@@ -412,9 +416,23 @@ class TestShutdown:
         await _wait_for_lead_messages(broker, 1)
         await broker.kill_teammate(tid)
 
+        # Broker uses detached create_task(shutdown()) — give it time to run.
+        for _ in range(50):
+            if fake.aexit_count >= 1:
+                break
+            await asyncio.sleep(0.05)
+
         assert fake.aenter_count == 1
         assert fake.aexit_count == 1
         # No teammate task should be alive.
+        for _ in range(50):
+            sdk_tasks = [
+                t for t in asyncio.all_tasks()
+                if t.get_name().startswith("sdk-")
+            ]
+            if all(t.done() for t in sdk_tasks):
+                break
+            await asyncio.sleep(0.05)
         sdk_tasks = [
             t for t in asyncio.all_tasks()
             if t.get_name().startswith("sdk-")
@@ -455,8 +473,369 @@ class TestShutdown:
         elapsed = asyncio.get_event_loop().time() - start
         assert elapsed < 1.5, f"shutdown took {elapsed:.2f}s"
 
+        # Broker uses detached create_task(shutdown()) — poll until tasks done.
+        for _ in range(50):
+            sdk_tasks = [
+                t for t in asyncio.all_tasks()
+                if t.get_name().startswith("sdk-")
+            ]
+            if all(t.done() for t in sdk_tasks):
+                break
+            await asyncio.sleep(0.05)
         sdk_tasks = [
             t for t in asyncio.all_tasks()
             if t.get_name().startswith("sdk-")
         ]
         assert all(t.done() for t in sdk_tasks)
+
+
+# ---------- T4: telemetry-liveness BDD scenarios ----------
+
+
+class TestLivenessTelemetry:
+    """BDD scenarios from Phase 3 T4 Acceptance Criteria."""
+
+    async def test_long_turn_completes_no_wall(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-1: A turn that takes a long time completes without a wall.
+
+        TURN_TIMEOUT_SECONDS must not exist as a module attribute (D10).
+        Backstop is 10s; events have tiny real delays totaling << 10s.
+        """
+        assert not hasattr(sdk_module, "TURN_TIMEOUT_SECONDS"), (
+            "TURN_TIMEOUT_SECONDS was NOT deleted (D10 violated)"
+        )
+
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "10.0")
+        fake = ProgrammableSDKClient(
+            scripted_responses=[text_response("long turn result")],
+            event_timings=[0.01, 0.01],  # real delays; backstop is 10s — no fire
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="heavy",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=5.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert len(msgs) == 1
+        assert msgs[0].payload.get("text") == "long turn result"
+        assert "error" not in msgs[0].payload
+
+    async def test_activity_stamps_advance_per_event(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-3: Every yielded event (including non-AssistantMessage types) stamps activity.
+
+        The stamp callback runs at loop top, BEFORE any continue branch (D1).
+        Even RateLimitEvent and TaskNotificationMessage hit the stamp.
+        """
+        # 5 events: RateLimitEvent, AssistantMessage, TaskNotificationMessage,
+        # AssistantMessage, ResultMessage — each must stamp before any continue.
+        rl_event = RateLimitEvent(
+            rate_limit_info=RateLimitInfo(status="allowed", rate_limit_type="five_hour"),
+            uuid="re-1", session_id="default",
+        )
+        tn_event = TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id="t1",
+            status="completed",
+            output_file="",
+            summary="done",
+            uuid="tn-1",
+            session_id="default",
+        )
+        scripted = [[
+            rl_event,
+            AssistantMessage(content=[TextBlock(text="part1")], model="fake"),
+            tn_event,
+            AssistantMessage(content=[TextBlock(text="part2")], model="fake"),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]]
+        fake = ProgrammableSDKClient(scripted_responses=scripted)
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+
+        # Capture the teammate reference before the turn starts so we can
+        # wrap _stamp_activity to count calls.
+        teammate = broker._teammates[tid]
+        stamp_count = [0]
+        original_stamp = teammate._stamp_activity
+
+        def counting_stamp() -> None:
+            stamp_count[0] += 1
+            original_stamp()
+
+        teammate._stamp_activity = counting_stamp  # type: ignore[method-assign]
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="go",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=2.0)
+
+        # 5 events from drain + 1 from _begin_turn = 6 minimum.
+        # (All 5 drain events stamp because stamp is at loop top before continue.)
+        assert stamp_count[0] >= 6, (
+            f"expected >=6 stamps (5 drain + 1 begin_turn), got {stamp_count[0]}"
+        )
+
+    async def test_no_s2_bleed_across_turns(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-7: Turn N+1 receives turn N+1's response — no stale-response bleed."""
+        fake = ProgrammableSDKClient(
+            scripted_responses=[
+                text_response("alpha"),
+                text_response("beta"),
+            ],
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0, sender=LEAD_ID, recipient=tid,
+            timestamp=0.0, payload="q1",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=2.0)
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0, sender=LEAD_ID, recipient=tid,
+            timestamp=0.0, payload="q2",
+        ))
+        await _wait_for_lead_messages(broker, 2, timeout=2.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("text") == "alpha"
+        assert msgs[1].payload.get("text") == "beta"
+        # Explicitly verify bleed didn't occur.
+        assert msgs[1].payload.get("text") != "alpha"
+
+    async def test_backstop_fires_interrupt_succeeds(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-11: Backstop fires, interrupt succeeds — backstop_timeout error sent."""
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "0.2")
+        # Shorten drain so FakeSDKClient's sticky _hang=True doesn't stall test.
+        monkeypatch.setattr(sdk_module, "POST_INTERRUPT_DRAIN_SECONDS", 0.05)
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[[]],
+            response_hangs=[True],
+            interrupt_behavior="normal",
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="go",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=5.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "backstop_timeout"
+        # Message should indicate interrupt was sent (succeeded).
+        assert "sent" in msgs[0].payload.get("message", "")
+        assert len(fake.interrupt_calls) == 1
+
+    async def test_backstop_interrupt_hangs_escalates_to_death_suspected(
+        self, broker, monkeypatch,
+    ) -> None:
+        """D4 co-architect: hung interrupt → _death_suspected=True."""
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "0.2")
+        monkeypatch.setenv("CLAUDE_CREW_LIVENESS_POLL_SECONDS", "30.0")  # keep poll out of the way
+        # Override INTERRUPT_GRACE_SECONDS to make the test fast.
+        monkeypatch.setattr(sdk_module, "INTERRUPT_GRACE_SECONDS", 0.1)
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[[]],
+            response_hangs=[True],
+            interrupt_behavior="hang",
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="go",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=5.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "backstop_timeout"
+        assert "death-suspected" in msgs[0].payload.get("message", "")
+        assert teammate._death_suspected is True
+
+    async def test_backstop_interrupt_raises_escalates(
+        self, broker, monkeypatch,
+    ) -> None:
+        """D4 sentinel: raising interrupt → _death_suspected=True."""
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "0.2")
+        monkeypatch.setenv("CLAUDE_CREW_LIVENESS_POLL_SECONDS", "30.0")
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[[]],
+            response_hangs=[True],
+            interrupt_behavior="raise",
+            interrupt_raises=RuntimeError,
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="go",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=5.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "backstop_timeout"
+        assert "death-suspected" in msgs[0].payload.get("message", "")
+        assert teammate._death_suspected is True
+
+    async def test_subprocess_dies_idle_poll_tombstones_within_window(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-5: Subprocess exits between turns — poll task tombstones within window."""
+        monkeypatch.setenv("CLAUDE_CREW_LIVENESS_POLL_SECONDS", "0.2")
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[],  # no turns; teammate just idles
+            transport_returncode=None,
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+
+        # Give the poll task a moment to start and enter its first sleep.
+        await asyncio.sleep(0.05)
+
+        # Simulate subprocess exit mid-idle.
+        fake._transport._process.returncode = 137
+
+        # Poll task fires every 0.2s; allow 2 poll cycles + margin.
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            info = broker._info.get(tid)
+            if info is not None and not info.alive:
+                break
+            await asyncio.sleep(0.05)
+
+        info = broker._info.get(tid)
+        assert info is not None, "teammate info not found after expected death"
+        assert not info.alive, "teammate should be tombstoned after subprocess exit"
+        assert info.exit_code == 137
+
+    async def test_sdk_death_midturn_handoff_via_in_flight(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-5b clause 1: SDK death mid-turn sets _death_in_flight_envelope;
+        worker does NOT send an error envelope itself.
+        """
+        monkeypatch.setenv("CLAUDE_CREW_LIVENESS_POLL_SECONDS", "30.0")  # keep poll quiet
+
+        # Create a ProcessError-named class so the name-matching logic triggers.
+        class ProcessError(Exception):
+            pass
+
+        fake = ProgrammableSDKClient(
+            scripted_responses=[[]],
+            read_raises=ProcessError,
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        # Capture ref before the turn (after death, teammate is removed from _teammates).
+        teammate = broker._teammates[tid]
+
+        env_id = new_message_id()
+        await broker.send(Envelope(
+            id=env_id, seq=0, sender=LEAD_ID, recipient=tid,
+            timestamp=0.0, payload="go",
+        ))
+
+        # Wait until death_suspected is set by the worker's exception handler.
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while asyncio.get_event_loop().time() < deadline:
+            if teammate._death_suspected:
+                break
+            await asyncio.sleep(0.02)
+
+        assert teammate._death_suspected is True, (
+            "worker should have set _death_suspected on ProcessError"
+        )
+        assert teammate._death_in_flight_envelope is not None, (
+            "worker should have stored the in-flight envelope for the death handler"
+        )
+        # The worker must NOT have sent an error envelope directly.
+        # (The broker's death handler may later bounce it, but the worker is silent.)
+        lead_msgs = broker.get_messages(recipient=LEAD_ID)
+        worker_error_msgs = [
+            m for m in lead_msgs
+            if m.sender == tid and m.payload.get("error") not in (None,)
+        ]
+        assert not worker_error_msgs, (
+            f"worker should not send error envelope on ProcessError, got: {worker_error_msgs}"
+        )
+
+    async def test_probe_error_degrades_open(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-12: OSError on returncode-read → degrade open (alive, WARNING logged)."""
+        monkeypatch.setenv("CLAUDE_CREW_LIVENESS_POLL_SECONDS", "0.1")
+
+        # Create a transport whose _process.returncode raises on access.
+        class _BadProcess:
+            @property
+            def returncode(self) -> int:  # type: ignore[override]
+                raise OSError("transport probe broken")
+
+        fake = ProgrammableSDKClient(scripted_responses=[])
+        # Inject bad transport BEFORE patch so the poll loop reads it.
+        fake._transport = types.SimpleNamespace(_process=_BadProcess())
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+
+        # Allow 3+ poll cycles to elapse (3 * 0.1s = 0.3s; give margin).
+        await asyncio.sleep(0.6)
+
+        # Teammate must still be alive — probe errors degrade open, not dead.
+        info = broker._info.get(tid)
+        assert info is not None, "teammate info missing"
+        assert info.alive, (
+            "teammate should stay alive when probe raises OSError (D5 degrade-open)"
+        )

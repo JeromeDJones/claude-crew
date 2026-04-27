@@ -16,6 +16,7 @@ from claude_crew.auth import validate_auth_or_exit
 from claude_crew.broker import (
     LEAD_ID,
     Broker,
+    TeammateAlreadyDeadError,
     TeammateFactory,
     UnknownTeammateError,
 )
@@ -88,6 +89,14 @@ def make_server(
         )
         try:
             stamped = await broker.send(env)
+        except TeammateAlreadyDeadError:
+            status = broker.get_teammate_status(teammate_id)
+            died_at = status.get("died_at_wallclock")
+            exit_code = status.get("exit_code")
+            return _err(
+                "teammate_dead",
+                f"teammate {teammate_id!r} died at {died_at}; exit_code={exit_code}",
+            )
         except UnknownTeammateError:
             return _err("unknown_teammate", f"no teammate with id {teammate_id!r}")
         if stamped is None:
@@ -96,14 +105,22 @@ def make_server(
 
     @mcp.tool()
     async def broadcast(payload: Any, id: str | None = None) -> dict[str, Any]:
-        """Broadcast a message to every teammate. Sender (lead) does not loop back.
+        """Broadcast a message to every alive teammate. Sender (lead) does not loop back.
+
+        Tombstoned teammates are silently skipped; their ids are reported in
+        ``skipped_dead`` so the caller knows the delivery was partial.
 
         Args:
             payload: Any JSON-serializable value.
             id: Optional root id; per-recipient ids derive from it.
         """
-        ids = await broker.broadcast(sender=LEAD_ID, payload=payload, id=id)
-        return {"message_ids": ids, "delivered_to": len(ids)}
+        result = await broker.broadcast(sender=LEAD_ID, payload=payload, id=id)
+        ids = result["message_ids"]
+        return {
+            "message_ids": ids,
+            "delivered_to": len(ids),
+            "skipped_dead": result["skipped_dead"],
+        }
 
     @mcp.tool()
     async def get_messages(
@@ -125,7 +142,7 @@ def make_server(
 
     @mcp.tool()
     async def list_crew() -> dict[str, Any]:
-        """List all currently spawned teammates."""
+        """List all spawned teammates (alive and tombstoned)."""
         return {
             "teammates": [
                 {
@@ -141,12 +158,31 @@ def make_server(
 
     @mcp.tool()
     async def kill_teammate(teammate_id: str) -> dict[str, Any]:
-        """Terminate a teammate. Subsequent send_to calls will fail."""
+        """Terminate a teammate. Subsequent send_to calls will return teammate_dead."""
         try:
             await broker.kill_teammate(teammate_id)
         except UnknownTeammateError:
             return _err("unknown_teammate", f"no teammate with id {teammate_id!r}")
         return {"ok": True}
+
+    @mcp.tool()
+    async def get_teammate_status(teammate_id: str) -> dict[str, Any]:
+        """Return live or post-mortem status for a teammate.
+
+        Returns the same payload shape whether the teammate is alive or
+        tombstoned, with death-record fields populated only when alive=False.
+
+        Note on ``idle_seconds``: this field reflects SDK stream activity only.
+        Long-running tool execution (Bash, file IO, MCP calls) appears as idle
+        because ``receive_response()`` yields no events during tool execution.
+        Use ``current_turn_started_at_wallclock`` alongside ``alive`` to
+        distinguish "working but quiet" from "genuinely wedged". Tool-level
+        telemetry is Feature #8.
+
+        Args:
+            teammate_id: id from spawn_teammate.
+        """
+        return broker.get_teammate_status(teammate_id)
 
     @mcp.tool()
     async def get_transcript_path() -> dict[str, Any]:

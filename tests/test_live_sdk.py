@@ -159,6 +159,44 @@ class TestClaudeMdLoading:
         )
 
 
+class TestA2ConcurrentInterruptDuringDrain:
+    """A2 live probe: interrupt() is safe to call concurrently with receive_response drain."""
+
+    async def test_interrupt_during_drain(self) -> None:
+        """A2: client.interrupt() does not corrupt or deadlock an active receive_response drain.
+
+        If A2 is wrong (interrupt() is NOT concurrency-safe with an in-flight drain),
+        S2 (stale-response delivery) reappears silently at the 1-hour backstop boundary
+        and is very hard to diagnose. This test makes that assumption explicit and
+        detectable.
+
+        The test issues a slow query, starts draining concurrently, and calls interrupt()
+        after a brief delay. Both drain and interrupt must complete without raising.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+        options = ClaudeAgentOptions(model="claude-haiku-4-5")
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(
+                "Count slowly from 1 to 100, one number per line. Take your time.",
+                session_id="a2-probe",
+            )
+
+            async def drain() -> None:
+                async for _ in client.receive_response():
+                    pass
+
+            async def interrupt_after_delay() -> None:
+                await asyncio.sleep(0.5)
+                await client.interrupt()
+
+            # Both must complete without raising; 30s is generous
+            await asyncio.wait_for(
+                asyncio.gather(drain(), interrupt_after_delay()),
+                timeout=30.0,
+            )
+
+
 class TestMemoryDocExists:
     """SC-5: the empirical doc must exist with the three required sections."""
 

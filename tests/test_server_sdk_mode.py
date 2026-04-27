@@ -100,7 +100,7 @@ class TestSDKModeIntegration:
             send = _content_json(await s.call_tool(
                 "send_to", {"teammate_id": tid, "payload": "x"},
             ))
-            assert send.get("error") == "unknown_teammate"
+            assert send.get("error") == "teammate_dead"
 
 
 # ---------- subprocess: auth gate ----------
