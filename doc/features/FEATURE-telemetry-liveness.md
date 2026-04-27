@@ -1,6 +1,6 @@
 # Feature: Telemetry-Based Teammate Liveness
 
-**Status**: In Progress (Phase 1)
+**Status**: Complete (merged to master 2026-04-27 — commit `5ccdac9`)
 **Created**: 2026-04-26
 **Vision row**: PRODUCT-VISION.md → Post-MVP Substrate → #6
 **Substrate origin**: `doc/research/feature-5-substrate-findings.md` (S1 + S2)
@@ -818,4 +818,56 @@ Scenario: client.interrupt() is safe to call concurrently with active receive_re
 
 ## Phase 5: Completion
 
-*To be filled after Phase 4 completion.*
+### Verification
+
+- [x] Feature works against Phase 1 success criteria — sentinel-p1 final review confirmed all 12 SCs trace to passing tests; A2 live probe (the load-bearing assumption) PASSED in 2.88s against `claude-haiku-4-5`
+- [x] No regressions — 218 non-live tests passing in 9.99s (full suite); zero warnings
+- [x] Spec updated to match implementation — Q7/Q8/Q9 resolved during Phase 2; D1-D12 finalized in Phase 2 review; status header updated to Complete
+- [x] PRODUCT-VISION.md updated — feature pipeline #6 → done (this commit)
+- [x] BACKLOG.md routed — 4 sentinel follow-ups recorded (this commit)
+- [x] Product Journal entry written (this commit)
+- [x] SESSION.md updated for next-session pickup (this commit)
+- [x] Branch merged to master (`5ccdac9`) and pushed
+- [x] Manual testing — Jerome approved 2026-04-27
+
+### Retrospective
+
+**What went well**
+
+1. **Sentinel-p1 reviewed THREE times across the lifecycle** (Phase 1 SCs, Phase 2 spec coverage, inner-4 code, final merge-readiness). Each pass caught real gaps that would have otherwise compounded into Phase 4 surprises. Specifically: Phase 1 sentinel turned 8 SCs into 12 by surfacing cleanup-on-failure gaps; Phase 2 sentinel caught the in-flight envelope handoff gap that would have silently lost requesters; inner-4 sentinel caught the deprecation, missing transcript assertions; final sentinel verified the live A2 probe was rigorous, not hand-wavy.
+2. **Co-architect pushback areas declared upfront** (single-writer rule, backstop ordering, probe scope) became Phase 2 design pillars. The "name three things you'll push back on" prompt at warmup time proved unusually high-leverage — it pre-loaded the design's load-bearing risks before any specific design existed to attach them to.
+3. **Lead/teammate domain split held perfectly.** Lead authored Phase 1/2/3 spec, Phase 4 task briefs, and Phase 5 docs. Teammates wrote ALL production code, ALL tests, ran ALL verification commands. Zero rescue tripwires fired across the entire feature. Same pattern as MMM-35 (Feature #5); same result.
+4. **The honesty scenario for Feature #8 is empirically demonstrated, not described.** Scenario 6 in `test_telemetry_e2e.py` proves `idle_seconds` climbs during silent stream gaps with `current_turn_started_at_wallclock` set and `alive=True`. When Feature #8 ships, this test becomes the regression check that #8 actually closes the gap.
+5. **Spike-before-design paid off.** The "does the SDK expose its subprocess?" spike at Phase 1 gate-time resolved `_transport._process.pid` + `client.interrupt()` empirically before Phase 2 designed against assumptions that might have been wrong. Co-architect-f6 explicitly cited this as why the design didn't deadlock on unknowables. Pattern: when a feature's load-bearing assumption is empirical, route a 30-min spike to the gate, not to Phase 2.
+
+**What was friction**
+
+1. **Substrate dogfooding cost was real.** Three S1 fires (T3, T4, T5 builders) each required a status-ping-with-IGNORE-PRIOR recovery. Each ping cost ~30s of operator wall time and the cognitive overhead of checking `git diff --stat` to verify the teammate was alive. Cost of building Feature #6 included experiencing Feature #6's bug 3 times. Acceptable irony, but quantifiable cost: ~5 minutes total operator overhead across the run.
+2. **T4's longer-than-T3 implementation phase before any staged changes appeared.** T4 had ZERO staged changes at the 7-min mark (vs. T3's 574 staged at the same point) — looked stuck but was deep in source-reading. Status ping confirmed alive. Lesson: when the staged-changes signal is silent, status-ping earlier (3-4min) rather than waiting for S1 to fire at 10min.
+3. **The "TaskNotificationMessage required 8 positional args, not 3" surprise** in T4 was a real builder-time discovery — SDK docs implied a simpler signature than the actual class. Builder caught and resolved it. No durable lesson except: SDK contract surprises are real.
+4. **T5 builder bypassed the MCP tool surface in e2e tests** despite the Phase 3 spec saying e2e should go through `make_server()`. Sentinel caught this as FOLLOW-UP, not BLOCKER, because the gap is small and `test_server.py` covers the MCP layer separately. Lesson: when a brief specifies "go through public API," cite the file path of the public API explicitly so the builder doesn't shortcut.
+
+**Improvements**
+
+1. **Status-ping at the 4-minute zero-staged-changes mark, not the 10-minute S1-fire mark.** Adopt as a Phase 4 polling discipline: if a builder has zero staged changes by 4 min in, send a non-blocking status ping. Cost: one cheap ping. Benefit: catches stuck-in-reading vs. stuck-on-something-else cases earlier.
+2. **For e2e task briefs, name the public-API entry point file:line.** "Go through `claude_crew/server.py`'s `make_server()` factory and call its tools" is unambiguous; "go through the public API" is interpretable. T5 builder's bypass was reasonable inference from an under-specified phrase.
+3. **The "name three things you'll push back on" warmup prompt for persistent co-architects is portable and worth formalizing.** Adopt for any persistent co-architect spawn. Add to claude-crew teammate-prompt patterns / project rules.
+4. **Pre-Phase-3 grep audit of test contract change** (D11's `unknown_teammate` → `teammate_dead`) was executed by the lead BEFORE drafting Phase 3 tasks, surfaced the 2 tests that needed updating, and routed them as Phase 3 task scope (not Phase 4 surprises). This worked perfectly — formalize as: "before Phase 3 task breakdown, run the test blast-radius grep for any contract change introduced in Phase 2."
+
+**Workflow updates**
+
+- [ ] TEMPLATE.md / SKILL.md: consider adding "status-ping at 4min if zero-staged-changes" to Phase 4 polling discipline (low priority — most useful when actively babysitting builders)
+- [ ] `~/.claude/CLAUDE.md` or claude-crew project rules: capture the "name three things you'll push back on" warmup prompt as a portable co-architect pattern
+- [x] PRODUCT-VISION.md: feature row #6 → done; row #8 already routed during Phase 2 design discussion; row #7 stays next.
+- [x] BACKLOG.md: 4 follow-ups routed (this commit).
+- [x] No new project-level architecture rules emerged that need `.claude/rules/`.
+
+### Cost / time accounting
+
+- **Wall time:** ~6 hours from Phase 1 kickoff to Phase 5 close (started 2026-04-26 evening, completed 2026-04-27)
+- **Token spend:** estimated ~$15-20 across all teammates (5 builders + 1 sentinel + 1 co-architect, all reused)
+- **Teammates spawned:** 7 total (5 builders, 1 persistent sentinel, 1 persistent co-architect)
+- **Substrate timeouts (S1 fires):** 3 — all false positives, all recovered via status-ping
+- **S2 stale responses:** 0
+- **Rescue tripwires fired:** 0
+- **Live SDK probe runs:** 1 (A2), $0.05 estimated, 2.88s wall, PASS

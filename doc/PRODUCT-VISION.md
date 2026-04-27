@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-04-26
-**Features Implemented**: 5 (MVP complete); 3 post-MVP substrate items (#6, #7, #8) routed next from Feature #5 retro + Feature #6 Phase 2 design discussion
+**Last Updated**: 2026-04-27
+**Features Implemented**: 6 (MVP + #6 telemetry-based liveness); #7 next, #8 follows
 
 ---
 
@@ -177,7 +177,7 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 
 | # | Feature | Capability | Crit | Size | Status | Notes |
 |---|---|---|---|---|---|---|
-| 6 | **Telemetry-based teammate liveness.** Replace `TURN_TIMEOUT_SECONDS` hard wall in `claude_crew/sdk_teammate.py` with stream-activity stamping — every event yielded by `receive_response` updates `last_activity_at`. New MCP tool `get_teammate_status(id)` returns `{alive, last_activity_at, current_turn_started_at}`. Add a subprocess-PID liveness probe so genuine death emits `lifecycle: died`. Drop the wall timeout (or move to a 1hr backstop). Operator policy ("no activity > X min → ping") moves to lead code where it belongs. | 1, 4 | 5 | M | next | The structural fix for S1/S2 substrate findings from #5. Tactical fix already shipped at 600s in `b9bc611`; that band-aid still let two timeouts fire during Phase 4. As long as a hard timeout exists on the wire, S2 (stale-response delivery) stays latent and reappears on any teammate doing long work. Eliminating the timeout makes S2 a non-issue by construction. Probably warrants a full SDD pass. |
+| 6 | **Telemetry-based teammate liveness.** Replace `TURN_TIMEOUT_SECONDS` hard wall in `claude_crew/sdk_teammate.py` with stream-activity stamping — every event yielded by `receive_response` updates `last_activity_at`. New MCP tool `get_teammate_status(id)` returns `{alive, last_activity_at, current_turn_started_at}`. Add a subprocess-PID liveness probe so genuine death emits `lifecycle: died`. Drop the wall timeout (or move to a 1hr backstop). Operator policy ("no activity > X min → ping") moves to lead code where it belongs. | 1, 4 | 5 | M | done | **Shipped 2026-04-27** (`5ccdac9`). Full SDD: 12 SCs, 12 design decisions D1-D12, 5 implementation tasks via team-build with claude-crew teammates. 218 non-live tests + live SDK A2 probe (PASS). Cohesion delivered: `teammate_dead` peer error code, tombstones queryable post-mortem, `broadcast` returns `skipped_dead`, `kill_teammate` and SDK death share tombstone code path. S1 and S2 dead by construction; backstop calls `client.interrupt()` first. Substrate dogfooded during build (3 S1 fires, 0 stale responses, 0 rescue tripwires). See `doc/features/FEATURE-telemetry-liveness.md`. |
 | 7 | **Subagent-activity envelopes.** Emit `subagent-spawn` and `subagent-result` envelopes from teammates so the lead can observe capability #2 in real time. Closes the Feature #4 v1 documented limit ("subagent activity does not cross the broker"). Verified in #5 retro that capability #2 IS being exercised in real production work — just not bus-observable; we had to confirm by directly asking each sentinel teammate after the fact. | 2, 4 | 5 | S | next | Smaller than #6. Plan-mode-sized. Sequence: ship #6 first, then run a real-task validation (MMM-4b is a clean candidate), then ship #7 once we have a second real-task data point's worth of signal on what the bus should surface. |
 | 8 | **Tool-execution telemetry via SDK hooks.** Register `PreToolUse` and `PostToolUse` hooks on every `SdkTeammate` so the substrate observes tool boundaries directly instead of inferring them from stream gaps. Adds `current_tool`, `current_tool_started_at_wallclock`, `current_tool_args_summary`, `last_tool_duration` to the teammate status payload. Each tool start/end is also stamped as activity (closes the "Bash runs for 20min, SDK stream is silent" gap), and each tool call lands in the JSONL transcript with name + duration + outcome. | 1, 4 | 5 | S-M | next | Identified during Feature #6 Phase 2 design discussion (2026-04-26): the substrate's only observability gap after #6 is *tool execution opacity* — `idle_seconds` climbs during a long Bash invocation even though the subprocess is healthy and working. Hooks fix this directly. Depends on #6 shipping (extends `get_teammate_status` surface). 30-min Phase 1 spike: confirm Agent SDK exposes hooks the same way Claude Code does (95% sure it does via `ClaudeAgentOptions(hooks=...)` — verify before committing). |
 
@@ -218,6 +218,54 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-04-27 — Feature #6 (Telemetry-Based Teammate Liveness) Shipped
+
+The first post-MVP substrate item, prerequisite for the next real-task validation. Built across 2 calendar days (started 2026-04-26 evening, merged 2026-04-27) via full SDD workflow with team-build delegation to claude-crew teammates.
+
+**What shipped:**
+- `TURN_TIMEOUT_SECONDS` constant deleted from `sdk_teammate.py`. The 600s wall (band-aid `b9bc611` from Feature #5) is gone. The only remaining per-turn timer is a 1-hour configurable backstop that calls `client.interrupt()` *first* before erroring — closes S2 by construction at the 1hr boundary.
+- New per-teammate telemetry: `_last_activity_monotonic` + `_last_activity_wallclock` stamped on every `receive_response()` event (including non-text events — `RateLimitEvent`, `TaskNotificationMessage`); `_current_turn_started_at_wallclock` set/cleared at turn boundaries.
+- New MCP tool `get_teammate_status(teammate_id)` returns `{alive, last_activity_at_wallclock, current_turn_started_at_wallclock, idle_seconds}` for live teammates; full death record (`died_at_wallclock, exit_code, idle_seconds_at_death, last_activity_at_wallclock_at_death`) for tombstoned teammates. Docstring explicitly notes `idle_seconds` reflects SDK stream activity only — long tool execution shows as idle. Feature #8 will close that gap.
+- Per-teammate liveness poll task (5s default, env-overridable) reads `client._transport._process.returncode` with broad-Exception degrade-open. Dead subprocess detected within 5s while idle; immediately while in-turn via existing `ProcessError` exception path.
+- New peer error code `teammate_dead` (joins `unknown_teammate`/`duplicate`). `kill_teammate` reroutes through the same tombstone code path as SDK-death detection — emits `lifecycle: kill` (not `died`). Tombstones persist for broker lifetime; queryable via `get_teammate_status`.
+- `broadcast` now returns `skipped_dead: [...]` so silent skips become explicit (cohesion directive).
+- New `lifecycle: died` transcript event type with full death record.
+
+**Vision impact:**
+- Feature #6 → done. **Substrate is now telemetry-based.** Lead-side policy ("ping if idle > N min in-turn", "kill and respawn if backstop fires twice on same teammate") moves out of substrate constants and into operator code where per-task tuning is possible.
+- Capabilities #1 and #4 directly advanced. Cohesive enterprise-quality MCP surface delivered: peer error codes, queryable tombstones, explicit skip-reporting on broadcast.
+- **Feature #8 routed during Phase 2 design.** Tool-execution opacity (a 20-min Bash build = 20 min of `idle_seconds` climbing on a healthy subprocess) was identified as the substrate's only remaining observability gap after #6. Routed as a proper feature pipeline row with explicit Feature #6 dependency. PreToolUse / PostToolUse SDK hooks are the architectural answer.
+- **Feature #3c (cross-session memory) stays deferred.** Did not surface during this build either — same gate-question outcome as Feature #5's retro.
+
+**Design highlights:**
+- **Sentinel-as-teammate reviewed THREE times** across the lifecycle (Phase 1 SCs, Phase 2 spec coverage, Phase 4 inner-4 + final merge-readiness). Each pass caught real gaps. Phase 1 sentinel turned 8 SCs into 12 (cleanup-on-failure additions). Phase 2 sentinel caught the in-flight envelope handoff gap that would have silently lost requesters mid-death. Inner-4 sentinel caught an `asyncio.get_event_loop()` deprecation and 2 missing transcript assertions. Pattern: front-load sentinel review at SC-time, not just code-time.
+- **Co-architect-as-teammate (Opus 4.7, persistent across the whole feature)** at every gate. The "name three things you'll push back on" warmup prompt at spawn time pre-loaded the design's load-bearing risks (single-writer death detection, backstop ordering, probe scope) before any specific design existed. All three became Phase 2 design pillars.
+- **Pre-design SDK-access spike at Phase 1 gate** (not Phase 2) resolved `_transport._process.pid` + `client.interrupt()` empirically before Phase 2 designed against assumptions. Co-architect explicitly cited this as why the design didn't deadlock on unknowables. Pattern: when a feature's load-bearing assumption is empirical, spike at the gate.
+- **Single-writer rule for death detection** — only the periodic poll task writes `lifecycle: died` and tombstones. The in-turn worker, on observing SDK death, sets a `_death_in_flight_envelope` field and `_death_suspected` flag, returns without sending an envelope. Poll task's next tick (≤5s) idempotently runs the death handler. Eliminates the duplicate-event race that two-source detection introduces.
+- **Backstop interrupt-first contract (SC-11)** — when the 1hr backstop fires, the teammate calls `await client.interrupt()` with a 30s grace BEFORE sending the error envelope. If interrupt itself hangs or raises, the teammate sets `_death_suspected=True` and the poll task escalates to tombstone. Closes residual S2 risk at the 1hr boundary.
+- **The honesty scenario for Feature #8 is empirically proven, not described.** `tests/test_telemetry_e2e.py::test_idle_seconds_during_long_tool_execution_is_honest` demonstrates the gap — when Feature #8 ships, this test becomes the regression check that #8 actually closes it.
+
+**Substrate dogfooding stats (built while running on the substrate it replaces):**
+- 3 S1 timeout fires across builders (T3, T4, T5) — each recovered via "IGNORE PRIOR" status ping. Total operator overhead: ~5min wall.
+- 0 S2 stale-response incidents.
+- 0 rescue tripwires fired (all 8 from Feature #5's framework stayed clean).
+- The lead/teammate domain split (declared at Phase 4 kickoff) held perfectly: lead authored all spec docs, teammates wrote all production code + tests + ran all verification.
+
+**Cost / time accounting:**
+- Wall time: ~6 hours from Phase 1 kickoff to Phase 5 close.
+- Token spend: estimated $15-20.
+- Teammates spawned: 7 (5 builders, 1 persistent sentinel, 1 persistent co-architect — sentinel and co-architect reused across all 5 phases).
+- Live SDK probe runs: 1 (A2 concurrent interrupt during drain), $0.05, 2.88s wall, PASS — empirically confirmed the load-bearing assumption that, if wrong, would silently re-introduce S2 at the 1hr boundary.
+
+**Process highlights worth keeping:**
+- **Pre-Phase-3 grep audit of test contract change** (D11's `unknown_teammate` → `teammate_dead`) executed by lead BEFORE drafting Phase 3 task list. Surfaced 2 server tests + 1 broker test needing updates; routed as Phase 3 task scope, not Phase 4 surprises. Worked perfectly. Formalize as: "before Phase 3 task breakdown, run test blast-radius grep for any contract change introduced in Phase 2."
+- **"Three pushback areas" warmup prompt for persistent co-architects** is portable and reusable across features. Worth capturing as a formal pattern.
+
+**Pipeline impact:**
+- #6 → done. **Substrate is telemetry-based, not timer-based.**
+- #7 (subagent-activity envelopes) is logical next per #5 retro sequencing. Smaller (S size, plan-mode-sized).
+- **MMM-4b (payee normalization) is the natural next real-task validation** — exercises the new substrate while shipping product. The build sequence the #5 retro proposed (claude-crew #6 → MMM-4b → claude-crew #7) is now ready to execute.
 
 ### 2026-04-26 — Feature #5 (Real-Task Validation) — MVP Gate PASSED
 
