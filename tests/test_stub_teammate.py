@@ -77,3 +77,98 @@ class TestStubShutdown:
         # Never started; shutdown should still be safe.
         await teammate.shutdown()
         await teammate.shutdown()
+
+
+class TestStubActivityStamping:
+    async def test_stub_stamps_activity_on_every_dequeue(self, broker: Broker) -> None:
+        """SC-3 analog for stubs: activity stamps on every envelope dequeue."""
+        tid = await broker.spawn_teammate(role="stamper", name=None, factory=_stub_factory)
+        teammate = broker._teammates[tid]
+
+        # Record initial state
+        initial_monotonic = teammate._last_activity_monotonic
+
+        # Send 3 envelopes
+        for i in range(3):
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0, sender=LEAD_ID, recipient=tid,
+                timestamp=0.0, payload=f"msg-{i}",
+            ))
+
+        # Wait for all echoes
+        await _wait_for_lead_messages(broker, count=3)
+
+        # Check that monotonic timestamp advanced (at least 3 times)
+        final_monotonic = teammate._last_activity_monotonic
+        assert final_monotonic > initial_monotonic, \
+            "monotonic timestamp should advance after processing envelopes"
+
+        # Check idle_seconds is very small (activity was just stamped)
+        snap = teammate.status_snapshot()
+        assert snap["idle_seconds"] < 1.0, \
+            f"idle_seconds should be < 1.0 right after processing, got {snap['idle_seconds']}"
+
+    async def test_stub_clears_current_turn_between_turns(self, broker: Broker) -> None:
+        """SC-4: current_turn_started_at is None between turns and set during."""
+        tid = await broker.spawn_teammate(role="turner", name=None, factory=_stub_factory)
+        teammate = broker._teammates[tid]
+
+        # Initially between turns: current_turn_started_at should be None
+        initial_snap = teammate.status_snapshot()
+        assert initial_snap["current_turn_started_at_wallclock"] is None, \
+            "Should start with no active turn"
+        assert initial_snap["last_activity_at_wallclock"] is not None, \
+            "Should have initialization timestamp"
+
+        # Send one envelope
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0, sender=LEAD_ID, recipient=tid,
+            timestamp=0.0, payload="test",
+        ))
+
+        # Wait for the echo to complete
+        await _wait_for_lead_messages(broker, count=1)
+
+        # After turn completes: current_turn_started_at should be None again
+        final_snap = teammate.status_snapshot()
+        assert final_snap["current_turn_started_at_wallclock"] is None, \
+            "Should clear current_turn_started_at after turn ends"
+        assert final_snap["last_activity_at_wallclock"] is not None, \
+            "Should have updated last_activity_at after processing"
+
+    async def test_stub_sets_current_turn_during_echo(self, broker: Broker) -> None:
+        """SC-4: current_turn_started_at is set while processing and None after."""
+        # Use slow_echo_delay to keep the turn open long enough to observe
+        def slow_stub_factory(id: str, name: str, role: str, **_kwargs) -> StubTeammate:
+            return StubTeammate(id=id, name=name, role=role, slow_echo_delay=0.2)
+
+        tid = await broker.spawn_teammate(
+            role="slowpoke", name=None, factory=slow_stub_factory
+        )
+        teammate = broker._teammates[tid]
+
+        # Send one envelope
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0, sender=LEAD_ID, recipient=tid,
+            timestamp=0.0, payload="slowmo",
+        ))
+
+        # Poll status_snapshot during the echo delay window
+        turn_was_active = False
+        for _ in range(50):  # Poll for up to 500ms (50 * 10ms)
+            snap = teammate.status_snapshot()
+            if snap["current_turn_started_at_wallclock"] is not None:
+                turn_was_active = True
+                break
+            await asyncio.sleep(0.01)
+
+        assert turn_was_active, \
+            "Should have observed current_turn_started_at set during the echo delay"
+
+        # Wait for echo to complete
+        await _wait_for_lead_messages(broker, count=1)
+
+        # After turn ends: should be None
+        final_snap = teammate.status_snapshot()
+        assert final_snap["current_turn_started_at_wallclock"] is None, \
+            "Should clear current_turn_started_at after slow echo completes"
