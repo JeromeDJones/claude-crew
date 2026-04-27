@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
     AssistantMessage,
+    HookMatcher,
     RateLimitEvent,
     TaskNotificationMessage,
     TextBlock,
@@ -41,8 +42,9 @@ logger = logging.getLogger(__name__)
 
 from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
 from claude_crew.subagents import load_default_pack
-from claude_crew.teammate import Teammate
+from claude_crew.teammate import Teammate, _ToolUseEntry
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
@@ -57,6 +59,9 @@ POST_INTERRUPT_DRAIN_SECONDS: float = 5.0
 # D8: Liveness poll defaults. Both are env-overridable at __init__ time.
 POLL_INTERVAL_SECONDS_DEFAULT: float = 5.0
 TURN_BACKSTOP_SECONDS_DEFAULT: float = 3600.0
+
+# D8: Max concurrent tools before soft overflow guard (logged but accepted).
+MAX_CONCURRENT_TOOLS: int = 64
 
 _SHUTDOWN_SENTINEL: object = object()
 
@@ -222,6 +227,197 @@ class SdkTeammate(Teammate):
         self._inbox = inbox
         self._task = asyncio.create_task(self._run(), name=f"sdk-{self.id}")
 
+    def _on_pre_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
+        """Hook callback for PreToolUse event (D8, SC-1, SC-4).
+
+        Wraps in try/except; stamps activity; branches on subagent vs main-agent;
+        updates _tool_uses dict; writes transcript line.
+        """
+        try:
+            self._stamp_activity()
+            # D3: subagent branch — activity stamped but no state update.
+            if inp.get("agent_id") is not None:
+                return {}
+            # D8 defensive: null tool_use_id guard.
+            if not tool_use_id:
+                logger.warning(
+                    "pre_tool_use: empty tool_use_id for teammate=%s, skipping",
+                    self.id,
+                )
+                return {}
+            # D8 pre-twice guard: last-write-wins + WARNING.
+            if tool_use_id in self._tool_uses:
+                logger.warning(
+                    "pre_tool_use: duplicate tool_use_id=%s for teammate=%s, last-write-wins",
+                    tool_use_id,
+                    self.id,
+                )
+            # D8 soft overflow guard: cap check (accept anyway).
+            if len(self._tool_uses) >= MAX_CONCURRENT_TOOLS:
+                logger.warning(
+                    "pre_tool_use: concurrent tool cap (%d) reached for teammate=%s",
+                    MAX_CONCURRENT_TOOLS,
+                    self.id,
+                )
+            # Build entry.
+            args_summary = summarize_args(inp["tool_name"], inp["tool_input"])
+            entry = _ToolUseEntry(
+                tool_name=inp["tool_name"],
+                tool_use_id=tool_use_id,
+                started_at_wallclock=time.time(),
+                args_summary=args_summary,
+            )
+            self._tool_uses[tool_use_id] = entry
+            # Emit transcript.
+            try:
+                broker = self._broker
+                if broker is not None:
+                    broker._sink.write_tool_event(
+                        "tool_start",
+                        {
+                            "teammate_id": self.id,
+                            "tool_name": entry.tool_name,
+                            "tool_use_id": tool_use_id,
+                            "started_at_wallclock": entry.started_at_wallclock,
+                            "args_summary": args_summary,
+                            "redaction_version": REDACTION_VERSION,
+                        },
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "pre_tool_use: write_tool_event failed for teammate=%s tool_use_id=%s: %s",
+                    self.id,
+                    tool_use_id,
+                    exc,
+                )
+            return {}
+        except Exception as exc:
+            logger.warning(
+                "pre_tool_use: internal exception for teammate=%s: %s",
+                self.id,
+                exc,
+            )
+            return {}
+
+    def _on_post_common(
+        self,
+        inp: dict,
+        tool_use_id: str,
+        *,
+        outcome: str,
+        error_text: str | None,
+    ) -> dict:
+        """Helper for PostToolUse and PostToolUseFailure (D8, SC-2, SC-3).
+
+        Common logic: activity stamp, subagent branch, dedup guard, entry lookup,
+        last_tool_completed update, transcript emit.
+        """
+        try:
+            self._stamp_activity()
+            # D3: subagent branch.
+            if inp.get("agent_id") is not None:
+                return {}
+            # D8 defensive: null tool_use_id guard.
+            if not tool_use_id:
+                logger.warning(
+                    "post_tool_use: empty tool_use_id for teammate=%s, skipping",
+                    self.id,
+                )
+                return {}
+            # D8 fifth guard: recently-closed dedup.
+            if tool_use_id in self._recently_closed_tool_use_ids:
+                logger.info(
+                    "post_tool_use: late post for closed tool_use_id=%s (teammate=%s), suppressing duplicate",
+                    tool_use_id,
+                    self.id,
+                )
+                return {}
+            # Lookup entry.
+            entry = self._tool_uses.pop(tool_use_id, None)
+            # D8 post-without-pre: emit audit line + WARNING.
+            if entry is None:
+                logger.warning(
+                    "post_tool_use: post fired without matching pre for tool_use_id=%s (teammate=%s)",
+                    tool_use_id,
+                    self.id,
+                )
+                try:
+                    broker = self._broker
+                    if broker is not None:
+                        broker._sink.write_tool_event(
+                            "tool_end",
+                            {
+                                "teammate_id": self.id,
+                                "tool_use_id": tool_use_id,
+                                "duration_seconds": None,
+                                "error_summary": redact_error(
+                                    "post fired without matching pre"
+                                ),
+                            },
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "post_tool_use: write_tool_event (no-pre case) failed for teammate=%s: %s",
+                        self.id,
+                        exc,
+                    )
+                return {}
+            # Normal path: compute duration, update last_tool_completed, emit transcript.
+            finished_at_wallclock = time.time()
+            duration_seconds = finished_at_wallclock - entry.started_at_wallclock
+            error_summary = redact_error(error_text) if error_text else None
+            self._last_tool_completed = {
+                "tool_name": entry.tool_name,
+                "outcome": outcome,
+                "finished_at_wallclock": finished_at_wallclock,
+                "duration_seconds": duration_seconds,
+                "error_summary": error_summary,
+            }
+            try:
+                broker = self._broker
+                if broker is not None:
+                    broker._sink.write_tool_event(
+                        "tool_end",
+                        {
+                            "teammate_id": self.id,
+                            "tool_name": entry.tool_name,
+                            "tool_use_id": tool_use_id,
+                            "outcome": outcome,
+                            "finished_at_wallclock": finished_at_wallclock,
+                            "duration_seconds": duration_seconds,
+                            "error_summary": error_summary,
+                        },
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "post_tool_use: write_tool_event failed for teammate=%s tool_use_id=%s: %s",
+                    self.id,
+                    tool_use_id,
+                    exc,
+                )
+            return {}
+        except Exception as exc:
+            logger.warning(
+                "post_tool_use: internal exception for teammate=%s: %s",
+                self.id,
+                exc,
+            )
+            return {}
+
+    def _on_post_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
+        """Hook callback for PostToolUse event (SC-2)."""
+        return self._on_post_common(
+            inp, tool_use_id, outcome="ok", error_text=None
+        )
+
+    def _on_post_tool_use_failure(
+        self, inp: dict, tool_use_id: str, ctx: dict
+    ) -> dict:
+        """Hook callback for PostToolUseFailure event (SC-3)."""
+        outcome = "interrupted" if inp.get("is_interrupt") else "failed"
+        error_text = inp.get("error", "")
+        return self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
+
     async def _liveness_poll_loop(self, client: Any) -> None:
         """Poll the SDK subprocess for unexpected death (D5/D8).
 
@@ -260,6 +456,13 @@ class SdkTeammate(Teammate):
                 return  # poll task exits after triggering death handler
 
     async def _run(self) -> None:
+        # D6: Log env override for CLAUDE_CREW_TOOL_ARGS_FULL if set.
+        if os.environ.get("CLAUDE_CREW_TOOL_ARGS_FULL") == "1":
+            logger.info(
+                "CLAUDE_CREW_TOOL_ARGS_FULL=1: full tool args will be written to transcripts (teammate %s)",
+                self.id,
+            )
+
         opts_kwargs: dict = {
             "model": self._model,
             "system_prompt": self._system_prompt,
@@ -268,6 +471,25 @@ class SdkTeammate(Teammate):
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort
+
+        # D8: Register hook callbacks with timeout=1.0 (SC-8.3, D1).
+        opts_kwargs["hooks"] = {
+            "PreToolUse": [
+                HookMatcher(matcher=None, hooks=[self._on_pre_tool_use], timeout=1.0)
+            ],
+            "PostToolUse": [
+                HookMatcher(
+                    matcher=None, hooks=[self._on_post_tool_use], timeout=1.0
+                )
+            ],
+            "PostToolUseFailure": [
+                HookMatcher(
+                    matcher=None,
+                    hooks=[self._on_post_tool_use_failure],
+                    timeout=1.0,
+                )
+            ],
+        }
         options = ClaudeAgentOptions(**opts_kwargs)
         try:
             async with ClaudeSDKClient(options=options) as client:
@@ -309,7 +531,10 @@ class SdkTeammate(Teammate):
                 )
                 return
             try:
-                await client.query(prompt, session_id="default")
+                # SC-16: use crew-teammate session format instead of "default" (D5).
+                assert self._broker is not None
+                session_id = f"{self._broker.crew_id}-{self.id}"
+                await client.query(prompt, session_id=session_id)
                 result = await asyncio.wait_for(
                     _collect_response_text(client, self._stamp_activity),
                     timeout=self._backstop_seconds,

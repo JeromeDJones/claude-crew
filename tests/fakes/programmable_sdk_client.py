@@ -74,6 +74,9 @@ class ProgrammableSDKClient(FakeSDKClient):
             _process=types.SimpleNamespace(returncode=transport_returncode)
         )
 
+        # F8: hooks dict for fire_hook support.
+        self._hooks: dict[str, Any] = {}
+
     # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
@@ -111,3 +114,26 @@ class ProgrammableSDKClient(FakeSDKClient):
             raise self._interrupt_raises(
                 f"interrupt() configured to raise {self._interrupt_raises.__name__}"
             )
+
+    def set_hooks(self, hooks_dict: dict[str, Any]) -> None:
+        """Store hooks dict for fire_hook to invoke."""
+        self._hooks = hooks_dict
+
+    async def fire_hook(
+        self,
+        event_name: str,
+        hook_input: dict,
+        tool_use_id: str | None = None,
+    ) -> None:
+        """Fire registered hook callbacks for an event (F8 T3b).
+
+        Looks up event_name in self._hooks (HookMatcher list), calls each
+        hook callback with (hook_input, tool_use_id, {}) (empty ctx stub).
+
+        Tests use this to drive the hook callbacks without a live SDK.
+        """
+        matchers = self._hooks.get(event_name, [])
+        for matcher in matchers:
+            for hook_callback in matcher.hooks:
+                # Hook callbacks are bound methods that expect (inp, tool_use_id, ctx).
+                hook_callback(hook_input, tool_use_id, {})
