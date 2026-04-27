@@ -132,7 +132,9 @@ class TestRoundTrip:
         assert len(msgs) == 1
         assert msgs[0].sender == tid
         assert msgs[0].payload == {"text": "hi back", "from": "parrot"}
-        assert fake.queries_received[0] == ("hello", "default")
+        # SC-16: session_id now uses crew-teammate format.
+        expected_session_id = f"{broker.crew_id}-{tid}"
+        assert fake.queries_received[0] == ("hello", expected_session_id)
 
     async def test_multi_turn_in_order(self, broker, monkeypatch) -> None:
         fake = FakeSDKClient(scripted_responses=[
@@ -157,7 +159,9 @@ class TestRoundTrip:
         texts = [m.payload["text"] for m in msgs]
         assert texts == ["first", "second", "third"]
         assert [q[0] for q in fake.queries_received] == ["q0", "q1", "q2"]
-        assert all(q[1] == "default" for q in fake.queries_received)
+        # SC-16: all session_ids should use the crew-teammate format.
+        expected_session_id = f"{broker.crew_id}-{tid}"
+        assert all(q[1] == expected_session_id for q in fake.queries_received)
 
     async def test_setting_sources_default_is_user_project(
         self, broker, monkeypatch,
@@ -839,3 +843,351 @@ class TestLivenessTelemetry:
         assert info.alive, (
             "teammate should stay alive when probe raises OSError (D5 degrade-open)"
         )
+
+
+# ---------- T3a hook callbacks (F8 tool-execution telemetry) ----------
+
+
+class TestToolExecutionHooks:
+    """BDD scenarios for PreToolUse / PostToolUse / PostToolUseFailure hooks (T3a)."""
+
+    async def test_pre_tool_use_populates_current_tools(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-1: PreToolUse populates current_tools in status snapshot."""
+        from claude_crew.redaction import REDACTION_VERSION
+
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        # Manually fire PreToolUse hook to avoid needing real SDK.
+        await asyncio.sleep(0.1)  # Let teammate initialize.
+        fake.set_hooks(
+            {
+                "PreToolUse": getattr(
+                    teammate.options, "hooks", {}
+                ).get("PreToolUse", [])
+                if hasattr(teammate, "options")
+                else [],
+            }
+        )
+
+        # Actually, we can't access options from the outside. Instead, construct
+        # a minimal test that fires the hook directly on the teammate object.
+        # The hook is a bound method, so we call it directly.
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        tool_use_id = "tu-1"
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+
+        # Verify the entry was added.
+        snap = teammate.status_snapshot()
+        assert snap["current_tool_count"] == 1
+        assert snap["current_tool"] == "Bash"
+        assert snap["current_tools"][0]["tool_name"] == "Bash"
+        assert snap["current_tools"][0]["tool_use_id"] == "tu-1"
+        # Bash is on allowlist, so args_summary should be present.
+        assert snap["current_tools"][0]["args_summary"] is not None
+        assert "command=" in snap["current_tools"][0]["args_summary"]
+        assert snap["redaction_version"] == REDACTION_VERSION
+
+    async def test_post_tool_use_clears_and_sets_last_completed(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-2: PostToolUse clears current_tools and sets last_tool_completed."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        # Pre-populate via _on_pre_tool_use.
+        started_time = time.time()
+        hook_input_pre = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        tool_use_id = "tu-1"
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+
+        assert teammate.status_snapshot()["current_tool_count"] == 1
+
+        # Now fire PostToolUse.
+        await asyncio.sleep(0.01)  # Ensure duration > 0.
+        hook_input_post = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_response": "success",
+        }
+        await teammate._on_post_tool_use(hook_input_post, tool_use_id, {})
+
+        snap = teammate.status_snapshot()
+        assert snap["current_tool_count"] == 0
+        assert snap["current_tool"] is None
+        assert snap["last_tool_completed"] is not None
+        assert snap["last_tool_completed"]["tool_name"] == "Bash"
+        assert snap["last_tool_completed"]["outcome"] == "ok"
+        assert snap["last_tool_completed"]["duration_seconds"] >= 0.0
+        assert snap["last_tool_completed"]["error_summary"] is None
+
+    async def test_post_tool_use_failure_outcome_interrupted(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-3: PostToolUseFailure with is_interrupt=true → outcome='interrupted'."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        hook_input_pre = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        tool_use_id = "tu-1"
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+
+        # Fire PostToolUseFailure with is_interrupt=true.
+        hook_input_failure = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "is_interrupt": True,
+            "error": "interrupted by user",
+        }
+        await teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
+
+        snap = teammate.status_snapshot()
+        assert snap["last_tool_completed"]["outcome"] == "interrupted"
+
+    async def test_post_tool_use_failure_outcome_failed(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-3b: PostToolUseFailure with is_interrupt=false → outcome='failed'."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        hook_input_pre = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        tool_use_id = "tu-1"
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+
+        # Fire PostToolUseFailure with is_interrupt=false.
+        hook_input_failure = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "is_interrupt": False,
+            "error": "exit 1",
+        }
+        await teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
+
+        snap = teammate.status_snapshot()
+        assert snap["last_tool_completed"]["outcome"] == "failed"
+
+    async def test_hooks_stamp_activity(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-4: Hook callbacks stamp activity (last_activity_wallclock advances)."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        initial_activity = teammate._last_activity_wallclock
+        await asyncio.sleep(0.05)
+
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        await teammate._on_pre_tool_use(hook_input, "tu-1", {})
+
+        # Activity should have advanced.
+        assert teammate._last_activity_wallclock > initial_activity
+
+    async def test_subagent_stamps_activity_but_no_state(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-10/D3: Subagent tool call stamps activity, NO state update, NO transcript."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        initial_activity = teammate._last_activity_wallclock
+        await asyncio.sleep(0.05)
+
+        # Subagent call (agent_id is not None).
+        hook_input = {
+            "agent_id": "sub-1",
+            "agent_type": "echo-runner",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        await teammate._on_pre_tool_use(hook_input, "tu-sub-1", {})
+
+        # Activity should have advanced, but current_tools should be empty.
+        assert teammate._last_activity_wallclock > initial_activity
+        assert teammate.status_snapshot()["current_tool_count"] == 0
+
+    async def test_pre_twice_last_write_wins(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-9: Pre-twice for same tool_use_id → last-write-wins + WARNING."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        tool_use_id = "tu-1"
+
+        # First Pre.
+        t1 = time.time()
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+        first_started = teammate._tool_uses[tool_use_id].started_at_wallclock
+
+        # Wait a bit, then second Pre (same tool_use_id).
+        await asyncio.sleep(0.05)
+        t2 = time.time()
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+        second_started = teammate._tool_uses[tool_use_id].started_at_wallclock
+
+        # Second should have overwritten first.
+        assert second_started > first_started
+        assert len(teammate._tool_uses) == 1
+
+    async def test_post_unknown_tool_use_warning_and_audit(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-9/D8: Post for unknown tool_use_id NOT recently closed → WARNING + audit transcript."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        # Fire PostToolUse for a tool_use_id that was never Pre'd.
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+        }
+        await teammate._on_post_tool_use(hook_input, "tu-unknown", {})
+
+        # current_tools and last_tool_completed should be unchanged (no Pre was fired).
+        snap = teammate.status_snapshot()
+        assert snap["current_tool_count"] == 0
+        assert snap["last_tool_completed"] is None
+
+    async def test_late_post_after_abandon_suppressed(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-9/D8 fifth guard: Late Post for recently-closed tool_use_id → suppressed + INFO."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        tool_use_id = "tu-1"
+
+        # Simulate a tool being abandoned by _close_open_tools.
+        teammate._recently_closed_tool_use_ids.append(tool_use_id)
+
+        # Now fire a late PostToolUse for that closed tool.
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+        }
+        await teammate._on_post_tool_use(hook_input, tool_use_id, {})
+
+        # Nothing should have changed.
+        snap = teammate.status_snapshot()
+        assert snap["current_tool_count"] == 0
+        assert snap["last_tool_completed"] is None
+
+    async def test_hook_exception_does_not_crash(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-8.2: Hook callback raise does not crash teammate."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        teammate = broker._teammates[tid]
+
+        # Manually raise inside a hook by passing bad data.
+        # The hook should catch this and return {} safely.
+        hook_input = {
+            "agent_id": None,
+            "tool_name": "Bash",
+            "tool_input": None,  # Invalid, but hook should not crash.
+        }
+        result = await teammate._on_pre_tool_use(hook_input, "tu-1", {})
+
+        # Hook should return {} without raising.
+        assert result == {}
+
+    async def test_session_id_uses_crew_teammate_format(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-16/D5: session_id uses f'{crew_id}-{teammate_id}' format."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hello",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+
+        # Check the query session_id that was recorded.
+        recorded_query = fake.queries_received[0]
+        expected_session_id = f"{broker.crew_id}-{tid}"
+        assert recorded_query[1] == expected_session_id
+        assert recorded_query[1] != "default"

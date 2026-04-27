@@ -172,12 +172,25 @@ def make_server(
         Returns the same payload shape whether the teammate is alive or
         tombstoned, with death-record fields populated only when alive=False.
 
-        Note on ``idle_seconds``: this field reflects SDK stream activity only.
-        Long-running tool execution (Bash, file IO, MCP calls) appears as idle
-        because ``receive_response()`` yields no events during tool execution.
-        Use ``current_turn_started_at_wallclock`` alongside ``alive`` to
-        distinguish "working but quiet" from "genuinely wedged". Tool-level
-        telemetry is Feature #8.
+        F8 tool-tracking fields (always present):
+            current_tools: list of in-flight tool calls, each with
+                {tool_name, tool_use_id, started_at_wallclock, args_summary}.
+            current_tool: last-started tool name, or null if none in flight.
+            current_tool_count: number of tools currently in flight.
+            last_tool_completed: most recent fully-finished tool record
+                {tool_name, outcome, finished_at_wallclock, duration_seconds,
+                error_summary?}, or null if none.
+            redaction_version: active redaction schema version ("v1"), or null
+                for tombstoned teammates.
+
+        What this tells you mid-execution:
+            - Is the teammate running Bash? Check current_tool == "Bash".
+            - How long has the current tool been running?
+              current_tools[0].started_at_wallclock vs now.
+            - What tool last completed, and did it succeed?
+              last_tool_completed.tool_name / .outcome.
+            - Is args_summary populated? Only for allowlisted tools (Bash,
+              Task, WebFetch) with redaction applied.
 
         Args:
             teammate_id: id from spawn_teammate.

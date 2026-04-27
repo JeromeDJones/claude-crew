@@ -8,6 +8,7 @@ own contract.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import time
 from typing import Any
@@ -21,7 +22,7 @@ from claude_crew.broker import (
     UnknownTeammateError,
 )
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.teammate import StubTeammate, Teammate
+from claude_crew.teammate import StubTeammate, Teammate, _ToolUseEntry
 
 
 class _NoopTeammate(Teammate):
@@ -39,8 +40,14 @@ class _NoopTeammate(Teammate):
         self._last_activity_monotonic = time.monotonic()
         self._last_activity_wallclock = time.time()
         self._current_turn_started_at_wallclock: float | None = None
+        # F8: tool-tracking fields (required by status_snapshot())
+        self._broker = None
+        self._tool_uses: dict = {}
+        self._recently_closed_tool_use_ids: collections.deque = collections.deque(maxlen=64)
+        self._last_tool_completed = None
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
+        self._broker = broker
         self._inbox = inbox
         self._task = asyncio.create_task(self._run())
 
@@ -581,3 +588,189 @@ class TestTranscriptAssertions:
         assert "idle_seconds_at_death" in d, f"missing idle_seconds_at_death: {d}"
         assert "last_activity_at_wallclock" in d, f"missing last_activity_at_wallclock: {d}"
         assert d["teammate_id"] == tid
+
+
+# ---------- T4: _close_open_tools wired into broker death/kill paths ----------
+
+
+class TestT4ToolClosureOnDeathAndKill:
+    """T4 BDD: death/kill paths call _close_open_tools before lifecycle event.
+
+    Scenarios:
+      1. death-mid-tool emits tool_end(abandoned) before lifecycle:died
+      2. kill-mid-tool emits tool_end(killed) before lifecycle:kill
+      3. tombstoned teammate retains last_tool_completed (clean tool from before death)
+      4. get_teammate_status alive includes F8 fields
+      5. get_teammate_status unknown unchanged (no regression)
+      6. broker MCP tool treated as first-class tool event (D12)
+    """
+
+    async def test_death_mid_tool_emits_abandoned_tool_end_before_lifecycle_died(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """SC-14: subprocess death while tool in flight emits tool_end(abandoned)
+        BEFORE lifecycle:died in the transcript (replay-ordering guarantee)."""
+        monkeypatch.delenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", raising=False)
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(role="r", name=None, factory=_factory)
+            teammate = b._teammates[tid]  # type: ignore[attr-defined]
+            teammate._tool_uses["toolu_bash_abc"] = _ToolUseEntry(
+                tool_name="Bash",
+                tool_use_id="toolu_bash_abc",
+                started_at_wallclock=time.time() - 5.0,
+                args_summary="pytest tests/",
+            )
+            await b._handle_teammate_death(tid, exit_code=1)  # type: ignore[attr-defined]
+        finally:
+            await b.shutdown_all()
+
+        lines = _read_transcript_lines(tmp_path)
+        tool_end_idx = [i for i, l in enumerate(lines) if l.get("kind") == "tool_end"]
+        died_idx = [
+            i for i, l in enumerate(lines)
+            if l.get("kind") == "lifecycle" and l.get("event") == "died"
+        ]
+
+        assert len(tool_end_idx) == 1, f"expected 1 tool_end, got {tool_end_idx} in {lines}"
+        assert len(died_idx) == 1, f"expected 1 lifecycle:died, got {died_idx} in {lines}"
+        assert tool_end_idx[0] < died_idx[0], (
+            f"tool_end (line {tool_end_idx[0]}) must precede lifecycle:died (line {died_idx[0]})"
+        )
+
+        te = lines[tool_end_idx[0]]
+        assert te["outcome"] == "abandoned"
+        assert te["tool_name"] == "Bash"
+        assert te["tool_use_id"] == "toolu_bash_abc"
+        assert te["teammate_id"] == tid
+
+    async def test_kill_mid_tool_emits_killed_tool_end_before_lifecycle_kill(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """SC-14: explicit kill while tool in flight emits tool_end(killed)
+        BEFORE lifecycle:kill in the transcript."""
+        monkeypatch.delenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", raising=False)
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(role="r", name=None, factory=_factory)
+            teammate = b._teammates[tid]  # type: ignore[attr-defined]
+            teammate._tool_uses["toolu_fetch_xyz"] = _ToolUseEntry(
+                tool_name="WebFetch",
+                tool_use_id="toolu_fetch_xyz",
+                started_at_wallclock=time.time() - 2.0,
+                args_summary="https://example.com",
+            )
+            await b.kill_teammate(tid)
+        finally:
+            await b.shutdown_all()
+
+        lines = _read_transcript_lines(tmp_path)
+        tool_end_idx = [i for i, l in enumerate(lines) if l.get("kind") == "tool_end"]
+        kill_idx = [
+            i for i, l in enumerate(lines)
+            if l.get("kind") == "lifecycle" and l.get("event") == "kill"
+        ]
+
+        assert len(tool_end_idx) == 1, f"expected 1 tool_end, got {lines}"
+        assert len(kill_idx) == 1, f"expected 1 lifecycle:kill, got {lines}"
+        assert tool_end_idx[0] < kill_idx[0], (
+            f"tool_end must precede lifecycle:kill"
+        )
+
+        te = lines[tool_end_idx[0]]
+        assert te["outcome"] == "killed"
+        assert te["tool_name"] == "WebFetch"
+        assert te["teammate_id"] == tid
+
+    async def test_tombstoned_teammate_retains_last_tool_completed_not_abandoned(
+        self, broker: Broker,
+    ) -> None:
+        """SC-7 / SC-14: post-mortem status preserves last cleanly-finished tool;
+        the abandoned tool does NOT overwrite last_tool_completed."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        clean_tool: dict[str, Any] = {
+            "tool_name": "Read",
+            "outcome": "ok",
+            "finished_at_wallclock": time.time() - 1.0,
+            "duration_seconds": 0.05,
+        }
+        teammate._last_tool_completed = clean_tool
+
+        # Inject an in-flight tool — will be abandoned when kill fires
+        teammate._tool_uses["toolu_inflight"] = _ToolUseEntry(
+            tool_name="Bash",
+            tool_use_id="toolu_inflight",
+            started_at_wallclock=time.time() - 5.0,
+            args_summary=None,
+        )
+
+        await broker.kill_teammate(tid)
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["last_tool_completed"] == clean_tool, (
+            "last_tool_completed must reflect the clean tool, not the abandoned one"
+        )
+        assert status["current_tools"] == []
+        assert status["current_tool"] is None
+        assert status["current_tool_count"] == 0
+
+    async def test_get_status_alive_teammate_includes_f8_fields(
+        self, broker: Broker,
+    ) -> None:
+        """SC-7 (alive path): get_teammate_status surfaces F8 fields for alive teammate."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        status = broker.get_teammate_status(tid)
+
+        for key in ("current_tools", "current_tool", "current_tool_count",
+                    "last_tool_completed", "redaction_version"):
+            assert key in status, f"F8 field missing from alive status: {key!r}"
+
+        assert status["current_tools"] == []
+        assert status["current_tool"] is None
+        assert status["current_tool_count"] == 0
+        assert status["last_tool_completed"] is None
+
+    async def test_get_status_unknown_teammate_unchanged(
+        self, broker: Broker,
+    ) -> None:
+        """SC-7 (no regression): unknown teammate returns only the error dict."""
+        result = broker.get_teammate_status("ghost-id")
+        assert result["error"] == "unknown_teammate"
+        # F8 fields must NOT appear on the error shape
+        assert "current_tools" not in result
+        assert "alive" not in result
+        assert "current_tool" not in result
+
+    async def test_broker_mcp_tool_treated_as_first_class_tool_event(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """D12: broker MCP tools (e.g. send_to) are first-class — closed on death
+        like any tool, no special-casing that would create a blind spot."""
+        monkeypatch.delenv("CLAUDE_CREW_TRANSCRIPT_DISABLED", raising=False)
+        monkeypatch.setenv("CLAUDE_CREW_TRANSCRIPT_DIR", str(tmp_path))
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(role="r", name=None, factory=_factory)
+            teammate = b._teammates[tid]  # type: ignore[attr-defined]
+            teammate._tool_uses["toolu_mcp_send"] = _ToolUseEntry(
+                tool_name="mcp__claude-crew__send_to",
+                tool_use_id="toolu_mcp_send",
+                started_at_wallclock=time.time() - 0.5,
+                args_summary=None,
+            )
+            await b._handle_teammate_death(tid, exit_code=0)  # type: ignore[attr-defined]
+        finally:
+            await b.shutdown_all()
+
+        lines = _read_transcript_lines(tmp_path)
+        tool_end_lines = [l for l in lines if l.get("kind") == "tool_end"]
+        assert len(tool_end_lines) == 1, f"expected 1 tool_end for MCP tool, got {lines}"
+        te = tool_end_lines[0]
+        assert te["tool_name"] == "mcp__claude-crew__send_to"
+        assert te["outcome"] == "abandoned"
+        assert te["teammate_id"] == tid
