@@ -227,7 +227,7 @@ class SdkTeammate(Teammate):
         self._inbox = inbox
         self._task = asyncio.create_task(self._run(), name=f"sdk-{self.id}")
 
-    def _on_pre_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
+    async def _on_pre_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
         """Hook callback for PreToolUse event (D8, SC-1, SC-4).
 
         Wraps in try/except; stamps activity; branches on subagent vs main-agent;
@@ -299,7 +299,7 @@ class SdkTeammate(Teammate):
             )
             return {}
 
-    def _on_post_common(
+    async def _on_post_common(
         self,
         inp: dict,
         tool_use_id: str,
@@ -341,6 +341,8 @@ class SdkTeammate(Teammate):
                     tool_use_id,
                     self.id,
                 )
+                # D11 schema-honesty fix: orphan_post records carry the same
+                # field set as normal tool_end records (sentinel inner-4 review).
                 try:
                     broker = self._broker
                     if broker is not None:
@@ -348,11 +350,15 @@ class SdkTeammate(Teammate):
                             "tool_end",
                             {
                                 "teammate_id": self.id,
+                                "tool_name": inp.get("tool_name", "<unknown>"),
                                 "tool_use_id": tool_use_id,
+                                "outcome": "orphan_post",
+                                "finished_at_wallclock": time.time(),
                                 "duration_seconds": None,
                                 "error_summary": redact_error(
                                     "post fired without matching pre"
                                 ),
+                                "redaction_version": REDACTION_VERSION,
                             },
                         )
                 except Exception as exc:
@@ -386,6 +392,7 @@ class SdkTeammate(Teammate):
                             "finished_at_wallclock": finished_at_wallclock,
                             "duration_seconds": duration_seconds,
                             "error_summary": error_summary,
+                            "redaction_version": REDACTION_VERSION,
                         },
                     )
             except Exception as exc:
@@ -404,19 +411,19 @@ class SdkTeammate(Teammate):
             )
             return {}
 
-    def _on_post_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
+    async def _on_post_tool_use(self, inp: dict, tool_use_id: str, ctx: dict) -> dict:
         """Hook callback for PostToolUse event (SC-2)."""
-        return self._on_post_common(
+        return await self._on_post_common(
             inp, tool_use_id, outcome="ok", error_text=None
         )
 
-    def _on_post_tool_use_failure(
+    async def _on_post_tool_use_failure(
         self, inp: dict, tool_use_id: str, ctx: dict
     ) -> dict:
         """Hook callback for PostToolUseFailure event (SC-3)."""
         outcome = "interrupted" if inp.get("is_interrupt") else "failed"
         error_text = inp.get("error", "")
-        return self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
+        return await self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
 
     async def _liveness_poll_loop(self, client: Any) -> None:
         """Poll the SDK subprocess for unexpected death (D5/D8).

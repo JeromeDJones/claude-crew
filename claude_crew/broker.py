@@ -138,7 +138,11 @@ class Broker:
 
         # 2. End turn (clears current_turn_started_at_wallclock)
         if teammate is not None:
-            teammate._end_turn()
+            # close_tools=False: broker owns the tool-closing call at step 8b
+            # with the correct death/kill reason. Calling _end_turn() with the
+            # default (close_tools=True) here would abandon the tools as
+            # "turn_end" before step 8b can emit them as "death"/"killed".
+            teammate._end_turn(close_tools=False)
 
         # 3. Capture in-flight envelope (SdkTeammate sets this; others don't)
         in_flight = (

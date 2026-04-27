@@ -886,7 +886,7 @@ class TestToolExecutionHooks:
             "tool_input": {"command": "pytest"},
         }
         tool_use_id = "tu-1"
-        teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
 
         # Verify the entry was added.
         snap = teammate.status_snapshot()
@@ -919,7 +919,7 @@ class TestToolExecutionHooks:
             "tool_input": {"command": "pytest"},
         }
         tool_use_id = "tu-1"
-        teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
 
         assert teammate.status_snapshot()["current_tool_count"] == 1
 
@@ -930,7 +930,7 @@ class TestToolExecutionHooks:
             "tool_name": "Bash",
             "tool_response": "success",
         }
-        teammate._on_post_tool_use(hook_input_post, tool_use_id, {})
+        await teammate._on_post_tool_use(hook_input_post, tool_use_id, {})
 
         snap = teammate.status_snapshot()
         assert snap["current_tool_count"] == 0
@@ -959,7 +959,7 @@ class TestToolExecutionHooks:
             "tool_input": {"command": "pytest"},
         }
         tool_use_id = "tu-1"
-        teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
 
         # Fire PostToolUseFailure with is_interrupt=true.
         hook_input_failure = {
@@ -968,7 +968,7 @@ class TestToolExecutionHooks:
             "is_interrupt": True,
             "error": "interrupted by user",
         }
-        teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
+        await teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
 
         snap = teammate.status_snapshot()
         assert snap["last_tool_completed"]["outcome"] == "interrupted"
@@ -991,7 +991,7 @@ class TestToolExecutionHooks:
             "tool_input": {"command": "pytest"},
         }
         tool_use_id = "tu-1"
-        teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input_pre, tool_use_id, {})
 
         # Fire PostToolUseFailure with is_interrupt=false.
         hook_input_failure = {
@@ -1000,7 +1000,7 @@ class TestToolExecutionHooks:
             "is_interrupt": False,
             "error": "exit 1",
         }
-        teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
+        await teammate._on_post_tool_use_failure(hook_input_failure, tool_use_id, {})
 
         snap = teammate.status_snapshot()
         assert snap["last_tool_completed"]["outcome"] == "failed"
@@ -1025,7 +1025,7 @@ class TestToolExecutionHooks:
             "tool_name": "Bash",
             "tool_input": {"command": "pytest"},
         }
-        teammate._on_pre_tool_use(hook_input, "tu-1", {})
+        await teammate._on_pre_tool_use(hook_input, "tu-1", {})
 
         # Activity should have advanced.
         assert teammate._last_activity_wallclock > initial_activity
@@ -1052,7 +1052,7 @@ class TestToolExecutionHooks:
             "tool_name": "Bash",
             "tool_input": {"command": "pytest"},
         }
-        teammate._on_pre_tool_use(hook_input, "tu-sub-1", {})
+        await teammate._on_pre_tool_use(hook_input, "tu-sub-1", {})
 
         # Activity should have advanced, but current_tools should be empty.
         assert teammate._last_activity_wallclock > initial_activity
@@ -1079,13 +1079,13 @@ class TestToolExecutionHooks:
 
         # First Pre.
         t1 = time.time()
-        teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
         first_started = teammate._tool_uses[tool_use_id].started_at_wallclock
 
         # Wait a bit, then second Pre (same tool_use_id).
         await asyncio.sleep(0.05)
         t2 = time.time()
-        teammate._on_pre_tool_use(hook_input, tool_use_id, {})
+        await teammate._on_pre_tool_use(hook_input, tool_use_id, {})
         second_started = teammate._tool_uses[tool_use_id].started_at_wallclock
 
         # Second should have overwritten first.
@@ -1109,7 +1109,7 @@ class TestToolExecutionHooks:
             "agent_id": None,
             "tool_name": "Bash",
         }
-        teammate._on_post_tool_use(hook_input, "tu-unknown", {})
+        await teammate._on_post_tool_use(hook_input, "tu-unknown", {})
 
         # current_tools and last_tool_completed should be unchanged (no Pre was fired).
         snap = teammate.status_snapshot()
@@ -1138,7 +1138,7 @@ class TestToolExecutionHooks:
             "agent_id": None,
             "tool_name": "Bash",
         }
-        teammate._on_post_tool_use(hook_input, tool_use_id, {})
+        await teammate._on_post_tool_use(hook_input, tool_use_id, {})
 
         # Nothing should have changed.
         snap = teammate.status_snapshot()
@@ -1164,7 +1164,7 @@ class TestToolExecutionHooks:
             "tool_name": "Bash",
             "tool_input": None,  # Invalid, but hook should not crash.
         }
-        result = teammate._on_pre_tool_use(hook_input, "tu-1", {})
+        result = await teammate._on_pre_tool_use(hook_input, "tu-1", {})
 
         # Hook should return {} without raising.
         assert result == {}

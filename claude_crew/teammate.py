@@ -97,8 +97,22 @@ class Teammate(ABC):
         self._current_turn_started_at_wallclock = time.time()
         self._stamp_activity()
 
-    def _end_turn(self) -> None:
-        """Mark the end of a turn: clear current_turn_started_at."""
+    def _end_turn(self, *, close_tools: bool = True) -> None:
+        """Mark the end of a turn: optionally close in-flight tools, clear current_turn_started_at.
+
+        D9 cleanup discipline (default): tools still in ``_tool_uses`` at turn
+        end are an SDK-quirk dropped-Post; emitting ``tool_end(outcome="abandoned")``
+        keeps the transcript honest and prevents phantom in-flight tools from
+        bleeding into the next turn's status payload.
+
+        ``close_tools=False`` is for callers that own their own tool-closing
+        path with a different ``reason`` — specifically broker
+        ``_tombstone_teammate`` (death/kill), which calls ``_end_turn(close_tools=False)``
+        at step 2 (clear the timestamp), then ``_close_open_tools(reason="death"|"kill")``
+        at step 8b (so the transcript records the right outcome).
+        """
+        if close_tools:
+            self._close_open_tools(reason="turn_end")
         self._current_turn_started_at_wallclock = None
 
     def _close_open_tools(self, reason: Literal["turn_end", "death", "kill"]) -> None:

@@ -287,3 +287,64 @@ class TestToolTrackingInit:
         # Latest 64 are retained; earliest are evicted.
         assert "tu-99" in t._recently_closed_tool_use_ids
         assert "tu-0" not in t._recently_closed_tool_use_ids
+
+
+# ---------------------------------------------------------------------------
+# _end_turn scenarios (sentinel inner-4 fix-now #1)
+# ---------------------------------------------------------------------------
+
+
+class TestEndTurnAbandonsTools:
+    """SC-14 coverage of the turn_end abandonment lifecycle.
+
+    A turn that ends with tools still in `_tool_uses` (SDK-quirk
+    dropped Post) emits `tool_end(outcome="abandoned")` per still-open
+    tool. Without this, phantom in-flight tools would bleed into the
+    next turn's status payload.
+    """
+
+    def test_end_turn_abandons_open_tools(self) -> None:
+        """_end_turn() with default close_tools=True closes open tools."""
+        teammate = _make_teammate_with_mock_broker()
+        _add_tool(teammate, "Bash", "tu-orphan", started_ago=2.0)
+
+        teammate._end_turn()
+
+        # Tool record was emitted with outcome="abandoned"
+        sink = teammate._broker._sink
+        assert sink.write_tool_event.call_count == 1
+        kind, fields = sink.write_tool_event.call_args[0]
+        assert kind == "tool_end"
+        assert fields["outcome"] == "abandoned"
+        assert fields["tool_use_id"] == "tu-orphan"
+        # Dict cleared
+        assert teammate._tool_uses == {}
+        # tool_use_id added to recently-closed for late-Post dedup
+        assert "tu-orphan" in teammate._recently_closed_tool_use_ids
+        # turn_started cleared
+        assert teammate._current_turn_started_at_wallclock is None
+
+    def test_end_turn_with_close_tools_false_skips_close(self) -> None:
+        """Broker death/kill path uses close_tools=False to defer closure."""
+        teammate = _make_teammate_with_mock_broker()
+        _add_tool(teammate, "Bash", "tu-still-open", started_ago=2.0)
+
+        teammate._end_turn(close_tools=False)
+
+        # No tool_end emitted; dict still populated for the broker's
+        # _close_open_tools(reason="death"|"kill") to handle.
+        sink = teammate._broker._sink
+        assert sink.write_tool_event.call_count == 0
+        assert "tu-still-open" in teammate._tool_uses
+        # turn_started still cleared (the F6 contract end_turn always honored)
+        assert teammate._current_turn_started_at_wallclock is None
+
+    def test_end_turn_with_no_open_tools_is_noop_for_close(self) -> None:
+        """Empty _tool_uses → no transcript line, no error."""
+        teammate = _make_teammate_with_mock_broker()
+
+        teammate._end_turn()
+
+        sink = teammate._broker._sink
+        assert sink.write_tool_event.call_count == 0
+        assert teammate._current_turn_started_at_wallclock is None

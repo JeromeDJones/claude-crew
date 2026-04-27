@@ -135,5 +135,5 @@ class ProgrammableSDKClient(FakeSDKClient):
         matchers = self._hooks.get(event_name, [])
         for matcher in matchers:
             for hook_callback in matcher.hooks:
-                # Hook callbacks are bound methods that expect (inp, tool_use_id, ctx).
-                hook_callback(hook_input, tool_use_id, {})
+                # Hook callbacks are async (SDK contract: Awaitable return).
+                await hook_callback(hook_input, tool_use_id, {})
