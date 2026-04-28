@@ -30,7 +30,11 @@ from claude_crew.sdk_teammate import (
     INTERRUPT_GRACE_SECONDS,
     SHUTDOWN_TIMEOUT_SECONDS,
     SdkTeammate,
+    TurnDrainResult,
+    _SubagentUseEntry,
+    _ClosedSubagentEntry,
     _classify_error,
+    _collect_response_text,
     _payload_to_prompt,
     RateLimitedError,
 )
@@ -1030,10 +1034,10 @@ class TestToolExecutionHooks:
         # Activity should have advanced.
         assert teammate._last_activity_wallclock > initial_activity
 
-    async def test_subagent_stamps_activity_but_no_state(
+    async def test_subagent_stamps_activity_and_updates_subagent_state(
         self, broker, monkeypatch
     ) -> None:
-        """SC-10/D3: Subagent tool call stamps activity, NO state update, NO transcript."""
+        """SC-10/D3: Subagent tool call stamps activity, updates _subagent_uses (SC-12: _tool_uses untouched)."""
         fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
         _patch_sdk(monkeypatch, fake)
 
@@ -1054,9 +1058,14 @@ class TestToolExecutionHooks:
         }
         await teammate._on_pre_tool_use(hook_input, "tu-sub-1", {})
 
-        # Activity should have advanced, but current_tools should be empty.
+        # Activity should have advanced.
         assert teammate._last_activity_wallclock > initial_activity
+        # SC-12: _tool_uses and current_tools are completely unaffected by subagent events.
         assert teammate.status_snapshot()["current_tool_count"] == 0
+        assert teammate._tool_uses == {}
+        # Subagent state is populated in the F7 namespace.
+        assert "tu-sub-1" in teammate._subagent_uses
+        assert teammate._subagent_uses["tu-sub-1"].agent_id == "sub-1"
 
     async def test_pre_twice_last_write_wins(
         self, broker, monkeypatch
@@ -1191,3 +1200,556 @@ class TestToolExecutionHooks:
         expected_session_id = f"{broker.crew_id}-{tid}"
         assert recorded_query[1] == expected_session_id
         assert recorded_query[1] != "default"
+
+
+# ---------- F7: subagent-activity envelope BDD scenarios ----------
+
+
+class TestSubagentActivityEnvelopes:
+    """BDD scenarios for Feature #7 subagent-tracking fields (T1)."""
+
+    def _make_teammate(self) -> SdkTeammate:
+        """Return a fresh SdkTeammate without spawning it in a broker."""
+        return SdkTeammate(id="tm-f7", name="Builder", role="builder")
+
+    # SC1: SdkTeammate initializes subagent namespace fields
+    def test_subagent_fields_initialized(self) -> None:
+        """SC1: Fresh SdkTeammate has correct subagent namespace field defaults."""
+        import collections as col
+        tm = self._make_teammate()
+
+        assert tm._subagent_uses == {}
+        assert tm._closed_subagent_scratch == {}
+        assert isinstance(tm._recently_closed_subagent_use_ids, col.deque)
+        assert tm._recently_closed_subagent_use_ids.maxlen == 64
+        assert len(tm._recently_closed_subagent_use_ids) == 0
+        assert tm._last_subagent_completed is None
+        assert tm._task_notifs_by_tool_use_id == {}
+
+    # SC2: status_snapshot includes subagent fields with no subagents
+    def test_status_snapshot_includes_subagent_fields_empty(self) -> None:
+        """SC2: status_snapshot includes F7 fields with empty values when no subagents."""
+        tm = self._make_teammate()
+        snap = tm.status_snapshot()
+
+        assert snap["current_subagents"] == []
+        assert snap["last_subagent_completed"] is None
+        assert snap["in_flight_subagents_at_death"] is None
+        # Existing F6/F8 fields must still be present.
+        assert "last_activity_at_wallclock" in snap
+        assert "current_turn_started_at_wallclock" in snap
+        assert "idle_seconds" in snap
+        assert "current_tools" in snap
+        assert "current_tool" in snap
+        assert "current_tool_count" in snap
+        assert "last_tool_completed" in snap
+        assert "redaction_version" in snap
+
+    # SC3: status_snapshot reflects in-flight subagents from _subagent_uses
+    def test_status_snapshot_reflects_inflight_subagents(self) -> None:
+        """SC3: current_subagents includes entries from _subagent_uses."""
+        import time as t
+        tm = self._make_teammate()
+
+        now = t.time()
+        entry1 = _SubagentUseEntry(
+            agent_id="sub-a",
+            tool_use_id="tu-sa-1",
+            spawned_at_wallclock=now,
+        )
+        entry2 = _SubagentUseEntry(
+            agent_id="sub-b",
+            tool_use_id="tu-sa-2",
+            spawned_at_wallclock=now + 0.1,
+        )
+        tm._subagent_uses["tu-sa-1"] = entry1
+        tm._subagent_uses["tu-sa-2"] = entry2
+
+        snap = tm.status_snapshot()
+
+        assert len(snap["current_subagents"]) == 2
+        agent_ids = {e["agent_id"] for e in snap["current_subagents"]}
+        assert agent_ids == {"sub-a", "sub-b"}
+        tool_use_ids = {e["tool_use_id"] for e in snap["current_subagents"]}
+        assert tool_use_ids == {"tu-sa-1", "tu-sa-2"}
+        # Each entry has the three required fields.
+        for entry in snap["current_subagents"]:
+            assert "agent_id" in entry
+            assert "tool_use_id" in entry
+            assert "spawned_at_wallclock" in entry
+        # F8 fields unaffected — _tool_uses and current_tools are separate.
+        assert snap["current_tools"] == []
+        assert snap["current_tool_count"] == 0
+
+    # SC4: status_snapshot includes scratch entries (limbo-state fix)
+    def test_status_snapshot_includes_scratch_entries(self) -> None:
+        """SC4: current_subagents includes entries from _closed_subagent_scratch."""
+        import time as t
+        tm = self._make_teammate()
+
+        now = t.time()
+        # _subagent_uses is empty; only the scratch has an entry.
+        scratch_entry = _ClosedSubagentEntry(
+            agent_id="sub-limbo",
+            tool_use_id="tu-limbo-1",
+            spawned_at_wallclock=now,
+            finished_at_wallclock=now + 0.5,
+            hook_outcome="ok",
+        )
+        tm._closed_subagent_scratch["tu-limbo-1"] = scratch_entry
+
+        snap = tm.status_snapshot()
+
+        assert len(snap["current_subagents"]) == 1
+        assert snap["current_subagents"][0]["agent_id"] == "sub-limbo"
+        assert snap["current_subagents"][0]["tool_use_id"] == "tu-limbo-1"
+        # last_subagent_completed is still None — nothing populated it.
+        assert snap["last_subagent_completed"] is None
+
+    # SC5: _record_task_notif stores by tool_use_id
+    def test_record_task_notif_stores_by_tool_use_id(self) -> None:
+        """SC5: _record_task_notif stores the TaskNotificationMessage keyed by tool_use_id."""
+        tm = self._make_teammate()
+
+        tnm = TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id="task-1",
+            status="completed",
+            output_file="",
+            summary="done",
+            uuid="tn-sc5",
+            session_id="default",
+        )
+        tm._record_task_notif("tu-1", tnm)
+
+        assert "tu-1" in tm._task_notifs_by_tool_use_id
+        assert tm._task_notifs_by_tool_use_id["tu-1"] is tnm
+
+
+# ---------- T3: subagent hook extension BDD scenarios ----------
+
+
+class TestSubagentHookExtensions:
+    """BDD scenarios for Feature #7 Task 3: subagent Pre/Post hook tracking + JSONL emit."""
+
+    def _make_teammate(self) -> SdkTeammate:
+        return SdkTeammate(id="tm-t3", name="Builder", role="builder")
+
+    def _make_fake_broker(self) -> tuple[Any, list[tuple[str, dict]]]:
+        """Return (fake_broker, events_list) where events_list records write_tool_event calls."""
+        events: list[tuple[str, dict]] = []
+
+        class _FakeSink:
+            def write_tool_event(self, event: str, fields: dict) -> None:
+                events.append((event, fields))
+
+        class _FakeBroker:
+            _sink = _FakeSink()
+
+        return _FakeBroker(), events
+
+    def _make_tnm(
+        self,
+        status: str = "completed",
+        task_id: str = "task-1",
+        summary: str = "Done.",
+        tool_use_id: str | None = None,
+        uuid: str = "tn-1",
+    ) -> TaskNotificationMessage:
+        return TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id=task_id,
+            status=status,  # type: ignore[arg-type]
+            output_file="",
+            summary=summary,
+            uuid=uuid,
+            session_id="default",
+            tool_use_id=tool_use_id,
+        )
+
+    async def test_pre_tool_use_spawn_populates_subagent_uses(self) -> None:
+        """SC1: PreToolUse with agent_id → _subagent_uses[tu] populated, subagent_spawn in transcript, _tool_uses empty."""
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        hook_input = {
+            "agent_id": "sub-agent-1",
+            "tool_name": "Task",
+            "tool_input": {},
+        }
+        result = await tm._on_pre_tool_use(hook_input, "tu-spawn-1", {})
+
+        assert result == {}
+        # _subagent_uses populated.
+        assert "tu-spawn-1" in tm._subagent_uses
+        entry = tm._subagent_uses["tu-spawn-1"]
+        assert entry.agent_id == "sub-agent-1"
+        assert entry.tool_use_id == "tu-spawn-1"
+        assert entry.spawned_at_wallclock > 0.0
+        # subagent_spawn emitted in transcript.
+        spawn_events = [e for e in events if e[0] == "subagent_spawn"]
+        assert len(spawn_events) == 1
+        fields = spawn_events[0][1]
+        assert fields["teammate_id"] == "tm-t3"
+        assert fields["agent_id"] == "sub-agent-1"
+        assert fields["tool_use_id"] == "tu-spawn-1"
+        # SC-12: _tool_uses is completely untouched.
+        assert tm._tool_uses == {}
+        snap = tm.status_snapshot()
+        assert snap["current_tools"] == []
+        assert snap["current_tool_count"] == 0
+
+    async def test_post_tool_use_close_moves_to_scratch(self) -> None:
+        """SC2: PostToolUse with agent_id → _subagent_uses empty, _closed_subagent_scratch populated, no subagent_result yet."""
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        # Pre-populate _subagent_uses.
+        import time as _time
+        now = _time.time()
+        from claude_crew.sdk_teammate import _SubagentUseEntry
+        tm._subagent_uses["tu-close-1"] = _SubagentUseEntry(
+            agent_id="sub-close-1",
+            tool_use_id="tu-close-1",
+            spawned_at_wallclock=now,
+        )
+
+        hook_input = {
+            "agent_id": "sub-close-1",
+            "tool_name": "Task",
+        }
+        result = await tm._on_post_tool_use(hook_input, "tu-close-1", {})
+
+        assert result == {}
+        # Moved out of in-flight dict.
+        assert "tu-close-1" not in tm._subagent_uses
+        # Moved into scratch.
+        assert "tu-close-1" in tm._closed_subagent_scratch
+        scratch = tm._closed_subagent_scratch["tu-close-1"]
+        assert scratch.agent_id == "sub-close-1"
+        assert scratch.hook_outcome == "ok"
+        # No subagent_result emitted yet — that happens in _end_turn.
+        result_events = [e for e in events if e[0] == "subagent_result"]
+        assert len(result_events) == 0
+
+    def test_end_turn_emits_subagent_result_with_tnm(self) -> None:
+        """SC3: _end_turn with scratch entry + matching TNM → subagent_result with outcome=ok, summary, tnm_missing=False."""
+        import time as _time
+        from claude_crew.sdk_teammate import _ClosedSubagentEntry
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        now = _time.time()
+        tm._closed_subagent_scratch["tu-emit-1"] = _ClosedSubagentEntry(
+            agent_id="sub-emit-1",
+            tool_use_id="tu-emit-1",
+            spawned_at_wallclock=now - 1.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+        tnm = self._make_tnm(status="completed", summary="Done.", tool_use_id="tu-emit-1", uuid="tn-emit-1")
+        tm._task_notifs_by_tool_use_id["tu-emit-1"] = tnm
+
+        tm._end_turn()
+
+        result_events = [e for e in events if e[0] == "subagent_result"]
+        assert len(result_events) == 1
+        fields = result_events[0][1]
+        assert fields["teammate_id"] == "tm-t3"
+        assert fields["agent_id"] == "sub-emit-1"
+        assert fields["tool_use_id"] == "tu-emit-1"
+        assert fields["outcome"] == "ok"
+        assert fields["summary"] == "Done."
+        assert fields["tnm_missing"] is False
+        assert fields["duration_seconds"] >= 0.0
+        # Both dicts cleared after _end_turn.
+        assert tm._closed_subagent_scratch == {}
+        assert tm._task_notifs_by_tool_use_id == {}
+
+    def test_end_turn_emits_subagent_result_tnm_missing(self) -> None:
+        """SC4: _end_turn with scratch entry, no TNM → subagent_result with tnm_missing=True, outcome from hook."""
+        import time as _time
+        from claude_crew.sdk_teammate import _ClosedSubagentEntry
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        now = _time.time()
+        tm._closed_subagent_scratch["tu-nomatch-1"] = _ClosedSubagentEntry(
+            agent_id="sub-nomatch-1",
+            tool_use_id="tu-nomatch-1",
+            spawned_at_wallclock=now - 2.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+        # No TNM stored for this tool_use_id.
+
+        tm._end_turn()
+
+        result_events = [e for e in events if e[0] == "subagent_result"]
+        assert len(result_events) == 1
+        fields = result_events[0][1]
+        assert fields["tnm_missing"] is True
+        # Outcome falls back to hook_outcome.
+        assert fields["outcome"] == "ok"
+        assert fields["summary"] is None
+
+    async def test_f8_invariants_sc12_tool_uses_unaffected(self) -> None:
+        """SC5/SC-12: subagent Pre + Post fire → _tool_uses unchanged, current_tools == [], last_tool_completed unchanged."""
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        import time as _time
+        hook_pre = {"agent_id": "sub-inv-1", "tool_name": "Task", "tool_input": {}}
+        await tm._on_pre_tool_use(hook_pre, "tu-inv-1", {})
+        hook_post = {"agent_id": "sub-inv-1", "tool_name": "Task"}
+        await tm._on_post_tool_use(hook_post, "tu-inv-1", {})
+
+        assert tm._tool_uses == {}
+        snap = tm.status_snapshot()
+        assert snap["current_tools"] == []
+        assert snap["last_tool_completed"] is None
+
+    async def test_parallel_fan_out_sc11(self) -> None:
+        """SC6/SC-11: Two subagent Pre fires → _subagent_uses has both, status_snapshot has two entries."""
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        hook_pre_1 = {"agent_id": "sub-fanout-1", "tool_name": "Task", "tool_input": {}}
+        hook_pre_2 = {"agent_id": "sub-fanout-2", "tool_name": "Task", "tool_input": {}}
+        await tm._on_pre_tool_use(hook_pre_1, "tu-fanout-1", {})
+        await tm._on_pre_tool_use(hook_pre_2, "tu-fanout-2", {})
+
+        assert len(tm._subagent_uses) == 2
+        assert "tu-fanout-1" in tm._subagent_uses
+        assert "tu-fanout-2" in tm._subagent_uses
+        snap = tm.status_snapshot()
+        assert len(snap["current_subagents"]) == 2
+        agent_ids = {e["agent_id"] for e in snap["current_subagents"]}
+        assert agent_ids == {"sub-fanout-1", "sub-fanout-2"}
+
+    async def test_hook_exception_isolation_sc13(self) -> None:
+        """SC7/SC-13: Inject exception in D3 branch (write_tool_event raises) → hook returns {} without crashing."""
+        tm = self._make_teammate()
+
+        class _RaisingSink:
+            def write_tool_event(self, event: str, fields: dict) -> None:
+                raise RuntimeError("disk full")
+
+        class _RaisingBroker:
+            _sink = _RaisingSink()
+
+        tm._broker = _RaisingBroker()  # type: ignore[assignment]
+
+        hook_input = {"agent_id": "sub-exc-1", "tool_name": "Task", "tool_input": {}}
+        result = await tm._on_pre_tool_use(hook_input, "tu-exc-1", {})
+
+        # Hook must return {} and not raise even when JSONL write fails.
+        assert result == {}
+        # Because write_tool_event raised before dict was populated (F2 ordering),
+        # _subagent_uses should NOT have the entry.
+        assert "tu-exc-1" not in tm._subagent_uses
+
+    async def test_close_open_subagents_in_flight_sc8(self) -> None:
+        """SC8/SC-8: Two entries in _subagent_uses → subagent_abandoned_batch emitted, _subagent_uses cleared."""
+        import time as _time
+        from claude_crew.sdk_teammate import _SubagentUseEntry
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        now = _time.time()
+        tm._subagent_uses["tu-ab-1"] = _SubagentUseEntry(agent_id="sub-ab-1", tool_use_id="tu-ab-1", spawned_at_wallclock=now)
+        tm._subagent_uses["tu-ab-2"] = _SubagentUseEntry(agent_id="sub-ab-2", tool_use_id="tu-ab-2", spawned_at_wallclock=now + 0.1)
+
+        tm._close_open_subagents(reason="death")
+
+        abandon_events = [e for e in events if e[0] == "subagent_abandoned_batch"]
+        assert len(abandon_events) == 1
+        fields = abandon_events[0][1]
+        assert fields["teammate_id"] == "tm-t3"
+        assert fields["reason"] == "death"
+        assert fields["count"] == 2
+        agent_ids = {s["agent_id"] for s in fields["subagents"]}
+        assert agent_ids == {"sub-ab-1", "sub-ab-2"}
+        assert tm._subagent_uses == {}
+
+    def test_close_open_subagents_scratch_only_sentinel_f1(self) -> None:
+        """SC9/sentinel F1: _subagent_uses empty, one entry in _closed_subagent_scratch → subagent_abandoned_batch emitted."""
+        import time as _time
+        from claude_crew.sdk_teammate import _ClosedSubagentEntry
+        tm = self._make_teammate()
+        broker, events = self._make_fake_broker()
+        tm._broker = broker  # type: ignore[assignment]
+
+        now = _time.time()
+        tm._closed_subagent_scratch["tu-scratch-1"] = _ClosedSubagentEntry(
+            agent_id="sub-scratch-1",
+            tool_use_id="tu-scratch-1",
+            spawned_at_wallclock=now - 1.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+
+        tm._close_open_subagents(reason="kill")
+
+        abandon_events = [e for e in events if e[0] == "subagent_abandoned_batch"]
+        assert len(abandon_events) == 1
+        fields = abandon_events[0][1]
+        assert fields["reason"] == "kill"
+        assert fields["count"] == 1
+        assert fields["subagents"][0]["agent_id"] == "sub-scratch-1"
+        assert tm._closed_subagent_scratch == {}
+
+
+class TestCollectResponseTextT2:
+    """BDD scenarios for Feature #7 Task 2: _collect_response_text + TurnDrainResult."""
+
+    def _make_tnm(
+        self,
+        status: str,
+        task_id: str = "task-1",
+        summary: str = "done",
+        tool_use_id: str | None = None,
+        uuid: str = "tn-1",
+    ) -> TaskNotificationMessage:
+        return TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id=task_id,
+            status=status,  # type: ignore[arg-type]
+            output_file="",
+            summary=summary,
+            uuid=uuid,
+            session_id="default",
+            tool_use_id=tool_use_id,
+        )
+
+    async def test_failed_task_notifs_accumulates_failed_and_stopped(self) -> None:
+        """SC-T2-1: _collect_response_text accumulates failed/stopped TNMs into list.
+
+        Given fake client yields two TNMs (failed, stopped) and one text block;
+        When called with no callback;
+        Then result.failed_task_notifs has two entries; result.text is the text content.
+        """
+        tnm_failed = self._make_tnm("failed", task_id="t1", summary="boom", uuid="tn-f")
+        tnm_stopped = self._make_tnm("stopped", task_id="t2", summary="halt", uuid="tn-s")
+
+        class _FakeClient:
+            async def receive_response(self):
+                yield tnm_failed
+                yield AssistantMessage(content=[TextBlock(text="parent said ok")], model="fake")
+                yield tnm_stopped
+
+        result = await _collect_response_text(_FakeClient())
+
+        assert isinstance(result, TurnDrainResult)
+        assert result.text == "parent said ok"
+        assert len(result.failed_task_notifs) == 2
+        assert result.failed_task_notifs[0] is tnm_failed
+        assert result.failed_task_notifs[1] is tnm_stopped
+
+    async def test_record_task_notif_callback_fires_for_all_statuses(self) -> None:
+        """SC-T2-2: record_task_notif callback fires for all TNM statuses.
+
+        Given client yields TNMs with statuses: completed, failed, stopped;
+        And a callback recording (tool_use_id, tnm) pairs;
+        When _collect_response_text called with that callback;
+        Then callback called three times; failed_task_notifs has two (failed, stopped only).
+        """
+        tnm_completed = self._make_tnm("completed", task_id="t1", uuid="tn-c", tool_use_id="tu-1")
+        tnm_failed = self._make_tnm("failed", task_id="t2", uuid="tn-f", tool_use_id="tu-2")
+        tnm_stopped = self._make_tnm("stopped", task_id="t3", uuid="tn-s", tool_use_id="tu-3")
+
+        class _FakeClient:
+            async def receive_response(self):
+                yield tnm_completed
+                yield tnm_failed
+                yield tnm_stopped
+
+        recorded: list[tuple[str, TaskNotificationMessage]] = []
+
+        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((tool_use_id, tnm))
+
+        result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
+
+        # Callback fires for all 3 statuses
+        assert len(recorded) == 3
+        assert recorded[0] == ("tu-1", tnm_completed)
+        assert recorded[1] == ("tu-2", tnm_failed)
+        assert recorded[2] == ("tu-3", tnm_stopped)
+
+        # Only failed+stopped go into failed_task_notifs
+        assert len(result.failed_task_notifs) == 2
+        assert result.failed_task_notifs[0] is tnm_failed
+        assert result.failed_task_notifs[1] is tnm_stopped
+
+    async def test_record_task_notif_skips_tnm_with_null_tool_use_id(self) -> None:
+        """SC-T2-3: record_task_notif callback is NOT called when tool_use_id is None.
+
+        Given TNM with tool_use_id=None;
+        When callback would otherwise fire;
+        Then callback NOT called for that TNM.
+        TNM still counted in failed_task_notifs if status is failed.
+        """
+        tnm_no_id = self._make_tnm("failed", task_id="t1", uuid="tn-noid", tool_use_id=None)
+        tnm_with_id = self._make_tnm("completed", task_id="t2", uuid="tn-withid", tool_use_id="tu-x")
+
+        class _FakeClient:
+            async def receive_response(self):
+                yield tnm_no_id
+                yield tnm_with_id
+
+        recorded: list[tuple[str, TaskNotificationMessage]] = []
+
+        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((tool_use_id, tnm))
+
+        result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
+
+        # Only the TNM with a tool_use_id triggers the callback
+        assert len(recorded) == 1
+        assert recorded[0] == ("tu-x", tnm_with_id)
+
+        # failed TNM (null tool_use_id) still counted in failed_task_notifs
+        assert len(result.failed_task_notifs) == 1
+        assert result.failed_task_notifs[0] is tnm_no_id
+
+    async def test_handle_one_turn_synthesis_uses_failed_task_notifs(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-T2-4: _handle_one_turn synthesis uses failed_task_notifs.
+
+        Given turn produces empty text and one failed TNM;
+        When _handle_one_turn completes;
+        Then lead receives invalid_response envelope with TNM summary.
+        """
+        tnm_failed = self._make_tnm(
+            "failed", task_id="t-synth", summary="builder exploded", uuid="tn-synth",
+        )
+
+        fake = FakeSDKClient(scripted_responses=[
+            [tnm_failed],  # stream yields only a failed TNM, no text
+        ])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="go",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=2.0)
+
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "invalid_response"
+        assert "builder exploded" in msgs[0].payload.get("message", "")

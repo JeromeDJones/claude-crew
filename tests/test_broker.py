@@ -23,6 +23,7 @@ from claude_crew.broker import (
 )
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import StubTeammate, Teammate, _ToolUseEntry
+from claude_crew.sdk_teammate import _SubagentUseEntry
 
 
 class _NoopTeammate(Teammate):
@@ -774,3 +775,175 @@ class TestT4ToolClosureOnDeathAndKill:
         assert te["tool_name"] == "mcp__claude-crew__send_to"
         assert te["outcome"] == "abandoned"
         assert te["teammate_id"] == tid
+
+
+# ---------- T4 (F7): subagent-activity fields surfaced via broker ----------
+
+class _SubagentAwareNoopTeammate(_NoopTeammate):
+    """Extends _NoopTeammate with F7 subagent-tracking fields and snapshot support.
+
+    This mirrors the _subagent_uses / _closed_subagent_scratch / _last_subagent_completed
+    fields that SdkTeammate owns, so broker tests can exercise the T4 subagent paths
+    without spinning up a real SDK subprocess.
+    """
+
+    def __init__(self, id: str, name: str, role: str) -> None:
+        super().__init__(id=id, name=name, role=role)
+        self._subagent_uses: dict[str, _SubagentUseEntry] = {}
+        self._closed_subagent_scratch: dict = {}
+        self._last_subagent_completed: dict[str, Any] | None = None
+
+    def status_snapshot(self) -> dict[str, Any]:
+        snap = super().status_snapshot()
+        subagent_entries = [
+            {
+                "agent_id": e.agent_id,
+                "tool_use_id": e.tool_use_id,
+                "spawned_at_wallclock": e.spawned_at_wallclock,
+            }
+            for e in self._subagent_uses.values()
+        ]
+        snap["current_subagents"] = subagent_entries
+        snap["last_subagent_completed"] = self._last_subagent_completed
+        snap["in_flight_subagents_at_death"] = None
+        return snap
+
+    def _close_open_subagents(self, reason: str) -> None:
+        """Drain in-flight subagent state (stub — records call for test assertions)."""
+        self._subagents_closed_reason = reason
+        self._subagent_uses.clear()
+        self._closed_subagent_scratch.clear()
+
+
+def _subagent_aware_factory(id: str, name: str, role: str, **_kw) -> _SubagentAwareNoopTeammate:
+    return _SubagentAwareNoopTeammate(id=id, name=name, role=role)
+
+
+@pytest.mark.asyncio
+class TestSubagentBrokerIntegration:
+    """T4 BDD: subagent-activity fields surfaced in get_teammate_status for alive and dead paths.
+
+    Scenarios:
+      1. Alive status includes subagent fields (all empty/null baseline)
+      2. Alive status reflects in-flight subagents from _subagent_uses
+      3. Tombstone captures in_flight_subagents_at_death count
+      4. Tombstone preserves last_subagent_completed (D9 flip — F8 symmetry)
+      5. _close_open_subagents called on death; transcript contains subagent_abandoned_batch
+    """
+
+    async def test_alive_status_includes_subagent_fields_baseline(
+        self, broker: Broker,
+    ) -> None:
+        """SC: alive teammate has current_subagents=[], last_subagent_completed=None,
+        in_flight_subagents_at_death=None, plus F6/F8 fields all present."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_subagent_aware_factory)
+        status = broker.get_teammate_status(tid)
+
+        assert status["alive"] is True
+        assert status["current_subagents"] == []
+        assert status["last_subagent_completed"] is None
+        assert status["in_flight_subagents_at_death"] is None
+        # Verify F6/F8 fields still present (no regression)
+        for key in ("current_tools", "current_tool", "current_tool_count",
+                    "last_tool_completed", "redaction_version"):
+            assert key in status, f"F8 field missing from alive status: {key!r}"
+
+    async def test_alive_status_reflects_in_flight_subagents(
+        self, broker: Broker,
+    ) -> None:
+        """SC: alive teammate with one entry in _subagent_uses → current_subagents has
+        one entry with agent_id, tool_use_id, and spawned_at_wallclock."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_subagent_aware_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        entry = _SubagentUseEntry(
+            agent_id="agent-abc",
+            tool_use_id="toolu_subagent_1",
+            spawned_at_wallclock=time.time() - 2.0,
+        )
+        teammate._subagent_uses["toolu_subagent_1"] = entry
+
+        status = broker.get_teammate_status(tid)
+        assert len(status["current_subagents"]) == 1
+        sub = status["current_subagents"][0]
+        assert sub["agent_id"] == "agent-abc"
+        assert sub["tool_use_id"] == "toolu_subagent_1"
+        assert "spawned_at_wallclock" in sub
+
+    async def test_tombstone_captures_in_flight_subagent_count(
+        self, broker: Broker,
+    ) -> None:
+        """SC: two entries in _subagent_uses when killed → in_flight_subagents_at_death == 2
+        in dead status."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_subagent_aware_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        now = time.time()
+        teammate._subagent_uses["toolu_sub_a"] = _SubagentUseEntry(
+            agent_id="agent-a", tool_use_id="toolu_sub_a", spawned_at_wallclock=now - 3.0,
+        )
+        teammate._subagent_uses["toolu_sub_b"] = _SubagentUseEntry(
+            agent_id="agent-b", tool_use_id="toolu_sub_b", spawned_at_wallclock=now - 1.5,
+        )
+
+        await broker.kill_teammate(tid)
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["in_flight_subagents_at_death"] == 2
+        # After death, current_subagents must be empty
+        assert status["current_subagents"] == []
+
+    async def test_tombstone_preserves_last_subagent_completed(
+        self, broker: Broker,
+    ) -> None:
+        """SC (D9 flip — F8 symmetry): teammate that ran one subagent (so
+        _last_subagent_completed is set) then was killed → dead status preserves
+        last_subagent_completed from the tombstone."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_subagent_aware_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        completed_record: dict[str, Any] = {
+            "agent_id": "agent-done",
+            "tool_use_id": "toolu_done",
+            "finished_at_wallclock": time.time() - 0.5,
+            "hook_outcome": "success",
+        }
+        teammate._last_subagent_completed = completed_record
+
+        await broker.kill_teammate(tid)
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["last_subagent_completed"] == completed_record, (
+            "last_subagent_completed must be preserved in tombstone"
+        )
+
+    async def test_close_open_subagents_called_on_death(
+        self, broker: Broker,
+    ) -> None:
+        """SC: one in-flight subagent when killed → _close_open_subagents was called
+        (sentinel: _subagents_closed_reason set) and dead status has
+        in_flight_subagents_at_death == 1."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_subagent_aware_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        teammate._subagent_uses["toolu_active"] = _SubagentUseEntry(
+            agent_id="agent-running",
+            tool_use_id="toolu_active",
+            spawned_at_wallclock=time.time() - 1.0,
+        )
+
+        # Capture count before kill (broker reads it at tombstone time)
+        await broker.kill_teammate(tid)
+
+        # Verify broker tombstoned with correct count
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["in_flight_subagents_at_death"] == 1
+
+        # Verify _close_open_subagents was called on the teammate
+        assert hasattr(teammate, "_subagents_closed_reason"), (
+            "_close_open_subagents was not called — _subagents_closed_reason not set"
+        )
+        assert teammate._subagents_closed_reason == "kill"
