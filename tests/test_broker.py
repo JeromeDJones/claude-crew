@@ -947,3 +947,143 @@ class TestSubagentBrokerIntegration:
             "_close_open_subagents was not called — _subagents_closed_reason not set"
         )
         assert teammate._subagents_closed_reason == "kill"
+
+
+# ---------- F9: lead long-poll / wait_for_lead_message ----------
+
+
+@pytest.mark.asyncio
+class TestLeadMessageLongPoll:
+    """F9: SC-11 (LEAD inbox removal) and wait_for_lead_message contract.
+
+    Scenarios:
+      1. LEAD_ID absent from _inboxes at init (SC-11 baseline)
+      2. LEAD_ID stays absent after lead-bound sends; messages still in _log (SC-11)
+      3. wait_for_lead_message(0) is a no-op (immediate return)
+      4. wait_for_lead_message(-x) is a no-op (immediate return)
+      5. wait_for_lead_message(0.2) times out cleanly in ~0.2 s (SC-4)
+      6. wait_for_lead_message(5) wakes when a LEAD-bound send arrives (SC-3)
+      7. Teammate-to-teammate send does NOT wake a lead long-poll (SC-5)
+      8. Cancellation of wait_for_lead_message does not deadlock subsequent ops (SC-7)
+      9. shutdown_all wakes any pending wait_for_lead_message (SC-10)
+    """
+
+    # SC-11: LEAD_ID not in _inboxes immediately after Broker.__init__
+    async def test_lead_id_not_in_inboxes_at_init(self, broker: Broker) -> None:
+        assert LEAD_ID not in broker._inboxes  # type: ignore[attr-defined]
+
+    # SC-11: LEAD_ID stays absent after multiple lead-bound sends; messages readable via _log
+    async def test_lead_id_not_in_inboxes_after_lead_sends(self, broker: Broker) -> None:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        for i in range(3):
+            env = Envelope(
+                id=new_message_id(), seq=0, sender=tid, recipient=LEAD_ID,
+                timestamp=0.0, payload=i,
+            )
+            await broker.send(env)
+        assert LEAD_ID not in broker._inboxes  # type: ignore[attr-defined]
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert len(msgs) == 3
+        assert [m.payload for m in msgs] == [0, 1, 2]
+
+    # wait_for_lead_message no-ops on timeout <= 0
+    async def test_wait_for_lead_message_noop_on_zero(self, broker: Broker) -> None:
+        start = time.monotonic()
+        await broker.wait_for_lead_message(0.0)  # type: ignore[attr-defined]
+        assert time.monotonic() - start < 0.05
+
+    async def test_wait_for_lead_message_noop_on_negative(self, broker: Broker) -> None:
+        start = time.monotonic()
+        await broker.wait_for_lead_message(-5.0)  # type: ignore[attr-defined]
+        assert time.monotonic() - start < 0.05
+
+    # SC-4: timeout returns silently after the specified duration
+    async def test_wait_for_lead_message_times_out(self, broker: Broker) -> None:
+        start = time.monotonic()
+        await broker.wait_for_lead_message(0.2)  # type: ignore[attr-defined]
+        elapsed = time.monotonic() - start
+        assert 0.15 <= elapsed <= 0.6, f"expected ~0.2 s wait, got {elapsed:.3f} s"
+
+    # SC-3: wakes when a LEAD-bound send arrives during wait
+    async def test_wait_for_lead_message_wakes_on_lead_send(self, broker: Broker) -> None:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        async def _delayed_send() -> None:
+            await asyncio.sleep(0.2)
+            env = Envelope(
+                id=new_message_id(), seq=0, sender=tid, recipient=LEAD_ID,
+                timestamp=0.0, payload="wake",
+            )
+            await broker.send(env)
+
+        send_task = asyncio.create_task(_delayed_send())
+        start = time.monotonic()
+        await broker.wait_for_lead_message(5.0)  # type: ignore[attr-defined]
+        elapsed = time.monotonic() - start
+        await send_task
+
+        assert 0.1 <= elapsed <= 0.7, f"expected ~0.2 s wake, got {elapsed:.3f} s"
+        assert len(broker.get_messages(recipient=LEAD_ID)) == 1
+
+    # SC-5: teammate-to-teammate send does NOT notify the lead Condition
+    async def test_teammate_send_does_not_wake_lead_poll(self, broker: Broker) -> None:
+        a = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        b_id = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        async def _teammate_send() -> None:
+            await asyncio.sleep(0.05)
+            env = Envelope(
+                id=new_message_id(), seq=0, sender=a, recipient=b_id,
+                timestamp=0.0, payload="peer-msg",
+            )
+            await broker.send(env)
+
+        task = asyncio.create_task(_teammate_send())
+        start = time.monotonic()
+        # Times out — NOT woken by the teammate-to-teammate send
+        await broker.wait_for_lead_message(0.2)  # type: ignore[attr-defined]
+        elapsed = time.monotonic() - start
+        await task
+
+        assert elapsed >= 0.15, (
+            f"lead poll was spuriously woken by a teammate-to-teammate send: {elapsed:.3f} s"
+        )
+
+    # SC-7: cancellation does not leave the Condition locked / deadlock subsequent ops
+    async def test_cancellation_does_not_deadlock(self, broker: Broker) -> None:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        poll_task = asyncio.create_task(
+            broker.wait_for_lead_message(10.0)  # type: ignore[attr-defined]
+        )
+        await asyncio.sleep(0.05)
+        poll_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poll_task
+
+        # Subsequent send must not deadlock; fresh get_messages must return the message.
+        env = Envelope(
+            id=new_message_id(), seq=0, sender=tid, recipient=LEAD_ID,
+            timestamp=0.0, payload="after-cancel",
+        )
+        stamped = await asyncio.wait_for(broker.send(env), timeout=1.0)
+        assert stamped is not None
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert len(msgs) == 1
+        assert msgs[0].payload == "after-cancel"
+
+    # SC-10: shutdown_all wakes any pending wait_for_lead_message cleanly
+    async def test_shutdown_all_wakes_pending_long_poll(self) -> None:
+        b = Broker()  # manual lifecycle — not the fixture
+
+        poll_task = asyncio.create_task(
+            b.wait_for_lead_message(30.0)  # type: ignore[attr-defined]
+        )
+        await asyncio.sleep(0.05)
+
+        await b.shutdown_all()  # must notify Condition before closing sink
+
+        done, _ = await asyncio.wait([poll_task], timeout=0.5)
+        assert poll_task in done, (
+            "wait_for_lead_message did not return after shutdown_all"
+        )

@@ -65,7 +65,8 @@ class Broker:
         self.crew_id: str = uuid4().hex[:8]
         self._teammates: dict[str, Teammate] = {}
         self._info: dict[str, TeammateInfo] = {}
-        self._inboxes: dict[str, asyncio.Queue] = {LEAD_ID: asyncio.Queue()}
+        self._inboxes: dict[str, asyncio.Queue] = {}
+        self._lead_message_condition: asyncio.Condition = asyncio.Condition()
         self._log: list[Envelope] = []
         self._seen_ids: set[str] = set()
         self._next_seq: int = 1
@@ -315,6 +316,10 @@ class Broker:
         self._sink.write_lifecycle("shutdown", {
             "teammate_count": len(teammate_ids),
         })
+        # Wake any pending long-polls before closing the sink so they return
+        # cleanly rather than hanging until their wait_seconds cap expires.
+        async with self._lead_message_condition:
+            self._lead_message_condition.notify_all()
         self._sink.close()
 
     # ---------- send / broadcast ----------
@@ -349,7 +354,15 @@ class Broker:
         self._seen_ids.add(stamped.id)
         self._log.append(stamped)
         self._sink.write_envelope(stamped.to_dict())
-        await self._inboxes[stamped.recipient].put(stamped)
+        if stamped.recipient == LEAD_ID:
+            # LEAD has no inbox queue; readers consume via get_messages(_log).
+            # Notify the long-poll Condition so any waiting get_messages call wakes.
+            # CRITICAL: notify comes AFTER _log.append so every waiter that wakes
+            # is guaranteed to find the new envelope when it re-reads _log.
+            async with self._lead_message_condition:
+                self._lead_message_condition.notify_all()
+        else:
+            await self._inboxes[stamped.recipient].put(stamped)
         return stamped
 
     async def broadcast(
@@ -400,6 +413,26 @@ class Broker:
         if limit is not None:
             result = result[:limit]
         return result
+
+    async def wait_for_lead_message(self, timeout: float) -> None:
+        """Block until any send to LEAD fires the Condition, or timeout elapses.
+
+        No-op when timeout <= 0. Returns silently on timeout (no exception).
+        The caller is responsible for re-reading get_messages() after this
+        returns — this helper does not inspect or modify _log.
+
+        Uses asyncio.timeout() (Python 3.11+, project requires 3.12) rather than
+        asyncio.wait_for() to avoid the extra Task-wrapping semantics of the latter
+        for asyncio.Condition.wait() coroutines.
+        """
+        if timeout <= 0:
+            return
+        async with self._lead_message_condition:
+            try:
+                async with asyncio.timeout(timeout):
+                    await self._lead_message_condition.wait()
+            except TimeoutError:
+                pass
 
     def list_crew(self) -> list[TeammateInfo]:
         """Return all TeammateInfo entries, including tombstoned (alive=False) teammates."""

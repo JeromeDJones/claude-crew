@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from claude_crew.broker import LEAD_ID, Broker
+from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.server import make_server
 
 
@@ -285,3 +288,129 @@ class TestBroadcastSkippedDead:
             assert result["delivered_to"] == 2
             assert len(result["message_ids"]) == 2
             assert tid_c in result["skipped_dead"]
+
+
+# ---------- F9: get_messages long-poll (wait_seconds parameter) ----------
+
+
+class TestGetMessagesLongPollTool:
+    """F9 SC-1/2/3/4/6 — wait_seconds parameter on the get_messages MCP tool.
+
+    Scenarios:
+      1. explicit wait_seconds=0 → bit-for-bit identical (SC-1)
+      2. messages already in _log → return immediately even with large wait_seconds (SC-2)
+      3. block-and-wake: long-poll returns when a LEAD-bound send fires mid-wait (SC-3)
+      4. timeout: no message arrives → empty list, correct shape, no error (SC-4)
+      5. server-layer cap: wait_seconds=9999 → broker helper called with 600.0 (SC-6)
+    """
+
+    async def test_wait_seconds_zero_preserves_existing_behavior(self) -> None:
+        """SC-1: explicit wait_seconds=0 → same response shape as the default."""
+        async with _client() as s:
+            await s.initialize()
+            result = _content_json(
+                await s.call_tool("get_messages", {"wait_seconds": 0}),
+            )
+        assert result["messages"] == []
+        assert result["next_seq"] == 0
+
+    async def test_messages_present_returns_immediately(self) -> None:
+        """SC-2: wait_seconds>0 but messages already in _log → no blocking."""
+        b = Broker()
+        # Inject a message to LEAD directly on the broker before the tool call.
+        env = Envelope(
+            id=new_message_id(), seq=0, sender="t-injected", recipient=LEAD_ID,
+            timestamp=time.time(), payload={"pre": "loaded"},
+        )
+        await b.send(env)
+
+        start = time.monotonic()
+        async with create_connected_server_and_client_session(make_server(broker=b)) as s:
+            await s.initialize()
+            result = _content_json(
+                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": 5.0}),
+            )
+        elapsed = time.monotonic() - start
+
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["payload"] == {"pre": "loaded"}
+        assert elapsed < 0.5, f"should return immediately, got {elapsed:.3f} s"
+        await b.shutdown_all()
+
+    async def test_blocks_until_message_arrives(self) -> None:
+        """SC-3: long-poll blocks, then returns when a LEAD-bound send fires."""
+        b = Broker()
+
+        async def _send_after_delay() -> None:
+            await asyncio.sleep(0.2)
+            env = Envelope(
+                id=new_message_id(), seq=0, sender=LEAD_ID, recipient=LEAD_ID,
+                timestamp=time.time(), payload={"woke": True},
+            )
+            await b.send(env)
+
+        start = time.monotonic()
+        async with create_connected_server_and_client_session(make_server(broker=b)) as s:
+            await s.initialize()
+            send_task = asyncio.create_task(_send_after_delay())
+            result = _content_json(
+                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": 5.0}),
+            )
+            await send_task
+        elapsed = time.monotonic() - start
+
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["payload"] == {"woke": True}
+        assert 0.1 <= elapsed <= 0.8, f"expected ~0.2 s wake, got {elapsed:.3f} s"
+        await b.shutdown_all()
+
+    async def test_timeout_returns_empty_cleanly(self) -> None:
+        """SC-4: no message within wait_seconds → empty list, unchanged next_seq, no error."""
+        async with _client() as s:
+            await s.initialize()
+            start = time.monotonic()
+            result = _content_json(
+                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": 0.2}),
+            )
+            elapsed = time.monotonic() - start
+
+        assert result["messages"] == []
+        assert result["next_seq"] == 0
+        assert 0.15 <= elapsed <= 0.6, f"expected ~0.2 s, got {elapsed:.3f} s"
+
+    async def test_wait_seconds_capped_at_max(self, monkeypatch) -> None:
+        """SC-6: wait_seconds=9999 → broker.wait_for_lead_message called with 600.0."""
+        b = Broker()
+        captured_timeouts: list[float] = []
+
+        async def _mock_wait(timeout: float) -> None:
+            captured_timeouts.append(timeout)
+            # Return immediately so the test finishes without waiting 10 minutes.
+
+        monkeypatch.setattr(b, "wait_for_lead_message", _mock_wait)
+
+        async with create_connected_server_and_client_session(make_server(broker=b)) as s:
+            await s.initialize()
+            result = _content_json(
+                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": 9999}),
+            )
+
+        assert captured_timeouts == [600.0], (
+            f"expected broker helper called with [600.0], got {captured_timeouts}"
+        )
+        assert result["messages"] == []
+        await b.shutdown_all()
+
+    async def test_negative_wait_seconds_treated_as_zero(self) -> None:
+        """M-1 (sentinel): wait_seconds=-5 → no blocking, returns immediately."""
+        async with _client() as s:
+            await s.initialize()
+            start = time.monotonic()
+            result = _content_json(
+                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": -5}),
+            )
+            elapsed = time.monotonic() - start
+
+        assert result["messages"] == []
+        assert result["next_seq"] == 0
+        assert elapsed < 0.2, f"negative wait_seconds should return immediately, got {elapsed:.3f} s"

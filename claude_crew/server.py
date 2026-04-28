@@ -23,6 +23,13 @@ from claude_crew.broker import (
 from claude_crew.envelope import Envelope, new_message_id
 
 
+# Maximum wait_seconds accepted by the get_messages long-poll tool.
+# 10 minutes: enough headroom for any realistic single Opus/Sonnet turn
+# with margin, so mid-turn timeouts genuinely don't happen. The lead can
+# always cancel; FastMCP over stdio has no transport-level timeout.
+MAX_WAIT_SECONDS = 600.0
+
+
 def _err(code: str, message: str) -> dict[str, Any]:
     return {"error": code, "message": message}
 
@@ -126,14 +133,23 @@ def make_server(
     async def get_messages(
         since_seq: int = 0,
         limit: int = 100,
+        wait_seconds: float = 0.0,
     ) -> dict[str, Any]:
         """Return messages addressed to the lead with seq > since_seq.
 
         Args:
             since_seq: Cursor; pass the largest seq you've already seen.
             limit: Maximum messages to return (default 100).
+            wait_seconds: If > 0 and no messages are waiting, block up to
+                this many seconds for one to arrive. Default 0 returns
+                immediately (existing behavior). Capped at 600 s server-side;
+                negative values treated as 0.
         """
         msgs = broker.get_messages(recipient=LEAD_ID, since_seq=since_seq, limit=limit)
+        if not msgs and wait_seconds > 0:
+            capped = min(max(wait_seconds, 0.0), MAX_WAIT_SECONDS)
+            await broker.wait_for_lead_message(capped)
+            msgs = broker.get_messages(recipient=LEAD_ID, since_seq=since_seq, limit=limit)
         next_seq = msgs[-1].seq if msgs else since_seq
         return {
             "messages": [m.to_dict() for m in msgs],
