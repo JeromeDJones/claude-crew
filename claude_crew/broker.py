@@ -49,6 +49,9 @@ class TeammateInfo:
     # runs, so abandoned tools (outcome="abandoned"/"killed") never update this field
     # (SC-14 / D9). None if no tool completed cleanly before death.
     last_tool_completed_at_death: dict[str, Any] | None = None
+    # F7: subagent-activity snapshot at death.
+    in_flight_subagents_at_death: int | None = None
+    last_subagent_completed_at_death: dict[str, Any] | None = None
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -164,14 +167,25 @@ class Broker:
                 last_tool_completed_at_death: dict[str, Any] | None = snap.get(
                     "last_tool_completed"
                 )
+                last_subagent_completed_at_death: dict[str, Any] | None = snap.get(
+                    "last_subagent_completed"
+                )
+                in_flight_subagents_at_death: int = (
+                    len(getattr(teammate, "_subagent_uses", {})) +
+                    len(getattr(teammate, "_closed_subagent_scratch", {}))
+                )
             except AttributeError:
                 last_activity = None
                 idle_at_death = None
                 last_tool_completed_at_death = None
+                last_subagent_completed_at_death = None
+                in_flight_subagents_at_death = 0
         else:
             last_activity = None
             idle_at_death = None
             last_tool_completed_at_death = None
+            last_subagent_completed_at_death = None
+            in_flight_subagents_at_death = 0
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(
@@ -182,6 +196,8 @@ class Broker:
             last_activity_at_wallclock_at_death=last_activity,
             idle_seconds_at_death=idle_at_death,
             last_tool_completed_at_death=last_tool_completed_at_death,
+            in_flight_subagents_at_death=in_flight_subagents_at_death,
+            last_subagent_completed_at_death=last_subagent_completed_at_death,
         )
 
         # 6. Pop from active set
@@ -210,6 +226,8 @@ class Broker:
                 "death" if lifecycle_event_name == "died" else "kill"
             )
             teammate._close_open_tools(reason=close_reason)
+            if hasattr(teammate, "_close_open_subagents"):
+                teammate._close_open_subagents(reason=close_reason)
 
         # 9. Emit lifecycle event
         lifecycle_fields: dict[str, Any] = {"teammate_id": teammate_id}
@@ -437,6 +455,10 @@ class Broker:
                 "current_tool_count": 0,
                 "last_tool_completed": info.last_tool_completed_at_death,
                 "redaction_version": None,
+                # F7 additions: subagent-activity fields preserved from tombstone.
+                "current_subagents": [],
+                "last_subagent_completed": info.last_subagent_completed_at_death,
+                "in_flight_subagents_at_death": info.in_flight_subagents_at_death,
             }
 
         # Alive: combine TeammateInfo lifecycle fields with live activity snapshot
@@ -463,4 +485,8 @@ class Broker:
             "current_tool_count": snap.get("current_tool_count", 0),
             "last_tool_completed": snap.get("last_tool_completed"),
             "redaction_version": snap.get("redaction_version"),
+            # F7 additions: subagent-activity fields from status_snapshot().
+            "current_subagents": snap.get("current_subagents", []),
+            "last_subagent_completed": snap.get("last_subagent_completed"),
+            "in_flight_subagents_at_death": None,
         }

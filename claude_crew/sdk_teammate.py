@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
+import itertools
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
@@ -66,6 +68,23 @@ MAX_CONCURRENT_TOOLS: int = 64
 _SHUTDOWN_SENTINEL: object = object()
 
 
+# F7: Subagent-activity envelope dataclasses.
+@dataclasses.dataclass(frozen=True)
+class _SubagentUseEntry:
+    agent_id: str
+    tool_use_id: str
+    spawned_at_wallclock: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClosedSubagentEntry:
+    agent_id: str
+    tool_use_id: str
+    spawned_at_wallclock: float
+    finished_at_wallclock: float
+    hook_outcome: str
+
+
 class RateLimitedError(Exception):
     """Raised by _collect_response_text when a RateLimitEvent is observed."""
 
@@ -100,19 +119,20 @@ class TurnDrainResult:
     """What we observed during one drain of client.receive_response().
 
     text: concatenated TextBlock content from AssistantMessages.
-    last_failed_task_notif: the most recent TaskNotificationMessage with
-        status in {"failed","stopped"}, if any. Used by SC-8(a) to
-        synthesize an envelope when the parent didn't narrate over the
-        failure.
+    failed_task_notifs: all TaskNotificationMessages with status in
+        {"failed","stopped"} observed this turn, in arrival order. Used by
+        SC-8(a) to synthesize an envelope when the parent didn't narrate
+        over the failure. Empty list means no failures observed.
     """
 
     text: str
-    last_failed_task_notif: TaskNotificationMessage | None
+    failed_task_notifs: list[TaskNotificationMessage]
 
 
 async def _collect_response_text(
     client: Any,
     stamp_activity: Callable[[], None] | None = None,
+    record_task_notif: Callable[[str, TaskNotificationMessage], None] | None = None,
 ) -> TurnDrainResult:
     """Drain client.receive_response() and accumulate text + subagent failures.
 
@@ -120,16 +140,18 @@ async def _collect_response_text(
       RateLimitEvent and TaskNotificationMessage events also stamp activity.
     - Ignores tool-use, thinking, and other non-text blocks (Assumption A2).
     - On RateLimitEvent (status=rejected), raises RateLimitedError.
-    - Tracks the most recent TaskNotificationMessage with a failure-shaped
-      status; logs a WARNING for *every* such notification observed.
+    - Calls record_task_notif(tool_use_id, tnm) for ALL TNM statuses when
+      tnm.tool_use_id is not None (enables correlation in _handle_one_turn).
+    - Tracks all TaskNotificationMessages with a failure-shaped status in
+      failed_task_notifs; logs a WARNING for *every* such notification.
     - Terminates when the SDK iterator terminates (typically at ResultMessage).
-    - Returns TurnDrainResult(text="", last_failed_task_notif=None) if
-      nothing of substance was observed.
+    - Returns TurnDrainResult(text="", failed_task_notifs=[]) if nothing of
+      substance was observed.
 
     The caller must wrap this in asyncio.wait_for to bound non-termination.
     """
     text_parts: list[str] = []
-    last_failed: TaskNotificationMessage | None = None
+    failed_task_notifs: list[TaskNotificationMessage] = []
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
         # event type (including RateLimitEvent, TaskNotificationMessage)
@@ -146,8 +168,13 @@ async def _collect_response_text(
                 raise RateLimitedError(f"rate limit hit: {info}")
             continue
         if isinstance(msg, TaskNotificationMessage):
+            # Fire callback for ALL statuses (completed/failed/stopped) so
+            # _handle_one_turn can correlate TNMs with tool_use_ids. Skip if
+            # tool_use_id is absent (can't correlate).
+            if record_task_notif is not None and msg.tool_use_id is not None:
+                record_task_notif(msg.tool_use_id, msg)
             if msg.status in ("failed", "stopped"):
-                last_failed = msg
+                failed_task_notifs.append(msg)
                 logger.warning(
                     "subagent failure: status=%s task_id=%s summary=%r",
                     msg.status, msg.task_id, msg.summary,
@@ -157,7 +184,7 @@ async def _collect_response_text(
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
-    return TurnDrainResult(text="".join(text_parts), last_failed_task_notif=last_failed)
+    return TurnDrainResult(text="".join(text_parts), failed_task_notifs=failed_task_notifs)
 
 
 def _default_system_prompt(role: str) -> str:
@@ -206,6 +233,13 @@ class SdkTeammate(Teammate):
         self._recently_closed_tool_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_tool_completed: dict[str, Any] | None = None
 
+        # F7 subagent-tracking namespace (completely separate from F8 tool-tracking)
+        self._subagent_uses: dict[str, _SubagentUseEntry] = {}
+        self._closed_subagent_scratch: dict[str, _ClosedSubagentEntry] = {}
+        self._recently_closed_subagent_use_ids: collections.deque[str] = collections.deque(maxlen=64)
+        self._last_subagent_completed: dict[str, Any] | None = None
+        self._task_notifs_by_tool_use_id: dict[str, TaskNotificationMessage] = {}
+
         # Liveness state (T4/D2/D4).
         self._death_suspected: bool = False
         self._death_in_flight_envelope: Envelope | None = None
@@ -235,8 +269,50 @@ class SdkTeammate(Teammate):
         """
         try:
             self._stamp_activity()
-            # D3: subagent branch — activity stamped but no state update.
+            # D3: subagent branch — activity stamped; spawn tracking path.
             if inp.get("agent_id") is not None:
+                agent_id = inp["agent_id"]
+                # Null tool_use_id guard.
+                if not tool_use_id:
+                    logger.warning(
+                        "pre_tool_use: subagent with empty tool_use_id for teammate=%s, skipping",
+                        self.id,
+                    )
+                    return {}
+                # Duplicate guard (last-write-wins).
+                if tool_use_id in self._subagent_uses:
+                    logger.warning(
+                        "pre_tool_use: duplicate subagent tool_use_id=%s for teammate=%s, last-write-wins",
+                        tool_use_id,
+                        self.id,
+                    )
+                # Soft cap guard.
+                if len(self._subagent_uses) >= MAX_CONCURRENT_TOOLS:
+                    logger.warning(
+                        "pre_tool_use: concurrent subagent cap (%d) reached for teammate=%s",
+                        MAX_CONCURRENT_TOOLS,
+                        self.id,
+                    )
+                spawned_at_wallclock = time.time()
+                # F2: emit JSONL FIRST, then store in dict.
+                # If write fails, outer try/except swallows it and dict is never populated.
+                # This guarantees subagent_result cannot appear without a preceding subagent_spawn.
+                broker = self._broker
+                if broker is not None:
+                    broker._sink.write_tool_event(
+                        "subagent_spawn",
+                        {
+                            "teammate_id": self.id,
+                            "agent_id": agent_id,
+                            "tool_use_id": tool_use_id,
+                            "spawned_at_wallclock": spawned_at_wallclock,
+                        },
+                    )
+                self._subagent_uses[tool_use_id] = _SubagentUseEntry(
+                    agent_id=agent_id,
+                    tool_use_id=tool_use_id,
+                    spawned_at_wallclock=spawned_at_wallclock,
+                )
                 return {}
             # D8 defensive: null tool_use_id guard.
             if not tool_use_id:
@@ -316,6 +392,33 @@ class SdkTeammate(Teammate):
             self._stamp_activity()
             # D3: subagent branch.
             if inp.get("agent_id") is not None:
+                agent_id = inp["agent_id"]
+                # Dedup guard.
+                if tool_use_id in self._recently_closed_subagent_use_ids:
+                    logger.warning(
+                        "post_tool_use: duplicate subagent close for tool_use_id=%s teammate=%s",
+                        tool_use_id,
+                        self.id,
+                    )
+                    return {}
+                # Pop from in-flight dict.
+                entry = self._subagent_uses.pop(tool_use_id, None)
+                if entry is None:
+                    logger.warning(
+                        "post_tool_use: orphan subagent Post for tool_use_id=%s teammate=%s (no Pre seen)",
+                        tool_use_id,
+                        self.id,
+                    )
+                    return {}
+                self._recently_closed_subagent_use_ids.append(tool_use_id)
+                # Move to scratch — _end_turn will emit the JSONL after stream drains.
+                self._closed_subagent_scratch[tool_use_id] = _ClosedSubagentEntry(
+                    agent_id=entry.agent_id,
+                    tool_use_id=tool_use_id,
+                    spawned_at_wallclock=entry.spawned_at_wallclock,
+                    finished_at_wallclock=time.time(),
+                    hook_outcome=outcome,
+                )
                 return {}
             # D8 defensive: null tool_use_id guard.
             if not tool_use_id:
@@ -424,6 +527,123 @@ class SdkTeammate(Teammate):
         outcome = "interrupted" if inp.get("is_interrupt") else "failed"
         error_text = inp.get("error", "")
         return await self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
+
+    def _record_task_notif(self, tool_use_id: str, tnm: TaskNotificationMessage) -> None:
+        """Store a TaskNotificationMessage keyed by tool_use_id (F7)."""
+        self._task_notifs_by_tool_use_id[tool_use_id] = tnm
+
+    def _end_turn(self, *, close_tools: bool = True) -> None:
+        """Extend base _end_turn with F7 subagent-result JSONL emit."""
+        super()._end_turn(close_tools=close_tools)
+        # Emit subagent_result for each entry that PostToolUse closed into scratch.
+        entries = list(self._closed_subagent_scratch.values())
+        try:
+            for closed in entries:
+                tnm = self._task_notifs_by_tool_use_id.get(closed.tool_use_id)
+                tnm_missing = tnm is None
+                if tnm_missing:
+                    logger.warning(
+                        "_end_turn: no TNM for subagent tool_use_id=%s teammate=%s, defaulting outcome from hook",
+                        closed.tool_use_id,
+                        self.id,
+                    )
+                # Map outcome: TNM status wins when present; fall back to hook_outcome.
+                if tnm is not None:
+                    outcome = "ok" if tnm.status == "completed" else "failed"
+                else:
+                    outcome = "ok" if closed.hook_outcome == "ok" else "failed"
+                duration_seconds = closed.finished_at_wallclock - closed.spawned_at_wallclock
+                result_record = {
+                    "teammate_id": self.id,
+                    "agent_id": closed.agent_id,
+                    "tool_use_id": closed.tool_use_id,
+                    "outcome": outcome,
+                    "duration_seconds": duration_seconds,
+                    "summary": tnm.summary if tnm is not None else None,
+                    "tnm_missing": tnm_missing,
+                    "finished_at_wallclock": closed.finished_at_wallclock,
+                }
+                try:
+                    broker = self._broker
+                    if broker is not None:
+                        broker._sink.write_tool_event("subagent_result", result_record)
+                except Exception as exc:
+                    logger.warning(
+                        "_end_turn: write_tool_event subagent_result failed for %s/%s: %s",
+                        self.id,
+                        closed.tool_use_id,
+                        exc,
+                    )
+                # Update last_subagent_completed regardless of write success.
+                self._last_subagent_completed = {
+                    "agent_id": closed.agent_id,
+                    "tool_use_id": closed.tool_use_id,
+                    "outcome": outcome,
+                    "duration_seconds": duration_seconds,
+                    "summary": tnm.summary if tnm is not None else None,
+                    "finished_at_wallclock": closed.finished_at_wallclock,
+                }
+        finally:
+            self._closed_subagent_scratch.clear()
+            self._task_notifs_by_tool_use_id.clear()
+
+    def _close_open_subagents(self, reason: Literal["death", "kill"]) -> None:
+        """Emit subagent_abandoned_batch and clear in-flight subagent state on death/kill.
+
+        Drains BOTH _subagent_uses (Pre fired, Post not yet) AND _closed_subagent_scratch
+        (Post fired, _end_turn not yet) to catch all windows. If both are empty, no-op.
+        """
+        in_flight = list(self._subagent_uses.values())
+        scratch = list(self._closed_subagent_scratch.values())
+        all_entries = in_flight + scratch
+        if not all_entries:
+            return
+        batch = [
+            {"agent_id": e.agent_id, "tool_use_id": e.tool_use_id, "spawned_at_wallclock": e.spawned_at_wallclock}
+            for e in all_entries
+        ]
+        try:
+            broker = self._broker
+            if broker is not None:
+                broker._sink.write_tool_event(
+                    "subagent_abandoned_batch",
+                    {
+                        "teammate_id": self.id,
+                        "reason": reason,
+                        "subagents": batch,
+                        "count": len(batch),
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "_close_open_subagents: write_tool_event failed for %s: %s",
+                self.id,
+                exc,
+            )
+        finally:
+            self._subagent_uses.clear()
+            self._closed_subagent_scratch.clear()
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Extend base status_snapshot with F7 subagent-activity fields."""
+        snap = super().status_snapshot()
+        # Build current_subagents from BOTH in-flight and limbo-state scratch entries (D10)
+        subagent_entries = [
+            {
+                "agent_id": e.agent_id,
+                "tool_use_id": e.tool_use_id,
+                "spawned_at_wallclock": e.spawned_at_wallclock,
+            }
+            for e in itertools.chain(
+                self._subagent_uses.values(),
+                self._closed_subagent_scratch.values(),
+            )
+        ]
+        subagent_entries.sort(key=lambda x: x["spawned_at_wallclock"])
+        snap["current_subagents"] = subagent_entries
+        snap["last_subagent_completed"] = self._last_subagent_completed
+        snap["in_flight_subagents_at_death"] = None
+        return snap
 
     async def _liveness_poll_loop(self, client: Any) -> None:
         """Poll the SDK subprocess for unexpected death (D5/D8).
@@ -543,7 +763,7 @@ class SdkTeammate(Teammate):
                 session_id = f"{self._broker.crew_id}-{self.id}"
                 await client.query(prompt, session_id=session_id)
                 result = await asyncio.wait_for(
-                    _collect_response_text(client, self._stamp_activity),
+                    _collect_response_text(client, self._stamp_activity, self._record_task_notif),
                     timeout=self._backstop_seconds,
                 )
             except asyncio.TimeoutError:
@@ -617,8 +837,8 @@ class SdkTeammate(Teammate):
                 # turn, synthesize the error from its summary so the lead gets
                 # a useful message. Otherwise fall through to the existing
                 # generic invalid_response.
-                if result.last_failed_task_notif is not None:
-                    notif = result.last_failed_task_notif
+                if result.failed_task_notifs:
+                    notif = result.failed_task_notifs[-1]
                     summary = notif.summary or "subagent run did not complete"
                     await self._send_error_envelope(
                         to=env.sender,

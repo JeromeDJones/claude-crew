@@ -107,7 +107,7 @@ class TranscriptSink:
 
     def write_tool_event(
         self,
-        event: Literal["tool_start", "tool_end"],
+        event: Literal["tool_start", "tool_end", "subagent_spawn", "subagent_result", "subagent_abandoned_batch"],
         fields: dict[str, Any],
     ) -> None:
         """Append a tool-event record to the transcript.
