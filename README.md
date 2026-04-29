@@ -8,6 +8,10 @@ See [`doc/PRODUCT-VISION.md`](doc/PRODUCT-VISION.md) for the full vision.
 
 Pre-alpha. MVP in progress — see `doc/features/`.
 
+## Known Limitations
+
+**Global shell hook env vars not injected in SDK mode.** Shell-command hooks configured in `~/.claude/settings.json` (`PreToolUse`, `PostToolUse`, etc.) _do_ fire when SDK teammates run — but the Claude CLI does not inject the hook-specific environment variables (`CLAUDE_TOOL_NAME`, `CLAUDE_HOOK_EVENT`, etc.) that it provides in interactive mode. Hook scripts that filter by tool name (e.g. `if [ "$CLAUDE_TOOL_NAME" = "Bash" ]`) will not work correctly inside teammate sessions — the condition will always be empty/unset. Unconditional hooks work fine. See `doc/research/hooks-sdk-behavior.md`.
+
 ## Development
 
 ```bash
