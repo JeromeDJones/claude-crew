@@ -65,7 +65,7 @@ def default_factory() -> TeammateFactory:
     if mode == "sdk":
         from claude_crew.subagents._user_loader import build_merged_pack
 
-        merged_pack = build_merged_pack()
+        merged_pack, _role_ss = build_merged_pack()
 
         def factory(
             id: str, name: str, role: str,

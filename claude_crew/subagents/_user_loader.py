@@ -56,14 +56,17 @@ _README = "README.md"
 _ACCEPTED_FRONTMATTER_KEYS = frozenset(PackFrontmatter.__dataclass_fields__)
 
 
-def strict_parse(path: Path) -> tuple[str, AgentDefinition]:
+def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None]:
     """Parse a user/project agent file, warning on unsupported frontmatter keys.
 
-    Wraps ``parse_pack_file``. Diffs the frontmatter dict against
+    Wraps ``parse_pack_text``. Diffs the frontmatter dict against
     ``_ACCEPTED_FRONTMATTER_KEYS``; any extra key (typo'd ``descrption``,
     forward-compat ``setting_sources``, etc.) is logged at WARNING via
     the ``claude_crew.subagents.loader`` logger. The agent still loads
     using the supported fields.
+
+    Returns ``(key, agent, setting_sources)`` where ``setting_sources`` is
+    ``None`` if the frontmatter does not declare ``settingSources``.
 
     Raises:
         PackLoadError: if the file is missing required fields, has
@@ -82,15 +85,17 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition]:
             path,
             extras,
         )
-    key, agent, _fm = parse_pack_text(text, path)
-    return key, agent
+    key, agent, fm = parse_pack_text(text, path)
+    return key, agent, fm.settingSources
 
 
-def discover_dir(directory: Path) -> dict[str, AgentDefinition]:
+def discover_dir(
+    directory: Path,
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
     """Walk a single directory and return its agents as a dict.
 
     Behavior:
-    - Missing directory → ``{}`` silently. (User without
+    - Missing directory → ``({}, {})`` silently. (User without
       ``~/.claude/agents/`` sees nothing.)
     - Non-recursive ``*.md`` glob, lowercase extension only,
       ``README.md`` excluded.
@@ -105,9 +110,13 @@ def discover_dir(directory: Path) -> dict[str, AgentDefinition]:
       ``general_purpose.md`` and ``general-purpose.md`` in the same
       dir): warn naming both files and which one wins (alphabetically
       later).
+
+    Returns ``(pack, role_ss)`` where ``role_ss`` maps role keys to their
+    ``settingSources`` list. Keys without ``settingSources`` are absent
+    from ``role_ss``.
     """
     if not directory.is_dir():
-        return {}
+        return {}, {}
 
     candidates = sorted(p for p in directory.glob("*.md") if p.name != _README)
     if len(candidates) > _MAX_FILES_PER_DIR:
@@ -120,6 +129,7 @@ def discover_dir(directory: Path) -> dict[str, AgentDefinition]:
         candidates = candidates[:_MAX_FILES_PER_DIR]
 
     pack: dict[str, AgentDefinition] = {}
+    role_ss: dict[str, list[str] | None] = {}
     seen_path_for_key: dict[str, Path] = {}
 
     for path in candidates:
@@ -138,7 +148,7 @@ def discover_dir(directory: Path) -> dict[str, AgentDefinition]:
             continue
 
         try:
-            key, agent = strict_parse(path)
+            key, agent, ss = strict_parse(path)
         except PackLoadError as exc:
             logger.warning("agent file %s could not be loaded: %s; skipping", path, exc)
             continue
@@ -161,29 +171,39 @@ def discover_dir(directory: Path) -> dict[str, AgentDefinition]:
                 path,
             )
         pack[key] = agent
+        if ss is not None:
+            role_ss[key] = ss
         seen_path_for_key[key] = path
 
-    return pack
+    return pack, role_ss
 
 
-def load_user_agents(home_dir: Path | None = None) -> dict[str, AgentDefinition]:
+def load_user_agents(
+    home_dir: Path | None = None,
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
     """Load agents from ``<home_dir>/.claude/agents/``.
 
     ``home_dir`` defaults to the user's home directory. Made injectable
     for tests (SC-9) so fixtures can plant agents in a tempdir without
     touching the real ``~/.claude/agents/``.
+
+    Returns ``(pack, role_ss)`` — see ``discover_dir`` for details.
     """
     home = home_dir if home_dir is not None else Path.home()
     return discover_dir(home / ".claude" / "agents")
 
 
-def load_project_agents(project_root: Path | None = None) -> dict[str, AgentDefinition]:
+def load_project_agents(
+    project_root: Path | None = None,
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
     """Load agents from ``<project_root>/.claude/agents/``.
 
     ``project_root`` defaults to the current working directory at the
     time of the call. The MCP server resolves this once at startup and
     freezes it for the process lifetime; per-spawn resolution is a
     footgun (a teammate's pack would silently change with ``cwd``).
+
+    Returns ``(pack, role_ss)`` — see ``discover_dir`` for details.
     """
     root = project_root if project_root is not None else Path.cwd()
     return discover_dir(root / ".claude" / "agents")
@@ -192,7 +212,7 @@ def load_project_agents(project_root: Path | None = None) -> dict[str, AgentDefi
 def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
-) -> dict[str, AgentDefinition]:
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
     """Compose default + user + project agents in precedence order.
 
     Effective pack = ``merge_packs(merge_packs(default, user), project)``.
@@ -204,10 +224,14 @@ def build_merged_pack(
     ``home_dir`` and ``project_root`` default to ``Path.home()`` and
     ``Path.cwd()``. The MCP server resolves these once at startup and
     freezes them; tests may inject tempdirs.
+
+    Returns ``(merged_agents, role_ss)`` where ``role_ss`` is a parallel
+    dict mapping role keys to their ``settingSources`` list. Precedence
+    mirrors the agents dict: project > user > default.
     """
-    default = load_default_pack()
-    user = load_user_agents(home_dir)
-    project = load_project_agents(project_root)
+    default, default_ss = load_default_pack()
+    user, user_ss = load_user_agents(home_dir)
+    project, project_ss = load_project_agents(project_root)
 
     for key in user:
         if key in default:
@@ -218,4 +242,5 @@ def build_merged_pack(
         elif key in default:
             logger.info("agent %r from project-level shadows default pack", key)
 
-    return merge_packs(merge_packs(default, user), project)
+    role_ss = {**default_ss, **user_ss, **project_ss}
+    return merge_packs(merge_packs(default, user), project), role_ss

@@ -48,12 +48,12 @@ class TestPackContents:
     """SC-3, SC-4, SC-7 — the bundled pack matches its declared contract."""
 
     def test_keys_are_exactly_the_three_pack_members(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         assert set(pack.keys()) == {"explorer", "planner", "general-purpose"}
         assert PACK_MEMBERS == ("explorer", "planner", "general-purpose")
 
     def test_explorer_contract(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         explorer = pack["explorer"]
         assert isinstance(explorer, AgentDefinition)
         assert explorer.model == "haiku"
@@ -62,7 +62,7 @@ class TestPackContents:
         assert explorer.maxTurns == 10
 
     def test_planner_contract(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         planner = pack["planner"]
         assert planner.model == "sonnet"
         assert planner.tools == ["Read", "Grep", "Glob", "Write"]
@@ -73,7 +73,7 @@ class TestPackContents:
         assert "acceptance criteria" in planner.initialPrompt.lower()
 
     def test_general_purpose_contract(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         gp = pack["general-purpose"]
         assert gp.model == "sonnet"
         assert gp.effort == "medium"
@@ -86,7 +86,7 @@ class TestPackContents:
 
     def test_no_pack_member_has_task_tool(self) -> None:
         """Subagents are leaves. None of them get Task — locked by Phase 1."""
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         for name, agent in pack.items():
             assert "Task" not in (agent.tools or []), (
                 f"{name} must not have Task — subagents are leaves"
@@ -99,7 +99,7 @@ class TestPackContents:
         of scope. Without an explicit assertion, the loader could ship
         background=None (SDK default) and silently break the contract.
         """
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         for name, agent in pack.items():
             assert agent.background is False, (
                 f"{name}.background must be False — async subagents are OOS"
@@ -116,17 +116,17 @@ class TestPackHermeticity:
     """SC-5 — pack content is in-repo, prompt body is the literal file body."""
 
     def test_explorer_prompt_matches_file_body(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         body = _read_body(PACK_DIR / "explorer.md")
         assert pack["explorer"].prompt == body
 
     def test_planner_prompt_matches_file_body(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         body = _read_body(PACK_DIR / "planner.md")
         assert pack["planner"].prompt == body
 
     def test_general_purpose_prompt_matches_file_body(self) -> None:
-        pack = load_default_pack()
+        pack, _role_ss = load_default_pack()
         body = _read_body(PACK_DIR / "general_purpose.md")
         assert pack["general-purpose"].prompt == body
 
@@ -716,7 +716,7 @@ class TestPackFrontmatterExtension:
         # Import strict_parse and verify no warning
         from claude_crew.subagents._user_loader import strict_parse
 
-        key, agent = strict_parse(f)
+        key, agent, _ss = strict_parse(f)
         assert key == "allfields"
         assert agent.skills == ["workflow"]
         assert agent.permissionMode == "plan"

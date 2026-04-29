@@ -219,8 +219,9 @@ class SdkTeammate(Teammate):
         )
         # `agents=None` → load the bundled default pack. `agents={}` → explicit
         # empty (this teammate cannot delegate). `agents={...}` → custom pack
-        # (Feature #3b's seam ride-along).
-        self._agents = load_default_pack() if agents is None else agents
+        # (Feature #3b's seam ride-along). load_default_pack() returns a
+        # (pack, role_ss) tuple; only the pack dict is needed here.
+        self._agents = load_default_pack()[0] if agents is None else agents
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._task: asyncio.Task[None] | None = None
