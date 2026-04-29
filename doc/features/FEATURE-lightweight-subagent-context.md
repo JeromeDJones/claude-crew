@@ -1,6 +1,6 @@
 # Feature: Lightweight Subagent Context (Pipeline #11)
 
-**Status**: Phase 2 (design locked)
+**Status**: Shipped (merged to master 2026-04-29)
 **Created**: 2026-04-28
 
 ---
@@ -510,15 +510,44 @@ Full suite: `uv run pytest`
 
 ## Phase 4: Implementation
 
-T1 (PackFrontmatter.settingSources), T2 (loader cascade), T3 (factory chain), and T4
-(bundled pack files) are complete. 386 tests pass.
+Team build — 4 tasks. T1+T2+T3 sequential (T2 depends on T1's 3-tuple return type; T3 depends on T2's role_ss dict). T4 bundled pack updates committed with T3.
 
-**Live E2E probe deferred to manual verification.** `test_e2e_setting_sources.py` was
-not written — it requires a real SDK session (live API call) to confirm SC-5
-(`setting_sources=[]` produces no CLAUDE.md context). The probe should be run manually:
-spawn an explorer teammate and ask "What is the name of the user you work with?" — the
-answer must not be "Jerome". Also verify that `ClaudeAgentOptions(setting_sources=[])`
-is treated by the SDK as "no sources" (not "use default"), per Phase 2 Assumptions.
+| Task | Commit | Notes |
+|------|--------|-------|
+| T1 — PackFrontmatter.settingSources | e8fdcaa | parse_pack_text returns 3-tuple |
+| T2 — loader cascade | b7477ab | full cascade through build_merged_pack |
+| T3+T4 — factory chain + packs | 0e13397 | explorer/general-purpose: [], planner: [project] |
+| Sentinel fixes | ae669e9 | M2 collision bug, M3 vacuous test, M1 test gap |
+| Merge to master | feat(#11) merge | 387 tests pass |
+
+**SC-5 live probe deferred.** The `setting_sources=[]` assumption (SDK treats it as "no sources") can be verified by spawning an explorer and asking "What is the name of the user you work with?" — the answer should not be "Jerome". Run before relying on the context-reduction in production.
+
+---
+
+## Phase 5: Completion
+
+### Verification
+
+- [x] SC-1: PackFrontmatter.settingSources, validated against {"user","project","local"}
+- [x] SC-2: Flows pack → loader cascade → factory closure → SdkTeammate → ClaudeAgentOptions
+- [x] SC-3: Pack files without settingSources continue to get SDK default (None → ["user","project"])
+- [x] SC-4: explorer.md: `[]`, general_purpose.md: `[]`, planner.md: `[project]`
+- [ ] SC-5: Live probe deferred — plumbing correct end-to-end, SDK behavior unverified
+- [x] 387 tests pass, 0 warnings
+- [x] Sentinel clean (4 findings fixed — M2 collision bug, M3 vacuous test replaced, M1 test gap added, L1 comment)
+- [x] PRODUCT-VISION.md to be updated
+
+### Retrospective
+
+**What went well:**
+- The Phase 2 Sentinel caught the `discover_dir` seam gap (H1) before a builder hit it — saved a mid-T2 rework. Reading `_user_loader.py` in the main session before writing the spec paid off: the "either approach is acceptable" hedge became a precise cascade once the actual code structure was known.
+- The `parse_pack_text` → 3-tuple approach threaded cleanly through both code paths (bundled packs via `parse_pack_file` and user/project packs via `strict_parse`) without duplicate parsing.
+
+**What was friction:**
+- The collision handling bug (M2) was invisible because no test exercised an intra-directory collision with mixed settingSources presence. The fix was one line but only the Sentinel caught it.
+
+**Improvements:**
+- For any feature adding a parallel attribute alongside an existing dict, write a collision test for the parallel attribute explicitly. It's a different failure mode than the agents-dict collision.
 
 ---
 
