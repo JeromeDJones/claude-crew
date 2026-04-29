@@ -208,3 +208,105 @@ class TestMemoryDocExists:
         assert "## 1. Conversation persistence" in content
         assert "## 2. CLAUDE.md loading" in content
         assert "## 3. Auto-memory subsystem" in content
+
+
+class TestPermissionModeAndCwdLive:
+    """SC-9b: plan mode prevents file write; control with cwd creates file.
+
+    Behavioral proof of Feature #10 Task 4: that permissionMode and cwd
+    are correctly wired from pack file → AgentDefinition → SdkTeammate
+    → ClaudeAgentOptions → SDK behavior.
+    """
+
+    async def test_plan_mode_blocks_file_write_and_cwd_works(
+        self, broker: Broker, tmp_path,
+    ) -> None:
+        """plan mode blocks Write; control creates file, proving cwd wiring works."""
+        from pathlib import Path
+        from claude_agent_sdk.types import AgentDefinition
+
+        # Create separate directories for plan and control teammates.
+        plan_dir = tmp_path / "plan_agent"
+        plan_dir.mkdir()
+        ctrl_dir = tmp_path / "ctrl_agent"
+        ctrl_dir.mkdir()
+
+        # Define two agents: plan-mode (no file creation) vs control (can write).
+        plan_agent = AgentDefinition(
+            description="Plan-mode agent that cannot execute tools",
+            prompt="You are a planning agent. You cannot execute any tools.",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write"],
+            permissionMode="plan",
+        )
+        control_agent = AgentDefinition(
+            description="Control agent with normal permissions",
+            prompt="You are a general agent. You can execute tools normally.",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write"],
+        )
+
+        # Spawn plan teammate.
+        plan_tid = await broker.spawn_teammate(
+            role="plan-role",
+            name="plan",
+            factory=lambda id, name, role, **_kw: sdk_factory(
+                id=id, name=name, role=role,
+                agents={"plan-role": plan_agent},
+                cwd=str(plan_dir),
+                permission_mode="plan",
+            ),
+        )
+
+        # Spawn control teammate.
+        ctrl_tid = await broker.spawn_teammate(
+            role="ctrl-role",
+            name="ctrl",
+            factory=lambda id, name, role, **_kw: sdk_factory(
+                id=id, name=name, role=role,
+                agents={"ctrl-role": control_agent},
+                cwd=str(ctrl_dir),
+            ),
+        )
+
+        # Task for plan teammate: try to write a file (should be blocked by plan mode).
+        plan_task = (
+            "Write the string 'probe' to a file named probe.txt in the current directory. "
+            "Use the Write tool."
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=plan_tid, timestamp=0.0,
+            payload=plan_task,
+        ))
+
+        # Task for control teammate: write a file (should succeed).
+        ctrl_task = (
+            "Write the string 'probe' to a file named probe.txt in the current directory. "
+            "Use the Write tool."
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=ctrl_tid, timestamp=0.0,
+            payload=ctrl_task,
+        ))
+
+        # Wait for both teammates to complete (2 messages expected).
+        await _wait_for_lead(broker, 2, timeout=120.0)
+
+        # Check results.
+        # Plan mode: probe.txt should NOT exist (plan mode blocked Write).
+        plan_probe_exists = (plan_dir / "probe.txt").exists()
+        assert plan_probe_exists is False, (
+            "plan mode should have blocked Write tool; probe.txt should not exist"
+        )
+
+        # Control: probe.txt should exist and contain the probe string.
+        ctrl_probe_exists = (ctrl_dir / "probe.txt").exists()
+        assert ctrl_probe_exists is True, (
+            f"control teammate should have created probe.txt in {ctrl_dir}"
+        )
+        ctrl_probe_content = (ctrl_dir / "probe.txt").read_text()
+        assert "probe" in ctrl_probe_content, (
+            f"probe.txt should contain 'probe'; got: {ctrl_probe_content!r}"
+        )

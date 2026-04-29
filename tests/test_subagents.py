@@ -733,3 +733,114 @@ class TestPackFrontmatterExtension:
         assert unrecognized_warnings == [], (
             f"Expected no unrecognized warnings, but got: {unrecognized_warnings}"
         )
+
+
+# ---------- Task 4: Full chain integration + live behavioral proof ----------
+
+
+class TestFullLoaderToOptionsChain:
+    """SC-1..SC-4 integration: pack file → AgentDefinition → ClaudeAgentOptions.
+
+    Verifies that fields declared in a pack file's frontmatter (skills,
+    permissionMode, disallowedTools) flow through parse_pack_file →
+    AgentDefinition → SdkTeammate → ClaudeAgentOptions without loss.
+    """
+
+    async def test_pack_skills_reach_options(
+        self, monkeypatch, broker: Broker, tmp_path: Path
+    ) -> None:
+        """skills: [...] declared in pack → captured_options.skills == [...]."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        # Write pack file with skills declared.
+        f = _write_agent(
+            tmp_path, "skilled.md",
+            extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n"
+        )
+        key, agent_def = parse_pack_file(f)
+        assert key == "skilled"
+        assert agent_def.skills == ["sdd-workflow", "deep-build"]
+
+        # Construct SdkTeammate with this agent_def as the role.
+        await _drive_one_noop_turn(
+            broker, role="skilled",
+            agents={key: agent_def}
+        )
+
+        # Assert skills reached the options.
+        assert "options" in captured
+        opts = captured["options"]
+        assert opts.skills == ["sdd-workflow", "deep-build"]
+
+    async def test_pack_permission_mode_reaches_options(
+        self, monkeypatch, broker: Broker, tmp_path: Path
+    ) -> None:
+        """permissionMode: bypassPermissions → options.permission_mode == 'bypassPermissions'."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        f = _write_agent(
+            tmp_path, "permissive.md",
+            extra_frontmatter="permissionMode: bypassPermissions\n"
+        )
+        key, agent_def = parse_pack_file(f)
+        assert agent_def.permissionMode == "bypassPermissions"
+
+        await _drive_one_noop_turn(
+            broker, role="permissive",
+            agents={key: agent_def}
+        )
+
+        assert captured["options"].permission_mode == "bypassPermissions"
+
+    async def test_pack_disallowed_tools_reach_options(
+        self, monkeypatch, broker: Broker, tmp_path: Path
+    ) -> None:
+        """disallowedTools: [...] → options.disallowed_tools == [...]."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        f = _write_agent(
+            tmp_path, "restricted.md",
+            extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n"
+        )
+        key, agent_def = parse_pack_file(f)
+        assert agent_def.disallowedTools == ["Bash", "WebFetch"]
+
+        await _drive_one_noop_turn(
+            broker, role="restricted",
+            agents={key: agent_def}
+        )
+
+        assert captured["options"].disallowed_tools == ["Bash", "WebFetch"]
+
+    async def test_pack_all_new_fields_combined(
+        self, monkeypatch, broker: Broker, tmp_path: Path
+    ) -> None:
+        """All three fields declared together → all three reach options."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        f = _write_agent(
+            tmp_path, "combined.md",
+            extra_frontmatter=(
+                "skills:\n  - workflow\n"
+                "permissionMode: plan\n"
+                "disallowedTools:\n  - Bash\n"
+            )
+        )
+        key, agent_def = parse_pack_file(f)
+        assert agent_def.skills == ["workflow"]
+        assert agent_def.permissionMode == "plan"
+        assert agent_def.disallowedTools == ["Bash"]
+
+        await _drive_one_noop_turn(
+            broker, role="combined",
+            agents={key: agent_def}
+        )
+
+        opts = captured["options"]
+        assert opts.skills == ["workflow"]
+        assert opts.permission_mode == "plan"
+        assert opts.disallowed_tools == ["Bash"]
