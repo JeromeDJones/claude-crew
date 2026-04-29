@@ -46,6 +46,7 @@ def sdk_factory(
         kwargs["cwd"] = cwd
     if permission_mode is not None:
         kwargs["permission_mode"] = permission_mode
+    # None means "use SDK default"; [] means "no sources" — keep is-not-None, not truthiness.
     if setting_sources is not None:
         kwargs["setting_sources"] = setting_sources
     return SdkTeammate(id=id, name=name, role=role, **kwargs)

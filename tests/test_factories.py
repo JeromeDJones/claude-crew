@@ -252,6 +252,33 @@ class TestSettingSources:
         factories.sdk_factory("t-1", "alice", "explorer", setting_sources=[])
         assert captured_kwargs.get("setting_sources") == []
 
+    def test_sdk_factory_omits_setting_sources_kwarg_when_none(self, monkeypatch) -> None:
+        """sdk_factory with setting_sources=None must NOT pass setting_sources to SdkTeammate.
+
+        This guards the None-vs-[] invariant: None means 'use SDK default' (kwarg absent),
+        [] means 'no sources' (kwarg present as empty list). A truthiness check would
+        incorrectly treat [] as falsy and skip it.
+        """
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        captured_kwargs: dict = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        factories.sdk_factory("t-1", "alice", "explorer", setting_sources=None)
+        assert "setting_sources" not in captured_kwargs
+
     def test_default_factory_closure_passes_role_ss_to_sdk_factory(
         self, monkeypatch, tmp_path,
     ) -> None:

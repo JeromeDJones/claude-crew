@@ -171,8 +171,12 @@ def discover_dir(
                 path,
             )
         pack[key] = agent
+        # Keep role_ss in sync with pack — if the winning file has no settingSources,
+        # clear any stale entry from a previously-seen file for the same key.
         if ss is not None:
             role_ss[key] = ss
+        else:
+            role_ss.pop(key, None)
         seen_path_for_key[key] = path
 
     return pack, role_ss

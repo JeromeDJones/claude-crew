@@ -504,17 +504,16 @@ class TestSettingSourcesCascade:
 
         assert role_ss["myagent"] == []
 
-    def test_bundled_pack_without_setting_sources_absent_from_role_ss(
+    def test_bundled_packs_have_expected_setting_sources(
         self, tmp_path: Path
     ) -> None:
-        """Scenario: bundled pack file without settingSources has role_ss.get(key) is None.
+        """SC-4 regression: bundled pack files have the correct settingSources values.
 
-        A user/project dir with no agents is used so only bundled packs contribute.
-        We find a bundled key that has no settingSources and confirm it's absent.
+        After T4 all three bundled packs declare settingSources. This test fails
+        if any pack file loses its settingSources line.
         """
         from claude_crew.subagents._user_loader import build_merged_pack
 
-        # Use isolated empty dirs so no user/project agents interfere.
         empty_user = tmp_path / "home"
         empty_user.mkdir()
         empty_project = tmp_path / "project"
@@ -522,19 +521,9 @@ class TestSettingSourcesCascade:
 
         _merged, role_ss = build_merged_pack(home_dir=empty_user, project_root=empty_project)
 
-        # "planner" does not yet have settingSources in its pack file (T4 adds it).
-        # If it does eventually, we check any bundled key that doesn't appear in role_ss.
-        bundled_without_ss = [
-            key for key in ("explorer", "planner", "general-purpose")
-            if role_ss.get(key) is None
-        ]
-        # At least one bundled pack has no settingSources — confirm absence pattern.
-        # If all three have settingSources after T4, this test becomes vacuous;
-        # for now it validates the None-means-absent contract.
-        # We also directly verify the contract for a known-absent key if any.
-        if bundled_without_ss:
-            key = bundled_without_ss[0]
-            assert role_ss.get(key) is None
+        assert role_ss.get("explorer") == [], "explorer.md must declare settingSources: []"
+        assert role_ss.get("general-purpose") == [], "general_purpose.md must declare settingSources: []"
+        assert role_ss.get("planner") == ["project"], "planner.md must declare settingSources: [project]"
 
     def test_user_agent_with_setting_sources_captured_in_role_ss(
         self, tmp_path: Path
