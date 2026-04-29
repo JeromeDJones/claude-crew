@@ -6,6 +6,15 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-29] Observation: recursive crew spawning is one config change away
+
+- **What**: Teammates currently cannot call `spawn_teammate` because the claude-crew MCP server is project-level only. If the MCP server were registered in `~/.claude.json` (user-level), teammates could spawn their own crew members — the broker already handles this correctly regardless of caller.
+- **Where**: `~/.claude.json` MCP config; `claude_crew/server.py` spawn_teammate tool
+- **Why it matters**: Enables genuine recursive crew expansion — a planner could spawn explorers, a builder could spawn a reviewer, without the lead having to orchestrate every level.
+- **Suggested action**: Register claude-crew in `~/.claude.json`, test that a teammate can successfully call `spawn_teammate`, confirm the spawned member appears in `list_crew`. Needs a decision on lifecycle ownership (who kills a teammate spawned by another teammate, not the lead).
+
+---
+
 ## [2026-04-28] Feature: agent definition parity + MCP forwarding for SDK teammates
 
 ### Primary: extend the loader to cover the full `AgentDefinition` field set
