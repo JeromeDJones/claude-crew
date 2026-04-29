@@ -149,7 +149,7 @@ class TestParsePackFile:
             # Role
             You are an explorer.
             """))
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "explorer"
         assert agent.model == "haiku"
         assert agent.tools == ["Read", "Grep", "Glob"]
@@ -169,7 +169,7 @@ class TestParsePackFile:
 
             body
             """))
-        key, _ = parse_pack_file(f)
+        key, _, _fm = parse_pack_file(f)
         assert key == "general-purpose"
 
     def test_missing_required_field_raises(self, tmp_path: Path) -> None:
@@ -220,7 +220,7 @@ class TestParsePackFile:
 
             body here
             """))
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "fwd"
         assert agent.model == "haiku"
 
@@ -648,7 +648,7 @@ class TestPackFrontmatterExtension:
             "skilled.md",
             extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n",
         )
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "skilled"
         assert agent.skills == ["sdd-workflow", "deep-build"]
 
@@ -659,7 +659,7 @@ class TestPackFrontmatterExtension:
             "permissive.md",
             extra_frontmatter="permissionMode: bypassPermissions\n",
         )
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "permissive"
         assert agent.permissionMode == "bypassPermissions"
 
@@ -682,14 +682,14 @@ class TestPackFrontmatterExtension:
             "restricted.md",
             extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n",
         )
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "restricted"
         assert agent.disallowedTools == ["Bash", "WebFetch"]
 
     def test_all_new_fields_absent_parses_cleanly(self, tmp_path: Path) -> None:
         """No new fields → parses fine, all three are None/absent on agent_def."""
         f = _write_agent(tmp_path, "minimal.md")
-        key, agent = parse_pack_file(f)
+        key, agent, _ = parse_pack_file(f)
         assert key == "minimal"
         # Fields should be None (or absent if not set in AgentDefinition constructor)
         assert agent.skills is None or agent.skills == []
@@ -758,7 +758,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "skilled.md",
             extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n"
         )
-        key, agent_def = parse_pack_file(f)
+        key, agent_def, _ = parse_pack_file(f)
         assert key == "skilled"
         assert agent_def.skills == ["sdd-workflow", "deep-build"]
 
@@ -784,7 +784,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "permissive.md",
             extra_frontmatter="permissionMode: bypassPermissions\n"
         )
-        key, agent_def = parse_pack_file(f)
+        key, agent_def, _ = parse_pack_file(f)
         assert agent_def.permissionMode == "bypassPermissions"
 
         await _drive_one_noop_turn(
@@ -805,7 +805,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "restricted.md",
             extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n"
         )
-        key, agent_def = parse_pack_file(f)
+        key, agent_def, _ = parse_pack_file(f)
         assert agent_def.disallowedTools == ["Bash", "WebFetch"]
 
         await _drive_one_noop_turn(
@@ -830,7 +830,7 @@ class TestFullLoaderToOptionsChain:
                 "disallowedTools:\n  - Bash\n"
             )
         )
-        key, agent_def = parse_pack_file(f)
+        key, agent_def, _ = parse_pack_file(f)
         assert agent_def.skills == ["workflow"]
         assert agent_def.permissionMode == "plan"
         assert agent_def.disallowedTools == ["Bash"]

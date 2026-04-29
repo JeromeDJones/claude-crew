@@ -82,7 +82,8 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition]:
             path,
             extras,
         )
-    return parse_pack_text(text, path)
+    key, agent, _fm = parse_pack_text(text, path)
+    return key, agent
 
 
 def discover_dir(directory: Path) -> dict[str, AgentDefinition]:

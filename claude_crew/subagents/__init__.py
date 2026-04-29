@@ -51,7 +51,7 @@ def load_default_pack() -> dict[str, AgentDefinition]:
     pack: dict[str, AgentDefinition] = {}
     for key in PACK_MEMBERS:
         path = _PACK_DIR / _FILE_FOR_KEY[key]
-        loaded_key, agent = parse_pack_file(path)
+        loaded_key, agent, _fm = parse_pack_file(path)
         if loaded_key != key:
             raise PackLoadError(
                 f"pack file {path} produced key '{loaded_key}', expected '{key}'"
