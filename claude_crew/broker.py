@@ -82,13 +82,15 @@ class Broker:
         factory: TeammateFactory,
         model: str | None = None,
         effort: str | None = None,
+        cwd: str | None = None,
+        permission_mode: str | None = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
         inbox: asyncio.Queue = asyncio.Queue()
         teammate = factory(
             teammate_id, resolved_name, role,
-            model=model, effort=effort,
+            model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
         )
         await teammate.start(self, inbox)
 

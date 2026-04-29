@@ -192,13 +192,17 @@ class TestRoundTrip:
         fake = FakeSDKClient(scripted_responses=[text_response("ok")])
         captured = _patch_sdk(monkeypatch, fake)
 
-        # Use a factory that respects model/effort kwargs from the broker.
-        def factory(id, name, role, *, model=None, effort=None):
+        # Use a factory that respects model/effort/cwd/permission_mode kwargs from the broker.
+        def factory(id, name, role, *, model=None, effort=None, cwd=None, permission_mode=None):
             kwargs = {}
             if model is not None:
                 kwargs["model"] = model
             if effort is not None:
                 kwargs["effort"] = effort
+            if cwd is not None:
+                kwargs["cwd"] = cwd
+            if permission_mode is not None:
+                kwargs["permission_mode"] = permission_mode
             return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
         tid = await broker.spawn_teammate(

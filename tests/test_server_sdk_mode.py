@@ -102,6 +102,49 @@ class TestSDKModeIntegration:
             ))
             assert send.get("error") == "teammate_dead"
 
+    async def test_spawn_with_cwd_and_permission_mode_reaches_options(self, monkeypatch) -> None:
+        """Full chain: MCP server → broker → factory → SdkTeammate → ClaudeAgentOptions.
+        Monkeypatch ClaudeSDKClient to capture options that were passed."""
+        captured_options = {}
+
+        class FakeCaptureSDKClient:
+            def __init__(self, options=None):
+                if options is not None:
+                    captured_options.update({
+                        "cwd": getattr(options, "cwd", None),
+                        "permission_mode": getattr(options, "permission_mode", None),
+                    })
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt, session_id=None):
+                pass
+
+            async def receive_response(self):
+                return
+                yield  # Make it async generator
+
+        monkeypatch.setattr(sdk_module, "ClaudeSDKClient", FakeCaptureSDKClient)
+
+        async with _client_with_sdk_mode() as s:
+            await s.initialize()
+            spawn = _content_json(await s.call_tool(
+                "spawn_teammate", {
+                    "role": "planner",
+                    "cwd": "/tmp/proj",
+                    "permission_mode": "plan",
+                },
+            ))
+            tid = spawn["teammate_id"]
+            assert tid is not None
+            # Check that the options were captured with the right values
+            assert captured_options.get("cwd") == "/tmp/proj"
+            assert captured_options.get("permission_mode") == "plan"
+
 
 # ---------- subprocess: auth gate ----------
 

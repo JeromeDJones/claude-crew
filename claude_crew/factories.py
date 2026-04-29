@@ -16,8 +16,9 @@ from claude_crew.teammate import StubTeammate, Teammate
 def stub_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
+    cwd: str | None = None, permission_mode: str | None = None,
 ) -> Teammate:
-    # Stub ignores model/effort — kept for signature uniformity with sdk_factory.
+    # Stub ignores model/effort/cwd/permission_mode — kept for signature uniformity with sdk_factory.
     return StubTeammate(id=id, name=name, role=role)
 
 
@@ -28,6 +29,7 @@ def sdk_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
     agents: "dict | None" = None,
+    cwd: str | None = None, permission_mode: str | None = None,
 ) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
@@ -38,6 +40,10 @@ def sdk_factory(
         kwargs["effort"] = effort
     if agents is not None:
         kwargs["agents"] = agents
+    if cwd is not None:
+        kwargs["cwd"] = cwd
+    if permission_mode is not None:
+        kwargs["permission_mode"] = permission_mode
     return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
@@ -64,9 +70,11 @@ def default_factory() -> TeammateFactory:
         def factory(
             id: str, name: str, role: str,
             *, model: str | None = None, effort: str | None = None,
+            cwd: str | None = None, permission_mode: str | None = None,
         ) -> Teammate:
             return sdk_factory(
                 id, name, role, model=model, effort=effort, agents=merged_pack,
+                cwd=cwd, permission_mode=permission_mode,
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]

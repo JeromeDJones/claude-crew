@@ -53,6 +53,8 @@ def make_server(
         name: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        cwd: str | None = None,
+        permission_mode: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
@@ -65,10 +67,17 @@ def make_server(
             effort: Optional reasoning effort. One of "low", "medium",
                 "high", "max". Higher uses more thinking tokens and costs
                 more; "low" is fastest and cheapest.
+            cwd: Optional working directory for the teammate subprocess.
+                When set, the teammate's project CLAUDE.md is loaded from
+                this path automatically.
+            permission_mode: Optional permission mode override. One of
+                "default", "acceptEdits", "plan", "bypassPermissions",
+                "dontAsk", "auto". Overrides the role's pack-declared
+                permissionMode when provided.
         """
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,
-            model=model, effort=effort,
+            model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
         )
         info = next(t for t in broker.list_crew() if t.id == tid)
         return {"teammate_id": info.id, "name": info.name, "role": info.role}

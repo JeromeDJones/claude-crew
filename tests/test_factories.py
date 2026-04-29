@@ -105,6 +105,119 @@ class TestSdkFactoryAgentInjection:
         assert "general-purpose" in teammate._agents  # bundled
 
 
+class TestSpawnChainParams:
+    """Feature #10-T3: cwd and permission_mode thread through the spawn chain
+    (server → broker → factory → SdkTeammate)."""
+
+    def test_stub_factory_accepts_cwd_and_permission_mode(self) -> None:
+        """stub_factory signature accepts cwd/permission_mode without TypeError."""
+        t = factories.stub_factory(
+            "t-1", "n", "r",
+            cwd="/tmp", permission_mode="plan",
+        )
+        assert isinstance(t, StubTeammate)
+        assert t.id == "t-1"
+
+    def test_sdk_factory_forwards_cwd_to_sdk_teammate(self, monkeypatch) -> None:
+        """sdk_factory forwards cwd to SdkTeammate constructor."""
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        captured_kwargs = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            # Call parent __init__ equivalent to avoid full init
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        t = factories.sdk_factory("t-1", "n", "r", cwd="/tmp/proj")
+        assert isinstance(t, SdkTeammate)
+        assert captured_kwargs.get("cwd") == "/tmp/proj"
+
+    def test_sdk_factory_forwards_permission_mode_to_sdk_teammate(self, monkeypatch) -> None:
+        """sdk_factory forwards permission_mode to SdkTeammate constructor."""
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        captured_kwargs = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        t = factories.sdk_factory("t-1", "n", "r", permission_mode="plan")
+        assert isinstance(t, SdkTeammate)
+        assert captured_kwargs.get("permission_mode") == "plan"
+
+    def test_default_factory_closure_forwards_cwd_and_permission_mode(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The inner factory closure in default_factory() forwards cwd and
+        permission_mode to sdk_factory.
+
+        We verify this by patching sdk_factory at the module level before
+        calling default_factory(), which captures the reference at that point."""
+        import inspect
+
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        # Patch build_merged_pack to avoid loading real agents
+        def mock_build_merged_pack():
+            return {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        # Patch sdk_factory in the module BEFORE calling default_factory
+        # so the closure captures our mock
+        captured_call_kwargs = {}
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            captured_call_kwargs.update(kwargs)
+            # Return a StubTeammate to avoid needing full SdkTeammate init
+            return StubTeammate(id, name, role)
+
+        # Replace in the module namespace before default_factory() is called
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+
+        # Now import and call default_factory with our patched sdk_factory
+        # We need to reload to get the patched version
+        import importlib
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+        # Create a new default_factory with the patched function
+        from claude_crew.factories import default_factory
+        f = default_factory()
+
+        # Call the factory closure with cwd and permission_mode
+        result = f("t-1", "n", "r", cwd="/tmp/proj", permission_mode="bypassPermissions")
+
+        # Verify the closure passed the parameters through
+        assert captured_call_kwargs.get("cwd") == "/tmp/proj"
+        assert captured_call_kwargs.get("permission_mode") == "bypassPermissions"
+        assert isinstance(result, StubTeammate)
+
+
 class TestMakeServerAuthGate:
     """make_server() must call validate_auth_or_exit only when the selected
     factory has requires_auth=True. Stub mode skips the check."""
