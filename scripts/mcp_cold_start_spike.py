@@ -17,9 +17,11 @@ This spike answers:
   Q3. Does a 5-second warm-up delay before the first tool call close
       the cold-start gap?
 
-  Q4. Does claude-crew's own stdio MCP server load reliably in a
-      fresh SDK session? (This is the one that matters for production —
-      teammates need to reach their own crew tools.)
+  Q4. Does a locally-hosted stdio MCP server registered at user-global
+      level reach SDK teammates? Tests the gap found in Scenario B
+      (claude-crew not in user config). Uses scripts/mcp_probe_server.py —
+      a minimal FastMCP server with one probe_ping tool. Temporarily added
+      to ~/.claude.json for the duration of the test, then removed.
 
 Method:
   - Scenario A: Atlassian probe (HTTP MCP) × 3 independent sessions.
@@ -44,6 +46,7 @@ Findings written to doc/research/mcp-cold-start-behavior.md.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -187,6 +190,66 @@ async def scenario_c_delayed_warmup() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Scenario D — local stdio MCP at user-global level × 3 cold starts
+# ---------------------------------------------------------------------------
+
+_CLAUDE_JSON = Path.home() / ".claude.json"
+_PROBE_SERVER = Path(__file__).parent / "mcp_probe_server.py"
+_PROBE_MCP_KEY = "mcp-stdio-probe"
+_PROBE_TOOL = "mcp__mcp-stdio-probe__probe_ping"
+
+
+class _ClaudeJsonPatch:
+    """Temporarily add the probe stdio MCP server to ~/.claude.json."""
+
+    def __init__(self) -> None:
+        self._original: str = ""
+
+    def __enter__(self) -> "_ClaudeJsonPatch":
+        self._original = _CLAUDE_JSON.read_text()
+        data = json.loads(self._original)
+        data.setdefault("mcpServers", {})[_PROBE_MCP_KEY] = {
+            "type": "stdio",
+            "command": "uv",
+            "args": [
+                "--directory", str(Path(__file__).parent.parent),
+                "run", "python", str(_PROBE_SERVER),
+            ],
+        }
+        _CLAUDE_JSON.write_text(json.dumps(data, indent=2) + "\n")
+        print(f"  [patch] probe stdio MCP added to {_CLAUDE_JSON}")
+        return self
+
+    def __exit__(self, *_) -> None:
+        _CLAUDE_JSON.write_text(self._original)
+        print(f"  [patch] {_CLAUDE_JSON} restored")
+
+
+async def scenario_d_local_stdio_cold_starts() -> dict:
+    """Local stdio MCP registered at user-global level × 3 cold starts."""
+    results = []
+    with _ClaudeJsonPatch():
+        for i in range(1, 4):
+            print(f"    run {i}/3 …", end=" ", flush=True)
+            r = await _probe_once(_PROBE_TOOL)
+            print(r["status"])
+            results.append(r)
+
+    statuses = [r["status"] for r in results]
+    if all(s == "PASS" for s in statuses):
+        finding = "CONSISTENT PASS — local stdio MCP loads reliably at user-global level in SDK mode"
+    elif statuses[0].startswith("FAIL") and all(s == "PASS" for s in statuses[1:]):
+        finding = "COLD-START GAP — run 1 failed, runs 2+3 passed (stdio has same warm-up issue)"
+    elif all(s.startswith("FAIL") for s in statuses):
+        finding = "CONSISTENT FAIL — local stdio MCP unavailable in SDK mode even at user-global level"
+    else:
+        finding = f"INCONSISTENT — {statuses}"
+
+    return {"scenario": "D", "question": "local stdio MCP at user-global level × 3 cold starts",
+            "results": results, "finding": finding}
+
+
+# ---------------------------------------------------------------------------
 # Findings writer
 # ---------------------------------------------------------------------------
 
@@ -220,6 +283,10 @@ async def main() -> int:
     c = await scenario_c_delayed_warmup()
     print(f"  → {c['finding']}")
 
+    print("Scenario D — local stdio MCP at user-global level × 3 cold starts …")
+    d = await scenario_d_local_stdio_cold_starts()
+    print(f"  → {d['finding']}")
+
     findings_path = (
         Path(__file__).parent.parent / "doc" / "research" / "mcp-cold-start-behavior.md"
     )
@@ -236,12 +303,14 @@ async def main() -> int:
         f"| A — Atlassian × 3 cold starts | {a['finding']} |",
         f"| B — claude-crew stdio × 3 cold starts | {b['finding']} |",
         f"| C — Atlassian + 5s warm-up delay | {c['finding']} |",
+        f"| D — local stdio MCP (user-global) × 3 cold starts | {d['finding']} |",
         "",
         "## Detail",
         "",
         _fmt_scenario(a),
         _fmt_scenario(b),
         _fmt_scenario(c),
+        _fmt_scenario(d),
     ])
     findings_path.write_text(content)
     print(f"\nFindings written to {findings_path}")

@@ -10,6 +10,7 @@ Re-run to refresh; do not edit by hand.
 | A — Atlassian × 3 cold starts | CONSISTENT PASS — Atlassian MCP loads on all 3 cold starts |
 | B — claude-crew stdio × 3 cold starts | CONSISTENT FAIL — claude-crew stdio MCP unavailable in SDK mode |
 | C — Atlassian + 5s warm-up delay | DELAY CLOSES GAP — 5s warm-up before first call succeeds |
+| D — local stdio MCP (user-global) × 3 cold starts | CONSISTENT PASS — local stdio MCP loads reliably at user-global level in SDK mode |
 
 ## Detail
 
@@ -40,3 +41,13 @@ Re-run to refresh; do not edit by hand.
 **Per-run results:**
 
 - Run 1: `PASS` — tools called: `['mcp__atlassian__atlassianUserInfo']`
+
+### Scenario D: local stdio MCP at user-global level × 3 cold starts
+
+**Finding:** CONSISTENT PASS — local stdio MCP loads reliably at user-global level in SDK mode
+
+**Per-run results:**
+
+- Run 1: `PASS` — tools called: `['mcp__mcp-stdio-probe__probe_ping']`
+- Run 2: `PASS` — tools called: `['mcp__mcp-stdio-probe__probe_ping']`
+- Run 3: `PASS` — tools called: `['mcp__mcp-stdio-probe__probe_ping']`
