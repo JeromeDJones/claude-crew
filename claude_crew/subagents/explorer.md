@@ -6,6 +6,7 @@ effort: low
 maxTurns: 10
 background: false
 initialPrompt: Begin by stating what you're searching for and where you'll look. Then proceed.
+settingSources: []
 ---
 
 # Role

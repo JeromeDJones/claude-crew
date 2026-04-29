@@ -42,23 +42,25 @@ class PackFrontmatter:
     skills: tuple[str, ...] | None = None
     permissionMode: str | None = None
     disallowedTools: tuple[str, ...] | None = None
+    settingSources: list[str] | None = None
 
 
 _REQUIRED = ("description", "model", "tools")
 _OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background",
-             "skills", "permissionMode", "disallowedTools")
+             "skills", "permissionMode", "disallowedTools", "settingSources")
 
 _VALID_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
 )
+_VALID_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 
-def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
+def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter]:
     """Parse one markdown file with YAML frontmatter into an AgentDefinition.
 
-    Returns (key, agent_definition) where the key is the file stem with
-    underscores converted to hyphens (e.g., ``general_purpose.md`` →
-    ``"general-purpose"``).
+    Returns (key, agent_definition, frontmatter) where the key is the file
+    stem with underscores converted to hyphens (e.g., ``general_purpose.md``
+    → ``"general-purpose"``).
 
     Raises:
         PackLoadError: if the file is missing, lacks frontmatter, omits a
@@ -71,13 +73,15 @@ def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
     return parse_pack_text(text, path)
 
 
-def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition]:
-    """Parse already-read pack text into ``(key, AgentDefinition)``.
+def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFrontmatter]:
+    """Parse already-read pack text into ``(key, AgentDefinition, PackFrontmatter)``.
 
     Lets callers that already have the file contents (e.g., the user-
     loader's ``strict_parse``, which inspects frontmatter before
     delegating) avoid a second read. ``path`` is used for the kebab-key
-    and for error messages.
+    and for error messages. The ``PackFrontmatter`` is returned as the
+    third element so callers can access fields (e.g., ``settingSources``)
+    that do not map onto ``AgentDefinition``.
     """
     fm_dict, body = _split_frontmatter(text, path)
     fm = _validate_frontmatter(fm_dict, path)
@@ -104,7 +108,7 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition]:
         agent_kwargs["disallowedTools"] = list(fm.disallowedTools)
 
     agent = AgentDefinition(**agent_kwargs)
-    return key, agent
+    return key, agent, fm
 
 
 def _split_frontmatter(text: str, path: Path) -> tuple[dict[str, Any], str]:
@@ -149,6 +153,15 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             f"valid values: {sorted(_VALID_PERMISSION_MODES)}"
         )
 
+    ss = d.get("settingSources")
+    if ss is not None:
+        for item in ss:
+            if item not in _VALID_SETTING_SOURCES:
+                raise PackLoadError(
+                    f"pack file {path}: unknown settingSources item {item!r}; "
+                    f"valid values: {sorted(_VALID_SETTING_SOURCES)}"
+                )
+
     return PackFrontmatter(
         description=str(d["description"]),
         model=str(d["model"]),
@@ -167,4 +180,5 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             tuple(str(t) for t in d["disallowedTools"])
             if d.get("disallowedTools") is not None else None
         ),
+        settingSources=list(ss) if ss is not None else None,
     )

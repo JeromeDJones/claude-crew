@@ -182,7 +182,7 @@ class TestSpawnChainParams:
 
         # Patch build_merged_pack to avoid loading real agents
         def mock_build_merged_pack():
-            return {}
+            return {}, {}
 
         monkeypatch.setattr(
             "claude_crew.subagents._user_loader.build_merged_pack",
@@ -216,6 +216,140 @@ class TestSpawnChainParams:
         assert captured_call_kwargs.get("cwd") == "/tmp/proj"
         assert captured_call_kwargs.get("permission_mode") == "bypassPermissions"
         assert isinstance(result, StubTeammate)
+
+
+class TestSettingSources:
+    """T3 BDD: setting_sources threads through the factory chain."""
+
+    def test_stub_factory_accepts_setting_sources_without_error(self) -> None:
+        """stub_factory accepts setting_sources param and returns StubTeammate."""
+        t = factories.stub_factory(
+            "t-1", "alice", "planner",
+            setting_sources=[],
+        )
+        assert isinstance(t, StubTeammate)
+        assert t.id == "t-1"
+
+    def test_sdk_factory_passes_setting_sources_to_sdk_teammate(self, monkeypatch) -> None:
+        """sdk_factory forwards setting_sources=[] to SdkTeammate constructor."""
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        captured_kwargs: dict = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        factories.sdk_factory("t-1", "alice", "explorer", setting_sources=[])
+        assert captured_kwargs.get("setting_sources") == []
+
+    def test_sdk_factory_omits_setting_sources_kwarg_when_none(self, monkeypatch) -> None:
+        """sdk_factory with setting_sources=None must NOT pass setting_sources to SdkTeammate.
+
+        This guards the None-vs-[] invariant: None means 'use SDK default' (kwarg absent),
+        [] means 'no sources' (kwarg present as empty list). A truthiness check would
+        incorrectly treat [] as falsy and skip it.
+        """
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        captured_kwargs: dict = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        factories.sdk_factory("t-1", "alice", "explorer", setting_sources=None)
+        assert "setting_sources" not in captured_kwargs
+
+    def test_default_factory_closure_passes_role_ss_to_sdk_factory(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Inner factory closure looks up role_ss[role] and passes it to sdk_factory.
+
+        role_ss={"explorer": []} → spawning "explorer" → sdk_factory gets setting_sources=[].
+        """
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        mock_agent_def = object()  # stand-in; not inspected
+
+        def mock_build_merged_pack():
+            return {"explorer": mock_agent_def}, {"explorer": []}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        captured_call_kwargs: dict = {}
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            captured_call_kwargs.update(kwargs)
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        from claude_crew.factories import default_factory
+        f = default_factory()
+        f("t-1", "alice", "explorer")
+
+        assert captured_call_kwargs.get("setting_sources") == []
+
+    def test_default_factory_closure_passes_none_for_unknown_role(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Role not in role_ss → sdk_factory receives setting_sources=None (SDK default)."""
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        mock_agent_def = object()
+
+        def mock_build_merged_pack():
+            return {"explorer": mock_agent_def}, {"explorer": []}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        captured_call_kwargs: dict = {}
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            captured_call_kwargs.update(kwargs)
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        from claude_crew.factories import default_factory
+        f = default_factory()
+        f("t-1", "bob", "planner")
+
+        # "planner" not in role_ss → role_ss.get("planner") is None
+        assert captured_call_kwargs.get("setting_sources") is None
 
 
 class TestMakeServerAuthGate:
