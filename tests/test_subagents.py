@@ -613,3 +613,123 @@ class TestFailureHandling:
             if r.name == "claude_crew.sdk_teammate" and r.levelname == "WARNING"
         ]
         assert sdk_warnings == []
+
+
+# ---------- Task 1: PackFrontmatter extension (Feature #10) ----------
+
+
+def _write_agent(
+    tmp_path: Path, filename: str, extra_frontmatter: str = ""
+) -> Path:
+    """Helper to create a test pack file with optional extra frontmatter fields.
+
+    Returns the file path.
+    """
+    base_frontmatter = "description: A test agent.\nmodel: sonnet\ntools: [Read]\n"
+    combined = base_frontmatter + extra_frontmatter
+    content = f"""---
+{combined}---
+
+# Test Agent
+This is a test agent body.
+"""
+    f = tmp_path / filename
+    f.write_text(content)
+    return f
+
+
+class TestPackFrontmatterExtension:
+    """Feature #10 Task 1 — skills, permissionMode, disallowedTools fields."""
+
+    def test_skills_parsed(self, tmp_path: Path) -> None:
+        """skills: [...] → agent_def.skills == [...]"""
+        f = _write_agent(
+            tmp_path,
+            "skilled.md",
+            extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n",
+        )
+        key, agent = parse_pack_file(f)
+        assert key == "skilled"
+        assert agent.skills == ["sdd-workflow", "deep-build"]
+
+    def test_permission_mode_parsed(self, tmp_path: Path) -> None:
+        """permissionMode: bypassPermissions → agent_def.permissionMode == 'bypassPermissions'."""
+        f = _write_agent(
+            tmp_path,
+            "permissive.md",
+            extra_frontmatter="permissionMode: bypassPermissions\n",
+        )
+        key, agent = parse_pack_file(f)
+        assert key == "permissive"
+        assert agent.permissionMode == "bypassPermissions"
+
+    def test_invalid_permission_mode_raises(self, tmp_path: Path) -> None:
+        """permissionMode: superadmin (invalid) → PackLoadError."""
+        f = _write_agent(
+            tmp_path,
+            "bad_perm.md",
+            extra_frontmatter="permissionMode: superadmin\n",
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        assert "superadmin" in str(exc.value)
+        assert "permissionMode" in str(exc.value)
+
+    def test_disallowed_tools_parsed(self, tmp_path: Path) -> None:
+        """disallowedTools: [...] → agent_def.disallowedTools == [...]"""
+        f = _write_agent(
+            tmp_path,
+            "restricted.md",
+            extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n",
+        )
+        key, agent = parse_pack_file(f)
+        assert key == "restricted"
+        assert agent.disallowedTools == ["Bash", "WebFetch"]
+
+    def test_all_new_fields_absent_parses_cleanly(self, tmp_path: Path) -> None:
+        """No new fields → parses fine, all three are None/absent on agent_def."""
+        f = _write_agent(tmp_path, "minimal.md")
+        key, agent = parse_pack_file(f)
+        assert key == "minimal"
+        # Fields should be None (or absent if not set in AgentDefinition constructor)
+        assert agent.skills is None or agent.skills == []
+        assert agent.permissionMode is None
+        assert agent.disallowedTools is None or agent.disallowedTools == []
+
+    def test_new_fields_no_warning_in_strict_parse(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """All three fields declared → no 'unrecognized' warning in strict_parse."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="claude_crew.subagents.loader")
+
+        f = _write_agent(
+            tmp_path,
+            "allfields.md",
+            extra_frontmatter=(
+                "skills:\n  - workflow\n"
+                "permissionMode: plan\n"
+                "disallowedTools:\n  - Bash\n"
+            ),
+        )
+        # Import strict_parse and verify no warning
+        from claude_crew.subagents._user_loader import strict_parse
+
+        key, agent = strict_parse(f)
+        assert key == "allfields"
+        assert agent.skills == ["workflow"]
+        assert agent.permissionMode == "plan"
+        assert agent.disallowedTools == ["Bash"]
+
+        # Check no unrecognized warnings
+        unrecognized_warnings = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING"
+            and "unrecognized" in r.message.lower()
+            and r.name == "claude_crew.subagents.loader"
+        ]
+        assert unrecognized_warnings == [], (
+            f"Expected no unrecognized warnings, but got: {unrecognized_warnings}"
+        )

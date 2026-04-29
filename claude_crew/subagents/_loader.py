@@ -27,7 +27,8 @@ class PackFrontmatter:
     """Validated frontmatter fields for a pack file.
 
     Required: description, model, tools.
-    Optional: effort, maxTurns, initialPrompt, background.
+    Optional: effort, maxTurns, initialPrompt, background, skills,
+              permissionMode, disallowedTools.
     Unknown fields are ignored (forward-compat).
     """
 
@@ -38,10 +39,18 @@ class PackFrontmatter:
     maxTurns: int | None = None
     initialPrompt: str | None = None
     background: bool | None = None
+    skills: tuple[str, ...] | None = None
+    permissionMode: str | None = None
+    disallowedTools: tuple[str, ...] | None = None
 
 
 _REQUIRED = ("description", "model", "tools")
-_OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background")
+_OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background",
+             "skills", "permissionMode", "disallowedTools")
+
+_VALID_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+)
 
 
 def parse_pack_file(path: Path) -> tuple[str, AgentDefinition]:
@@ -77,16 +86,24 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition]:
         raise PackLoadError(f"pack file {path} has empty body")
 
     key = path.stem.replace("_", "-")
-    agent = AgentDefinition(
-        description=fm.description,
-        prompt=body,
-        tools=list(fm.tools),
-        model=fm.model,
-        effort=fm.effort,
-        maxTurns=fm.maxTurns,
-        initialPrompt=fm.initialPrompt,
-        background=fm.background,
-    )
+    agent_kwargs: dict[str, Any] = {
+        "description": fm.description,
+        "prompt": body,
+        "tools": list(fm.tools),
+        "model": fm.model,
+        "effort": fm.effort,
+        "maxTurns": fm.maxTurns,
+        "initialPrompt": fm.initialPrompt,
+        "background": fm.background,
+    }
+    if fm.skills is not None:
+        agent_kwargs["skills"] = list(fm.skills)
+    if fm.permissionMode is not None:
+        agent_kwargs["permissionMode"] = fm.permissionMode
+    if fm.disallowedTools is not None:
+        agent_kwargs["disallowedTools"] = list(fm.disallowedTools)
+
+    agent = AgentDefinition(**agent_kwargs)
     return key, agent
 
 
@@ -124,6 +141,14 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             raise PackLoadError(
                 f"pack file {path} missing required frontmatter field '{field}'"
             )
+
+    pm = d.get("permissionMode")
+    if pm is not None and pm not in _VALID_PERMISSION_MODES:
+        raise PackLoadError(
+            f"pack file {path}: unknown permissionMode {pm!r}; "
+            f"valid values: {sorted(_VALID_PERMISSION_MODES)}"
+        )
+
     return PackFrontmatter(
         description=str(d["description"]),
         model=str(d["model"]),
@@ -134,4 +159,12 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             str(d["initialPrompt"]) if d.get("initialPrompt") is not None else None
         ),
         background=bool(d["background"]) if d.get("background") is not None else None,
+        skills=(
+            tuple(str(s) for s in d["skills"]) if d.get("skills") is not None else None
+        ),
+        permissionMode=pm,
+        disallowedTools=(
+            tuple(str(t) for t in d["disallowedTools"])
+            if d.get("disallowedTools") is not None else None
+        ),
     )
