@@ -138,6 +138,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -151,6 +152,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "mcp", specifier = ">=1.27.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]
