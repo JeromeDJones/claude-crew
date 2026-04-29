@@ -6,6 +6,67 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-28] Feature: agent definition parity + MCP forwarding for SDK teammates
+
+### Primary: extend the loader to cover the full `AgentDefinition` field set
+
+- **What**: `_loader.py`'s `PackFrontmatter` only parses `description`, `model`, `tools`, `effort`, `maxTurns`, `initialPrompt`, `background`. `AgentDefinition` also supports `mcpServers`, `skills`, `permissionMode`, `disallowedTools`, `memory` — none of these are wired into the frontmatter parser. So a `.md` agent file can't declare MCP servers, skills, or a permission mode even though the SDK fully supports them.
+- **Where**: `claude_crew/subagents/_loader.py` — `PackFrontmatter` dataclass, `_OPTIONAL` tuple, `_validate_frontmatter()`, `parse_pack_text()`. Same changes needed in `_user_loader.py` if it has its own frontmatter validation.
+- **Why it matters**: `tools:` in frontmatter already handles tool restriction per-role — that's the right layer, not `spawn_teammate`. The same logic applies to MCP servers, skills, and permission mode: they're role-level configuration, not spawn-time overrides. An agent definition like this should work but doesn't today:
+  ```yaml
+  mcpServers:
+    - jira
+  skills:
+    - sdd-workflow
+  permissionMode: bypassPermissions
+  ```
+- **Suggested action**: Add `mcpServers`, `skills`, `permissionMode`, `disallowedTools`, `memory` to `PackFrontmatter` as optional fields. Wire them through `_validate_frontmatter` and `parse_pack_text`. Straightforward — no architecture change, just field additions.
+
+### Secondary: `cwd` and MCP server injection on `spawn_teammate` for spawn-time overrides
+
+- **What**: Two spawn-time params not currently exposed:
+  - `cwd: str | None` — working directory for the teammate subprocess. Currently all teammates inherit the directory the MCP server started in. Exposing `cwd` enables multi-repo work (e.g., spawn a builder pointed at `~/dev/my-money-matters` while the lead session runs in `~/dev/claude-crew`). Side effect: `setting_sources: ["project"]` resolves relative to `cwd`, so the teammate automatically picks up the target project's `.claude/CLAUDE.md` and settings — this is probably the right behavior but it means `cwd` changes the full project context, not just the working directory.
+  - `mcp_servers: dict[str, Any] | None` — for dynamic/runtime servers not known at agent-definition time. Thread through to `ClaudeAgentOptions.mcp_servers`.
+- **Where**: `claude_crew/server.py`, `claude_crew/sdk_teammate.py`, `claude_crew/broker.py`, factory chain.
+- **Suggested action**: Add both to `spawn_teammate`, thread through the chain. `cwd` is a clean addition with no unknowns. `mcp_servers` gates on the MCP spike results (see above).
+
+### Spike required: MCP behavior needs empirical verification before design is locked
+
+Three unknowns that must be resolved before Phase 2:
+
+1. **Does `--mcp-config` merge or replace settings-file servers?** When `ClaudeAgentOptions.mcp_servers` is non-empty, the SDK passes `--mcp-config`. If the CLI treats this as a replacement (not a merge), spawn-time `mcp_servers` silently drops globally-configured servers and we need explicit merge logic.
+
+2. **Do globally-configured MCP servers load at all in SDK mode?** The CLI reads `~/.claude/settings.json` via `setting_sources: ["user"]` but it's unverified whether MCP servers defined there are connected when the subprocess runs with `CLAUDE_CODE_ENTRYPOINT=sdk-py`. Same spike as the shell hooks question — needs an empirical test.
+
+3. **Do agent `tools:` lists block MCP tools from connected servers?** If a teammate has `tools: [Read, Grep]` and a globally-loaded MCP server, are that server's tools callable or blocked by the allowlist? If blocked, the agent definition needs to enumerate every MCP tool by name — painful — unless the CLI supports wildcard patterns like `mcp__jira__*`. Needs verification.
+
+**Spike plan**: write a minimal test teammate that connects to a known MCP server (e.g., the Atlassian MCP already configured globally), has a restricted `tools` list, and attempts to call an MCP tool. Run three variations: global-only config, explicit `mcp_servers`, and wildcard in tools list. Results determine the full design.
+
+### Hooks: two systems, two answers
+
+Plugin hooks and "always-include" hooks split across two different mechanisms:
+
+- **Shell-command hooks** (settings.json `hooks:` entries — `PreToolUse`, `PostToolUse`, etc.) — the CLI subprocess reads `~/.claude/settings.json` via `setting_sources: ["user"]`. Whether it also *executes* those hooks in SDK mode (`CLAUDE_CODE_ENTRYPOINT=sdk-py`) is unverified. The interactive harness and the SDK subprocess share the same CLI binary but may differ in hook lifecycle behavior. **Needs a spike before assuming coverage**: add a PostToolUse hook that writes to a log file, spin up a teammate, have it run a tool, check the log. If hooks don't fire in SDK mode this becomes a real gap — either we forward shell hooks explicitly via `ClaudeAgentOptions.extra_args` or document that global shell hooks are lead-only.
+
+- **Python/SDK hooks** (`HookMatcher` with `HookCallback` callables in `ClaudeAgentOptions.hooks`) — these are what claude-crew uses for telemetry, hardcoded in `SdkTeammate._run()`. There's no user-facing way to add always-include Python hooks today. If needed, the right seam is a `base_hooks` param on `SdkTeammateFactory` — merged with telemetry hooks at construction time, applied to every spawn. Low priority until a concrete use case surfaces.
+
+- **Per-role hooks in agent definitions** — `AgentDefinition` doesn't have a `hooks` field; hooks aren't part of the role definition contract. Shell hooks belong in global settings; Python hooks belong at the factory level. Nothing to add here.
+
+---
+
+## [2026-04-28] Feature: skill invocation for SDK teammates (spike first)
+
+- **What**: Allow a subagent to invoke a skill by passing a pointer to its location — not loading the skill's system prompt into the subagent's context, but giving the subagent the ability to *run* the skill as a discrete action (analogous to a lead invoking `/sdd-workflow`). Distinct from `ClaudeAgentOptions.skills`, which injects skill prompt content at session startup.
+- **Why it matters**: A builder teammate that could invoke `/sdd-workflow` or `/security-review` mid-task would extend the reach of the workflow skills into multi-agent contexts without requiring the lead to orchestrate every step.
+- **Open questions requiring a spike**:
+  - How does a subagent invoke a skill — is it a tool call, a prompt injection, or something else?
+  - Does the skill run inside the subagent's session context or does it require a fresh session?
+  - What's the interaction with the subagent's existing role prompt and tool restrictions?
+  - Does the skill's system prompt merge, prepend, or replace the subagent's prompt?
+- **Suggested action**: Spike only for now. Do not design the feature until the spike answers what "invoking a skill from a subagent" actually means mechanically. The loader extension feature (above) should ship first — this gates on understanding the subagent skill lifecycle.
+
+---
+
 ## [2026-04-27] Feature: #7 subagent-activity envelopes (T5 + sentinel chain follow-ups)
 
 ### Phase 3 Scenario 4 BDD comment misleads — `abandoned_batch` vs `subagent_result`
@@ -91,3 +152,9 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 ---
 
 <!-- Add new entries above. Keep this file ordered newest-first. -->
+
+## [2026-04-29] Feature: agent-config-extension (#10)
+- **What**: `spawn_teammate` MCP tool accepts `permission_mode: str | None` but does not validate it against `_VALID_PERMISSION_MODES` at the server/broker layer. Pack-declared values are validated at parse time; spawn-time override is not.
+- **Where**: `claude_crew/server.py` → `broker.spawn_teammate` → factory chain
+- **Why it matters**: Invalid strings reach `ClaudeAgentOptions` and are silently ignored by the SDK — caller gets no error, spawn appears to succeed with wrong behavior
+- **Suggested action**: Import `_VALID_PERMISSION_MODES` from `_loader.py` into `server.py`; validate spawn-time `permission_mode` at the MCP tool boundary and return `_err("invalid_argument", ...)` on failure
