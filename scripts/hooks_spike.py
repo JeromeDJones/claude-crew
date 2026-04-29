@@ -212,6 +212,103 @@ async def probe_b_subagent_hooks(log_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Scenario E — Q4: do matchers filter correctly in SDK mode?
+# ---------------------------------------------------------------------------
+
+class _MatchedSettingsPatch:
+    """Inject a Bash-only matched hook. No matcher on Read."""
+
+    def __init__(self, log_path: str) -> None:
+        self._log_path = log_path
+        self._original: dict = {}
+
+    def __enter__(self) -> "_MatchedSettingsPatch":
+        self._original = _load_settings()
+        patched = json.loads(json.dumps(self._original))
+
+        hook_cmd = (
+            f'env > {self._log_path}.$$.env ; '
+            f'echo ---HOOK-$$ >> {self._log_path}'
+        )
+
+        # Only match Bash — Read calls should NOT trigger this hook.
+        matched_hooks = {
+            "PostToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": hook_cmd}],
+            }],
+        }
+
+        existing_hooks = patched.get("hooks", {})
+        for event, matchers in matched_hooks.items():
+            existing_hooks[event] = matchers + existing_hooks.get(event, [])
+        patched["hooks"] = existing_hooks
+
+        _save_settings(patched)
+        print(f"  [patch] Bash-only matched hook injected → log: {self._log_path}")
+        return self
+
+    def __exit__(self, *_) -> None:
+        _save_settings(self._original)
+        print("  [patch] settings.json restored")
+
+
+async def probe_e_matcher_filtering(log_path: str) -> dict:
+    """Session uses both Bash and Read. Hook has matcher='Bash'.
+
+    Expected outcomes:
+      - 1 invocation → matcher works (only Bash triggered PostToolUse hook)
+      - 2 invocations → matcher ignored (both Bash and Read triggered hook)
+      - 0 invocations → matcher blocks all hooks in SDK mode
+    """
+    log_before = _read_log_lines(log_path)
+
+    options = ClaudeAgentOptions(
+        model=_MODEL,
+        system_prompt=_PROBE_SYSTEM,
+        setting_sources=["user"],
+    )
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(
+            "Do exactly two things in order:\n"
+            "1. Run `echo probe_e_bash` using the Bash tool.\n"
+            "2. Read the file /etc/hostname using the Read tool.\n"
+            "Report both results."
+        )
+        text, tools = await _drain(client)
+
+    # Small delay to let any async hook processes flush their writes.
+    await asyncio.sleep(1.0)
+
+    log_after = _read_log_lines(log_path)
+    new_lines = log_after[len(log_before):]
+    hook_count = sum(1 for l in new_lines if l.startswith("---HOOK"))
+
+    bash_called = "Bash" in tools
+    read_called = "Read" in tools
+
+    if not bash_called or not read_called:
+        finding = f"INCONCLUSIVE — model did not call both tools (called: {tools})"
+    elif hook_count == 0:
+        finding = "MATCHER BLOCKS ALL — 0 hooks fired despite Bash call (matcher broke SDK hooks)"
+    elif hook_count == 1:
+        finding = "MATCHER WORKS — 1 hook fired (Bash only, Read correctly excluded)"
+    elif hook_count == 2:
+        finding = "MATCHER IGNORED — 2 hooks fired (both Bash and Read triggered the Bash-only hook)"
+    else:
+        finding = f"UNEXPECTED — {hook_count} hooks fired for 2 tool calls"
+
+    return {
+        "scenario": "E",
+        "question": "Q4 — do matchers filter correctly in SDK mode?",
+        "tools_called": tools,
+        "new_log_lines": new_lines,
+        "hook_invocations": hook_count,
+        "finding": finding,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -275,6 +372,11 @@ async def main() -> int:
         b = await probe_b_subagent_hooks(log_path)
         print(f"  → {b['finding']}")
 
+    with _MatchedSettingsPatch(log_path):
+        print("Running scenario E — conditional hook (Bash matcher) …")
+        e = await probe_e_matcher_filtering(log_path)
+        print(f"  → {e['finding']}")
+
     findings_path = Path(__file__).parent.parent / "doc" / "research" / "hooks-sdk-behavior.md"
     content = "\n".join([
         "# Hooks SDK Behavior — Spike Findings",
@@ -289,11 +391,13 @@ async def main() -> int:
         f"| Q1 — PreToolUse fires in SDK mode? | {a['finding']} |",
         f"| Q2 — PostToolUse fires in SDK mode? | {a['finding']} |",
         f"| Q3 — hooks fire for subagent tool calls? | {b['finding']} |",
+        f"| Q4 — matchers filter correctly in SDK mode? | {e['finding']} |",
         "",
         "## Detail",
         "",
         _fmt_result(a),
         _fmt_result(b),
+        _fmt_result(e),
     ])
     findings_path.write_text(content)
     print(f"\nFindings written to {findings_path}")

@@ -9,7 +9,8 @@ Re-run to refresh; do not edit by hand.
 |---|---------|
 | Q1 — PreToolUse fires in SDK mode? | HOOKS FIRED — 2 hook invocation(s) confirmed |
 | Q2 — PostToolUse fires in SDK mode? | HOOKS FIRED — 2 hook invocation(s) confirmed |
-| Q3 — hooks fire for subagent tool calls? | HOOKS FIRED — 8 hook invocation(s) confirmed |
+| Q3 — hooks fire for subagent tool calls? | HOOKS FIRED — 4 hook invocation(s) confirmed |
+| Q4 — matchers filter correctly in SDK mode? | MATCHER WORKS — 1 hook fired (Bash only, Read correctly excluded) |
 
 ## Detail
 
@@ -21,24 +22,31 @@ Tools called by model: `['Bash']`
 
 New log lines from hook probe:
 ```
----HOOK-98280
----HOOK-98342
+---HOOK-2482
+---HOOK-2544
 ```
 
 ### Scenario B: Q3 — hooks fire for subagent tool calls inside SDK session?
 
-**Finding:** HOOKS FIRED — 8 hook invocation(s) confirmed
+**Finding:** HOOKS FIRED — 4 hook invocation(s) confirmed
 
-Tools called by model: `['Agent', 'Bash', 'SendMessage', 'Read']`
+Tools called by model: `['Agent', 'Bash']`
 
 New log lines from hook probe:
 ```
----HOOK-98430
----HOOK-98432
----HOOK-98494
----HOOK-98496
----HOOK-98498
----HOOK-98500
----HOOK-98502
----HOOK-98504
+---HOOK-2634
+---HOOK-2636
+---HOOK-2698
+---HOOK-2700
+```
+
+### Scenario E: Q4 — do matchers filter correctly in SDK mode?
+
+**Finding:** MATCHER WORKS — 1 hook fired (Bash only, Read correctly excluded)
+
+Tools called by model: `['Bash', 'Read']`
+
+New log lines from hook probe:
+```
+---HOOK-2849
 ```
