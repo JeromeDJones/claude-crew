@@ -510,7 +510,15 @@ Full suite: `uv run pytest`
 
 ## Phase 4: Implementation
 
-*(not yet started)*
+T1 (PackFrontmatter.settingSources), T2 (loader cascade), T3 (factory chain), and T4
+(bundled pack files) are complete. 386 tests pass.
+
+**Live E2E probe deferred to manual verification.** `test_e2e_setting_sources.py` was
+not written — it requires a real SDK session (live API call) to confirm SC-5
+(`setting_sources=[]` produces no CLAUDE.md context). The probe should be run manually:
+spawn an explorer teammate and ask "What is the name of the user you work with?" — the
+answer must not be "Jerome". Also verify that `ClaudeAgentOptions(setting_sources=[])`
+is treated by the SDK as "no sources" (not "use default"), per Phase 2 Assumptions.
 
 ---
 

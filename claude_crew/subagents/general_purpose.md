@@ -5,6 +5,7 @@ tools: [Read, Grep, Glob, Edit, Write, WebFetch, WebSearch]
 effort: medium
 maxTurns: 20
 background: false
+settingSources: []
 ---
 
 # Role
