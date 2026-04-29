@@ -205,6 +205,8 @@ class SdkTeammate(Teammate):
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
         agents: "dict[str, Any] | None" = None,
+        cwd: str | None = None,
+        permission_mode: str | None = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -219,6 +221,8 @@ class SdkTeammate(Teammate):
         # empty (this teammate cannot delegate). `agents={...}` → custom pack
         # (Feature #3b's seam ride-along).
         self._agents = load_default_pack() if agents is None else agents
+        self._cwd = cwd
+        self._permission_mode = permission_mode
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
@@ -717,6 +721,30 @@ class SdkTeammate(Teammate):
                 )
             ],
         }
+
+        # Extract role-level fields from the agents pack.
+        role_def = self._agents.get(self.role)
+
+        # permissionMode: spawn-time arg wins; falls back to role-pack; None → SDK default.
+        effective_pm = self._permission_mode
+        if effective_pm is None and role_def is not None:
+            effective_pm = getattr(role_def, "permissionMode", None)
+        if effective_pm is not None:
+            opts_kwargs["permission_mode"] = effective_pm
+
+        # skills and disallowedTools: role-pack only (spawn-time override deferred).
+        if role_def is not None:
+            role_skills = getattr(role_def, "skills", None)
+            role_disallowed = getattr(role_def, "disallowedTools", None)
+            if role_skills is not None:
+                opts_kwargs["skills"] = role_skills
+            if role_disallowed is not None:
+                opts_kwargs["disallowed_tools"] = role_disallowed
+
+        # cwd: spawn-time only.
+        if self._cwd is not None:
+            opts_kwargs["cwd"] = self._cwd
+
         options = ClaudeAgentOptions(**opts_kwargs)
         try:
             async with ClaudeSDKClient(options=options) as client:

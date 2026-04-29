@@ -1753,3 +1753,270 @@ class TestCollectResponseTextT2:
         msgs = broker.get_messages(recipient=LEAD_ID)
         assert msgs[0].payload.get("error") == "invalid_response"
         assert "builder exploded" in msgs[0].payload.get("message", "")
+
+
+# ---------- Feature #10: role-field extraction ----------
+
+
+class TestRoleFieldExtraction:
+    """BDD scenarios for Feature #10 Task 2: cwd/permission_mode params + role-pack field extraction."""
+
+    async def test_permission_mode_from_role_pack(self, broker, monkeypatch) -> None:
+        """Test: Agent defined with permissionMode in pack → ClaudeAgentOptions gets permission_mode."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            permissionMode="bypassPermissions",
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def}
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.permission_mode == "bypassPermissions"
+
+    async def test_spawn_time_permission_mode_overrides_role_pack(
+        self, broker, monkeypatch,
+    ) -> None:
+        """Test: Spawn-time permission_mode wins over role-pack permissionMode."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            permissionMode="default",
+        )
+
+        def factory(id, name, role, **_kwargs):
+            # Spawn-time permission_mode wins over role-pack permissionMode.
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def},
+                permission_mode="plan",  # This should override role-pack's "default"
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.permission_mode == "plan"
+
+    async def test_spawn_time_none_falls_back_to_role_pack(
+        self, broker, monkeypatch,
+    ) -> None:
+        """Test: Spawn-time permission_mode=None falls back to role-pack permissionMode."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            permissionMode="bypassPermissions",
+        )
+
+        def factory(id, name, role, **_kwargs):
+            # permission_mode=None (the default), so falls back to role-pack permissionMode.
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def},
+                permission_mode=None,
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.permission_mode == "bypassPermissions"
+
+    async def test_skills_from_role_pack(self, broker, monkeypatch) -> None:
+        """Test: Agent with skills in pack → ClaudeAgentOptions gets skills."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            skills=["sdd-workflow"],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def}
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.skills == ["sdd-workflow"]
+
+    async def test_disallowed_tools_from_role_pack(self, broker, monkeypatch) -> None:
+        """Test: Agent with disallowedTools in pack → ClaudeAgentOptions gets disallowed_tools."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            disallowedTools=["Bash", "WebFetch"],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def}
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.disallowed_tools == ["Bash", "WebFetch"]
+
+    async def test_cwd_reaches_options(self, broker, monkeypatch) -> None:
+        """Test: SdkTeammate(cwd=...) passes cwd to ClaudeAgentOptions."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                cwd="/tmp/test-proj",
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        # cwd can be str or Path, so convert to str for comparison.
+        assert str(opts.cwd) == "/tmp/test-proj"
+
+    async def test_unknown_role_does_not_fail(self, broker, monkeypatch) -> None:
+        """Test: Unknown role doesn't crash; no fields extracted."""
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={},  # empty pack
+            )
+
+        tid = await broker.spawn_teammate(
+            role="nonexistent", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        # No role-level fields set, SDK defaults apply.
+        assert opts.permission_mode is None
+        assert opts.skills is None
+        # disallowed_tools defaults to empty list in SDK.
+        assert opts.disallowed_tools == [] or opts.disallowed_tools is None
+
+    async def test_role_fields_none_not_applied(self, broker, monkeypatch) -> None:
+        """Test: Role fields that are None in the AgentDefinition are not applied."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test builder",
+            prompt="be a builder",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+            # Explicitly no permissionMode, skills, disallowedTools set
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role,
+                agents={"builder": agent_def}
+            )
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        # Fields should not be explicitly set, SDK defaults apply.
+        assert opts.permission_mode is None
+        assert opts.skills is None
+        assert opts.disallowed_tools == [] or opts.disallowed_tools is None
