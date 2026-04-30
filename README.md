@@ -38,6 +38,22 @@ This registers the MCP server globally. Claude Code will start it automatically 
 
 In any Claude Code session, ask: *"List my crew."* You should get back an empty crew list with no errors. If you get a tool-not-found error, check `claude mcp list` and confirm `claude-crew` appears.
 
+### 5. Open the dashboard
+
+When claude-crew starts it also binds an HTTP server on port 7821. Open **http://127.0.0.1:7821** in a browser to see the Mission Control dashboard — live agent status, message stream, and topology graph, updated every 1.5 seconds via WebSocket.
+
+To use a different port, set `CLAUDE_CREW_UI_PORT` before starting Claude Code:
+
+```bash
+CLAUDE_CREW_UI_PORT=8080 claude
+```
+
+To disable the dashboard entirely (e.g. in sandboxed or CI environments):
+
+```bash
+CLAUDE_CREW_UI_PORT=0 claude
+```
+
 ---
 
 ## Basic Usage
@@ -97,6 +113,16 @@ get_transcript_path()
 ```
 
 Returns the JSONL file path. Run `tail -f <path>` in a terminal for live observability of all bus traffic, tool calls, and subagent spawns.
+
+### Mission Control dashboard
+
+Open **http://127.0.0.1:7821** while claude-crew is running. The dashboard shows:
+
+- All alive teammates with role, status (idle / thinking / tool-use), and uptime
+- Mini topology graph with animated pulses for active agents
+- Live message stream (last 200 envelopes, auto-scrolling)
+
+Status and message data refresh every 1.5 seconds via WebSocket. A connection dot in the top bar turns amber if the WebSocket drops and reconnects automatically after 3 seconds.
 
 ---
 
@@ -180,6 +206,13 @@ Broker — message bus, teammate registry, dedup, JSONL transcript
     │       └── Subagents — Task tool, spawned by teammate as needed
     ├── Teammate (SDK)
     └── ...
+
+Mission Control (HTTP/WS on :7821)
+    ├── GET /             → dashboard.html
+    ├── GET /api/state    → JSON snapshot of broker state
+    └── WS  /ws           → push state every 1.5s
 ```
+
+Both the MCP stdio server and the HTTP server run in the same asyncio event loop — no threads, no shared-state issues. They share the same `Broker` instance.
 
 See `doc/PRODUCT-VISION.md` for the full vision and feature pipeline.

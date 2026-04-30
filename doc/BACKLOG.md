@@ -6,6 +6,46 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-30] Feature: mission-control-ui (retro follow-ups)
+
+### `ui_server.py` has zero test coverage
+- **What**: The entire `ui_server.py` module — `_build_state()`, `_derive_status()`, `_normalize_model()`, the WebSocket handler, and the HTTP routes — has no tests. 387 existing tests all pass, but none touch the new code.
+- **Where**: `claude_crew/ui_server.py`; missing `tests/test_ui_server.py`
+- **Why it matters**: Any broker refactor that renames `_info`, `_log`, or `_teammates` silently breaks the UI with no failing test to catch it. The `_build_state()` logic (status derivation, model normalization, transcript capping) is untested.
+- **Suggested action**: Write `tests/test_ui_server.py` — unit tests for `_derive_status()` and `_normalize_model()`, integration tests for `_build_state()` using a real Broker + StubTeammate, and an HTTP smoke test for `GET /` and `GET /api/state` via Starlette's `TestClient`.
+
+### Broker should expose a `snapshot()` read API
+- **What**: `UIServer._build_state()` reads `broker._info`, `broker._log`, and `broker._teammates` directly — all private attributes. This is a fragile coupling: any broker refactor silently breaks `ui_server.py` and no test catches it.
+- **Where**: `claude_crew/broker.py` (missing `snapshot()` method); `claude_crew/ui_server.py:_build_state()`
+- **Why it matters**: The private attr access is the reason `ui_server.py` can't be unit-tested without a real Broker. A `broker.snapshot() → CrewSnapshot` dataclass would let `_build_state()` be tested with a stub and survive internal broker refactors.
+- **Suggested action**: Add `broker.snapshot()` returning a frozen dataclass with `crew_id`, `alive_teammates: list[TeammateSnapshot]`, and `log: list[Envelope]`. Update `_build_state()` to use it. S-size change.
+
+### Multi-crew aggregation — instance strip shows only one crew
+- **What**: The Mission Control UI design shows N CLI instances in the instance strip. The current implementation always shows exactly one (the local broker). Multiple independent claude-crew processes each have their own broker and no visibility into each other.
+- **Where**: `claude_crew/ui_server.py` (single-broker architecture); no crew registry exists
+- **Why it matters**: Doesn't meet the north-star criterion: "both crews' internal conversations stream into a live UI the developer can glance at without context-switching."
+- **Suggested action**: Design a crew registry (e.g., a file-based or socket-based discovery mechanism so running UIServers can find each other's brokers). Out of scope until multi-crew use is validated in practice.
+
+### Real token/cost tracking — all agents show $0.000
+- **What**: `_build_state()` hardcodes `cost: 0.0` and `tokens: {in: 0, out: 0}` for every agent. The SdkTeammate doesn't currently accumulate cumulative usage stats.
+- **Where**: `claude_crew/ui_server.py:_build_state()`; `claude_crew/sdk_teammate.py` (no usage accumulation)
+- **Why it matters**: The design shows per-agent cost ($0.612, $0.481, etc.) as a key operational metric. Showing $0.000 everywhere makes the cost column useless.
+- **Suggested action**: Route this alongside a usage-telemetry feature. The SDK's response stream likely returns usage stats per turn; accumulate them in `SdkTeammate._total_cost` / `_total_tokens` and surface via `status_snapshot()`.
+
+### Git branch shown as "main" (hardcoded)
+- **What**: The instance card and mini-graph metadata row always shows `branch: "main"`. The actual git branch isn't read.
+- **Where**: `claude_crew/ui_server.py:_build_state()` — `"branch": "main"` is hardcoded
+- **Why it matters**: Misleading when the crew is running on a feature branch. The design uses branch as a contextual identifier for the active work.
+- **Suggested action**: At `UIServer.__init__` time, run `git -C <cwd> branch --show-current` via `subprocess.run` (non-blocking, one-time at startup). Cache the result. Fall back to "main" if git is unavailable or cwd isn't a repo.
+
+### Message kind is always "msg" — tool calls and thinking not typed
+- **What**: Every envelope in `broker._log` becomes `kind: "msg"` in the transcript. The design's stream columns show three kinds: `msg` (plain text), `tool` (monospace pill with violet ▸), and `thinking` (italic). The difference is visually significant.
+- **Where**: `claude_crew/ui_server.py:_build_state()` — `"kind": "msg"` hardcoded
+- **Why it matters**: Tool call envelopes and thinking entries look identical to plain messages in the UI. Operators lose the visual signal that distinguishes a model thinking from it calling a tool.
+- **Suggested action**: Inspect payload shape: `if isinstance(payload, dict) and payload.get("tool_name")` → `kind: "tool"`; add a `thinking` envelope type in the broker if needed. M-size change requiring broker + ui_server coordination.
+
+---
+
 ## [2026-04-29] Observation: recursive crew spawning is one config change away
 
 - **What**: Teammates currently cannot call `spawn_teammate` because the claude-crew MCP server is project-level only. If the MCP server were registered in `~/.claude.json` (user-level), teammates could spawn their own crew members — the broker already handles this correctly regardless of caller.

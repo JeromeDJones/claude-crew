@@ -253,5 +253,41 @@ def make_server(
 
 def main() -> None:
     """Console entrypoint: run the MCP server over stdio."""
-    server = make_server()
-    server.run()
+    import os
+
+    import anyio
+
+    ui_port_str = os.environ.get("CLAUDE_CREW_UI_PORT", "7821")
+    try:
+        ui_port = int(ui_port_str)
+    except ValueError:
+        sys.stderr.write(
+            f"[claude-crew] CLAUDE_CREW_UI_PORT={ui_port_str!r} is not a valid integer"
+            " — UI disabled\n"
+        )
+        ui_port = 0
+
+    broker = Broker()
+    server = make_server(broker=broker)
+
+    if ui_port <= 0:
+        server.run()
+        return
+
+    from claude_crew.ui_server import UIServer
+
+    ui = UIServer(broker, port=ui_port)
+    sys.stderr.write(f"[claude-crew] ui -> http://127.0.0.1:{ui_port}\n")
+
+    async def _run() -> None:
+        async def _ui_safe() -> None:
+            try:
+                await ui.serve()
+            except Exception:
+                sys.stderr.write("[claude-crew] ui server stopped unexpectedly (MCP still running)\n")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.run_stdio_async)
+            tg.start_soon(_ui_safe)
+
+    anyio.run(_run)

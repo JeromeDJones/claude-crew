@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-04-29
-**Features Implemented**: 11 (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context)
+**Last Updated**: 2026-04-30
+**Features Implemented**: 12 (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui)
 
 ---
 
@@ -57,7 +57,7 @@ After adopting claude-crew, a developer can:
 | 1 | A lead can spawn N persistent role-specialized teammates and exchange messages with them across a session, each teammate holding context across all exchanges | Scripted session with 3 teammates, 10+ exchanges each, teammates correctly reference earlier exchanges | Not started |
 | 2 | A teammate can recursively spawn its own subagents for focused work | Planner teammate spawns explorer + researcher subagents during a real planning task | Not started |
 | 3 | A developer can run two independent crews concurrently on one machine without interference | Two crews on different repos, both completing tasks, no message bleed between them | Not started |
-| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | Not started |
+| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | **Partially met (2026-04-30)** — Mission Control UI (#12) ships a real-time browser dashboard at `http://127.0.0.1:7821`. Alive teammates, status dots, topology graph, and message streams all live-update via WebSocket. Single-crew only in v1; multi-crew aggregation and real token/cost tracking are backlog items. |
 | 5 | The system runs reliably enough to use on real work — completes a non-trivial task end-to-end without operator intervention beyond directing the lead | Successful real-task runs at home and at work, instrumented with a "needed manual rescue?" flag | **Met (home, 2026-04-26)** — MMM-35 backend slice shipped via SDD with claude-crew teammates, all 8 tripwires clean, ~$15-20 spend. Substrate findings captured for next-pass improvements. |
 
 **Guidance for writing criteria:**

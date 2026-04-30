@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>claude-crew · Mission Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-0: oklch(0.98 0.003 250);
+      --bg-1: oklch(0.95 0.004 250);
+      --bg-2: oklch(0.92 0.005 250);
+      --bg-3: oklch(0.88 0.006 250);
+      --bg-4: oklch(0.82 0.007 250);
+      --line: oklch(0.85 0.007 250);
+      --line-soft: oklch(0.90 0.005 250);
+      --fg-0: oklch(0.14 0.008 250);
+      --fg-1: oklch(0.32 0.010 250);
+      --fg-2: oklch(0.50 0.012 250);
+      --fg-3: oklch(0.65 0.010 250);
+      --accent: oklch(0.50 0.14 220);
+      --accent-soft: oklch(0.50 0.14 220 / 0.10);
+      --accent-line: oklch(0.50 0.14 220 / 0.30);
+
+      --st-idle:     oklch(0.60 0.010 250);
+      --st-thinking: oklch(0.70 0.12 75);
+      --st-tool:     oklch(0.62 0.13 290);
+      --st-waiting:  oklch(0.64 0.12 220);
+      --st-done:     oklch(0.64 0.12 150);
+      --st-error:    oklch(0.60 0.15 25);
+
+      --font-sans: 'Inter', system-ui, sans-serif;
+      --font-mono: 'Geist Mono', 'Fira Code', monospace;
+    }
+
+    html, body, #root {
+      height: 100%;
+      background: var(--bg-0);
+      color: var(--fg-0);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #root { display: flex; flex-direction: column; overflow: hidden; }
+
+    .mono { font-family: var(--font-mono); }
+
+    .chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      height: 20px; padding: 0 7px; border-radius: 10px;
+      background: var(--bg-2); border: 1px solid var(--line);
+      font-size: 10.5px; color: var(--fg-2);
+    }
+
+    .dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.idle     { background: var(--st-idle); }
+    .dot.thinking { background: var(--st-thinking); animation: pulse 1.6s ease-in-out infinite; }
+    .dot.tool-use { background: var(--st-tool);     animation: pulse 1.6s ease-in-out infinite; }
+    .dot.waiting  { background: var(--st-waiting); }
+    .dot.active   { background: var(--st-done); }
+    .dot.done     { background: var(--st-done); }
+    .dot.error    { background: var(--st-error); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // --- WebSocket live state hook ---
+    function useLiveState() {
+      const [state, setState] = useState(null);
+      const [connected, setConnected] = useState(false);
+      useEffect(() => {
+        let ws, timer;
+        const connect = () => {
+          ws = new WebSocket(`ws://${window.location.host}/ws`);
+          ws.onopen = () => setConnected(true);
+          ws.onmessage = e => {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'state') setState(msg.data);
+          };
+          ws.onclose = () => { setConnected(false); timer = setTimeout(connect, 3000); };
+          ws.onerror = () => ws.close();
+        };
+        connect();
+        return () => { clearTimeout(timer); if (ws) ws.close(); };
+      }, []);
+      return { state, connected };
+    }
+
+    // --- Format helpers ---
+    function fmtDuration(s) {
+      if (s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.floor(s / 60)}m`;
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return m ? `${h}h ${m}m` : `${h}h`;
+    }
+    function fmtAgo(iso) {
+      const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+      if (s < 5) return "just now";
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+      return `${Math.floor(s / 3600)}h ago`;
+    }
+    function fmtCost(n) { return `$${n.toFixed(3)}`; }
+    function fmtTokens(n) {
+      if (n < 1000) return String(n);
+      if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+      return `${(n / 1_000_000).toFixed(2)}M`;
+    }
+    function fmtTime(iso) {
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    }
+
+    // --- StatusDot ---
+    function StatusDot({ status, size = 6 }) {
+      return <span className={`dot ${status}`} style={{ width: size, height: size }}/>;
+    }
+
+    // --- ModelBadge ---
+    function ModelBadge({ model }) {
+      const map = {
+        "opus":   { hue: 290, label: "opus" },
+        "sonnet": { hue: 220, label: "sonnet" },
+        "haiku":  { hue: 150, label: "haiku" },
+      };
+      const m = map[model] || { hue: 250, label: model };
+      const fg = `oklch(0.42 0.10 ${m.hue})`;
+      const bg = `oklch(0.42 0.10 ${m.hue} / 0.10)`;
+      const bd = `oklch(0.42 0.10 ${m.hue} / 0.30)`;
+      return (
+        <span className="mono" style={{
+          display: "inline-flex", alignItems: "center", height: 18,
+          padding: "0 6px", borderRadius: 4, fontSize: 10.5,
+          color: fg, background: bg, border: `1px solid ${bd}`,
+          letterSpacing: "0.02em", textTransform: "lowercase",
+        }}>{m.label}</span>
+      );
+    }
+
+    // --- AgentAvatar ---
+    function AgentAvatar({ id, role, size = 22 }) {
+      const hue = (() => {
+        let h = 0;
+        for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+        return h;
+      })();
+      const initial = role.slice(0, 1).toUpperCase();
+      return (
+        <span className="mono" style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          width: size, height: size, borderRadius: 4,
+          background: `oklch(0.75 0.05 ${hue} / 0.5)`,
+          border: `1px solid oklch(0.60 0.07 ${hue} / 0.4)`,
+          color: `oklch(0.25 0.06 ${hue})`,
+          fontSize: Math.round(size * 0.5), fontWeight: 600, flexShrink: 0,
+        }}>{initial}</span>
+      );
+    }
+
+    // --- Icon ---
+    const Icon = {
+      folder: (props) => (
+        <svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" {...props}>
+          <path d="M2 4.5a1 1 0 0 1 1-1h2.5l1 1H11a1 1 0 0 1 1 1V11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>
+        </svg>
+      ),
+    };
+
+    // --- Metric ---
+    function Metric({ label, value }) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
+          <span className="mono" style={{ fontSize: 14, fontWeight: 600 }}>{value}</span>
+          <span style={{ fontSize: 10, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+        </div>
+      );
+    }
+
+    // --- StatusPill ---
+    function StatusPill({ status, count }) {
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--fg-1)" }}>
+          <span className={`dot ${status}`}/>
+          <span className="mono" style={{ fontWeight: 600 }}>{count}</span>
+          <span style={{ color: "var(--fg-3)" }}>{status === "tool-use" ? "tool" : status}</span>
+        </div>
+      );
+    }
+
+    // --- MCTopBar ---
+    function MCTopBar({ instances, connected }) {
+      const totals = instances.reduce((acc, i) => {
+        acc.agents += i.agents.length;
+        acc.cost += i.cost;
+        acc.in += i.tokens.in;
+        acc.out += i.tokens.out;
+        acc.byStatus.thinking += i.agents.filter(a => a.status === "thinking").length;
+        acc.byStatus.tool += i.agents.filter(a => a.status === "tool-use").length;
+        acc.byStatus.idle += i.agents.filter(a => a.status === "idle").length;
+        acc.byStatus.waiting += i.agents.filter(a => a.status === "waiting").length;
+        return acc;
+      }, { agents: 0, cost: 0, in: 0, out: 0, byStatus: { thinking: 0, tool: 0, idle: 0, waiting: 0 } });
+
+      const connDot = {
+        width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+        background: connected ? "var(--st-done)" : "var(--st-thinking)",
+        display: "inline-block",
+        title: connected ? "Connected" : "Reconnecting…",
+      };
+
+      return (
+        <div style={{
+          height: 56, padding: "0 22px",
+          display: "flex", alignItems: "center", gap: 18,
+          borderBottom: "1px solid var(--line)",
+          background: "var(--bg-0)",
+          flexShrink: 0,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <svg width="14" height="14" viewBox="0 0 14 14">
+              <circle cx="7" cy="7" r="2" fill="oklch(0.50 0.14 220)"/>
+              <circle cx="7" cy="7" r="5" fill="none" stroke="oklch(0.50 0.14 220 / 0.4)"/>
+            </svg>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>claude-crew</span>
+            <span className="chip">mission control</span>
+            <span
+              style={connDot}
+              title={connected ? "Connected" : "Reconnecting…"}
+            />
+          </div>
+
+          <div style={{ marginLeft: "auto", display: "flex", gap: 22, alignItems: "center" }}>
+            <Metric label="instances" value={instances.length}/>
+            <Metric label="agents" value={totals.agents}/>
+            <Metric label="cost" value={`$${totals.cost.toFixed(2)}`}/>
+            <Metric label="tokens" value={fmtTokens(totals.in + totals.out)}/>
+            <div style={{ width: 1, height: 24, background: "var(--line)" }}/>
+            <StatusPill status="thinking" count={totals.byStatus.thinking}/>
+            <StatusPill status="tool-use" count={totals.byStatus.tool}/>
+            <StatusPill status="waiting" count={totals.byStatus.waiting}/>
+            <StatusPill status="idle" count={totals.byStatus.idle}/>
+          </div>
+        </div>
+      );
+    }
+
+    // --- InstanceStrip ---
+    function InstanceStrip({ instances, activeId, onSelect }) {
+      return (
+        <div style={{
+          display: "flex", gap: 10, padding: "12px 22px",
+          borderBottom: "1px solid var(--line)", background: "var(--bg-0)",
+          overflowX: "auto", flexShrink: 0,
+        }}>
+          {instances.map(cli => {
+            const active = cli.id === activeId;
+            const statuses = cli.agents.map(a => a.status);
+            return (
+              <div key={cli.id} onClick={() => onSelect(cli.id)} style={{
+                flex: "1 0 280px", minWidth: 280,
+                padding: "12px 14px", cursor: "pointer",
+                borderRadius: 6,
+                background: active ? "var(--bg-2)" : "var(--bg-1)",
+                border: `1px solid ${active ? "var(--accent-line)" : "var(--line)"}`,
+                position: "relative",
+              }}>
+                {active && <div style={{ position: "absolute", left: -1, top: 8, bottom: 8, width: 2, background: "var(--accent)", borderRadius: 999 }}/>}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <StatusDot status="active"/>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{cli.label}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", marginLeft: "auto" }}>{cli.id}</span>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--fg-2)", marginTop: 3, display: "flex", alignItems: "center", gap: 6 }} className="mono">
+                  <Icon.folder/>{cli.cwd}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 9 }}>
+                  {statuses.map((s, i) => <span key={i} className={`dot ${s}`}/>)}
+                  <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-2)" }}>
+                    <span className="mono" style={{ color: "var(--fg-0)" }}>{cli.agents.length}</span>
+                    {" "}agents · <span className="mono" style={{ color: "var(--fg-0)" }}>{fmtCost(cli.cost)}</span>
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // --- MiniGraph ---
+    function MiniGraph({ cli, agents }) {
+      const W = 290, H = 320;
+      const center = { x: W / 2, y: H / 2 - 10 };
+      const r = 95;
+      const positions = agents.map((a, i) => {
+        const t = (i / agents.length) * Math.PI * 2 - Math.PI / 2;
+        return { ...a, x: center.x + Math.cos(t) * r, y: center.y + Math.sin(t) * r };
+      });
+
+      return (
+        <div style={{ borderRight: "1px solid var(--line)", padding: "16px 18px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-2)", marginBottom: 4 }}>
+            Topology
+          </div>
+          <div style={{ fontSize: 12, color: "var(--fg-2)", marginBottom: 8 }}>{cli.label}</div>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 320 }}>
+            <defs>
+              <radialGradient id="mcCenter" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stopColor="oklch(0.50 0.14 220 / 0.20)"/>
+                <stop offset="100%" stopColor="oklch(0.50 0.14 220 / 0)"/>
+              </radialGradient>
+            </defs>
+            {positions.map(p => (
+              <line key={`e-${p.id}`} x1={center.x} y1={center.y} x2={p.x} y2={p.y}
+                stroke="oklch(0.75 0.01 250)" strokeWidth="1"/>
+            ))}
+            <circle cx={center.x} cy={center.y} r="40" fill="url(#mcCenter)"/>
+            <circle cx={center.x} cy={center.y} r="22" fill="var(--bg-2)" stroke="var(--accent-line)"/>
+            <text x={center.x} y={center.y + 4} textAnchor="middle" fontSize="10" fontFamily="var(--font-mono)" fill="var(--fg-0)">lead</text>
+            {positions.map(p => (
+              <g key={p.id} transform={`translate(${p.x} ${p.y})`}>
+                <circle r="14" fill="var(--bg-2)" stroke="var(--line)"/>
+                <circle r="4" fill={
+                  p.status === "thinking" ? "var(--st-thinking)" :
+                  p.status === "tool-use" ? "var(--st-tool)" :
+                  p.status === "waiting"  ? "var(--st-waiting)" :
+                  "var(--st-idle)"
+                }>
+                  {(p.status === "thinking" || p.status === "tool-use") &&
+                    <animate attributeName="opacity" values="1;0.4;1" dur="1.6s" repeatCount="indefinite"/>
+                  }
+                </circle>
+                <text y="26" textAnchor="middle" fontSize="9" fontFamily="var(--font-mono)" fill="var(--fg-2)">{p.id.slice(0, 8)}</text>
+              </g>
+            ))}
+            {positions.filter(p => p.status === "thinking" || p.status === "tool-use").map((p, i) => (
+              <circle key={`pulse-${p.id}`} r="2" fill="var(--accent)">
+                <animateMotion dur={`${2.4 + i * 0.3}s`} repeatCount="indefinite"
+                  path={`M ${p.x} ${p.y} L ${center.x} ${center.y}`}/>
+                <animate attributeName="opacity" values="0;1;0" dur={`${2.4 + i * 0.3}s`} repeatCount="indefinite"/>
+              </circle>
+            ))}
+          </svg>
+
+          <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--fg-2)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>cwd</span><span className="mono" style={{ color: "var(--fg-0)" }}>{cli.cwd}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>branch</span><span className="mono" style={{ color: "var(--accent)" }}>{cli.branch}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>uptime</span><span className="mono" style={{ color: "var(--fg-0)" }}>{fmtDuration(cli.uptime)}</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- MiniMessage ---
+    function MiniMessage({ msg, agentMap }) {
+      const isTool = msg.kind === "tool";
+      const isThinking = msg.kind === "thinking";
+      const recipient = msg.to && !msg.to.startsWith("broker:") ? agentMap[msg.to] : null;
+      return (
+        <div style={{ padding: "7px 0", borderBottom: "1px solid var(--line-soft)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--fg-3)", marginBottom: 3 }}>
+            <span>→</span>
+            {recipient
+              ? <span style={{ color: "var(--fg-1)" }}>{recipient.role}</span>
+              : <span className="mono">{msg.to === "lead" ? "lead" : "broker"}</span>
+            }
+            <span className="mono" style={{ marginLeft: "auto" }}>{fmtTime(msg.t)}</span>
+          </div>
+          {isTool ? (
+            <div style={{
+              fontFamily: "var(--font-mono)", fontSize: 11.5,
+              background: "var(--bg-2)", border: "1px solid var(--line)",
+              borderRadius: 4, padding: "5px 7px",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span style={{ color: "var(--st-tool)" }}>▸</span>
+              <span style={{ color: "var(--fg-0)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{msg.body}</span>
+            </div>
+          ) : isThinking ? (
+            <div style={{ fontSize: 11.5, color: "var(--fg-2)", fontStyle: "italic" }}>{msg.body}</div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--fg-0)", textWrap: "pretty", wordBreak: "break-word" }}>{msg.body}</div>
+          )}
+        </div>
+      );
+    }
+
+    // --- AgentStreamColumn ---
+    function AgentStreamColumn({ agent, msgs, agentMap }) {
+      const scrollRef = useRef(null);
+      const isPinnedRef = useRef(true);
+
+      const handleScroll = () => {
+        const el = scrollRef.current;
+        if (el) {
+          isPinnedRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+        }
+      };
+
+      useEffect(() => {
+        const el = scrollRef.current;
+        if (el && isPinnedRef.current) el.scrollTop = el.scrollHeight;
+      }, [msgs.length]);
+
+      return (
+        <div style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
+          <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)", flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <AgentAvatar id={agent.id} role={agent.role} size={22}/>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{agent.role}</div>
+                <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{agent.id}</div>
+              </div>
+              <StatusDot status={agent.status}/>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+              <ModelBadge model={agent.model}/>
+              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)", marginLeft: "auto" }}>{fmtCost(agent.cost)}</span>
+            </div>
+          </div>
+
+          <div style={{
+            padding: "6px 14px", fontSize: 10.5, color: "var(--fg-2)",
+            display: "flex", alignItems: "center", gap: 6,
+            borderBottom: "1px solid var(--line-soft)", background: "var(--bg-0)",
+            flexShrink: 0,
+          }}>
+            <span className={`dot ${agent.status}`}/>
+            <span style={{ textTransform: "lowercase" }}>{agent.status}</span>
+            {agent.current_tool && (
+              <span className="mono" style={{ fontSize: 10, color: "var(--st-tool)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {agent.current_tool}
+              </span>
+            )}
+            <span style={{ marginLeft: "auto", flexShrink: 0 }}>{fmtAgo(agent.lastMsg)}</span>
+          </div>
+
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            style={{ flex: 1, overflowY: "auto", padding: "8px 14px 14px" }}
+          >
+            {msgs.length === 0 ? (
+              <div style={{ color: "var(--fg-3)", fontSize: 11, padding: "12px 0", textAlign: "center" }}>
+                No outbound messages.
+              </div>
+            ) : msgs.map((m, i) => (
+              <MiniMessage key={i} msg={m} agentMap={agentMap}/>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- StreamColumns ---
+    function StreamColumns({ cli, agents, msgs, agentMap }) {
+      const byAgent = useMemo(() => {
+        const out = {};
+        agents.forEach(a => { out[a.id] = []; });
+        msgs.forEach(m => { if (out[m.from]) out[m.from].push(m); });
+        return out;
+      }, [agents, msgs]);
+
+      if (agents.length === 0) {
+        return (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "var(--fg-3)", fontSize: 13, fontFamily: "var(--font-mono)",
+          }}>
+            No teammates spawned yet.
+          </div>
+        );
+      }
+
+      return (
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${agents.length}, minmax(220px, 1fr))`,
+          minWidth: 0, overflow: "hidden",
+        }}>
+          {agents.map(a => (
+            <AgentStreamColumn key={a.id} agent={a} msgs={byAgent[a.id] || []} agentMap={agentMap}/>
+          ))}
+        </div>
+      );
+    }
+
+    // --- MissionControlLayout ---
+    function MissionControlLayout({ data, connected }) {
+      const { instances, transcripts } = data;
+      const [activeId, setActiveId] = useState(instances[0].id);
+
+      const cli = instances.find(i => i.id === activeId) || instances[0];
+      const agentMap = useMemo(
+        () => Object.fromEntries(cli.agents.map(a => [a.id, a])),
+        [cli],
+      );
+      const msgs = transcripts[cli.id] || [];
+
+      return (
+        <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-0)", overflow: "hidden" }}>
+          <MCTopBar instances={instances} connected={connected}/>
+          <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId}/>
+          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: 0 }}>
+            <MiniGraph cli={cli} agents={cli.agents}/>
+            <StreamColumns cli={cli} agents={cli.agents} msgs={msgs} agentMap={agentMap}/>
+          </div>
+        </div>
+      );
+    }
+
+    // --- App ---
+    function App() {
+      const { state, connected } = useLiveState();
+      if (!state) {
+        return (
+          <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-0)", color: "var(--fg-3)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
+            Connecting to claude-crew…
+          </div>
+        );
+      }
+      return <MissionControlLayout data={state} connected={connected}/>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>
