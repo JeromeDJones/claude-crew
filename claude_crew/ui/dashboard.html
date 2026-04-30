@@ -63,13 +63,14 @@
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .dot.idle     { background: var(--st-idle); }
-    .dot.thinking { background: var(--st-thinking); animation: pulse 1.6s ease-in-out infinite; }
-    .dot.tool-use { background: var(--st-tool);     animation: pulse 1.6s ease-in-out infinite; }
-    .dot.waiting  { background: var(--st-waiting); }
-    .dot.active   { background: var(--st-done); }
-    .dot.done     { background: var(--st-done); }
-    .dot.error    { background: var(--st-error); }
+    .dot.idle        { background: var(--st-idle); }
+    .dot.thinking    { background: var(--st-thinking); animation: pulse 1.6s ease-in-out infinite; }
+    .dot.tool-use    { background: var(--st-tool);     animation: pulse 1.6s ease-in-out infinite; }
+    .dot.waiting     { background: var(--st-waiting); }
+    .dot.active      { background: var(--st-done); }
+    .dot.done        { background: var(--st-done); }
+    .dot.error       { background: var(--st-error); }
+    .dot.unreachable { background: var(--st-error); opacity: 0.5; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -280,30 +281,48 @@
         }}>
           {instances.map(cli => {
             const active = cli.id === activeId;
+            const unreachable = cli.status === "unreachable";
             const statuses = cli.agents.map(a => a.status);
+            const borderColor = unreachable ? "oklch(0.60 0.15 25 / 0.30)" : active ? "var(--accent-line)" : "var(--line)";
             return (
               <div key={cli.id} onClick={() => onSelect(cli.id)} style={{
                 flex: "1 0 280px", minWidth: 280,
                 padding: "12px 14px", cursor: "pointer",
                 borderRadius: 6,
                 background: active ? "var(--bg-2)" : "var(--bg-1)",
-                border: `1px solid ${active ? "var(--accent-line)" : "var(--line)"}`,
+                border: `1px solid ${borderColor}`,
+                opacity: unreachable ? 0.6 : 1,
                 position: "relative",
               }}>
-                {active && <div style={{ position: "absolute", left: -1, top: 8, bottom: 8, width: 2, background: "var(--accent)", borderRadius: 999 }}/>}
+                {active && !unreachable && <div style={{ position: "absolute", left: -1, top: 8, bottom: 8, width: 2, background: "var(--accent)", borderRadius: 999 }}/>}
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <StatusDot status="active"/>
+                  <StatusDot status={unreachable ? "unreachable" : "active"}/>
                   <span style={{ fontSize: 13, fontWeight: 600 }}>{cli.label}</span>
+                  {cli.is_local && (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", height: 16, padding: "0 6px",
+                      borderRadius: 3, fontSize: 9.5, fontWeight: 600, letterSpacing: "0.05em",
+                      textTransform: "uppercase", color: "var(--accent)",
+                      background: "var(--accent-soft)", border: "1px solid var(--accent-line)",
+                    }}>local</span>
+                  )}
                   <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", marginLeft: "auto" }}>{cli.id}</span>
                 </div>
                 <div style={{ fontSize: 11, color: "var(--fg-2)", marginTop: 3, display: "flex", alignItems: "center", gap: 6 }} className="mono">
-                  <Icon.folder/>{cli.cwd}
+                  {unreachable ? (
+                    <span style={{ color: "var(--st-error)", opacity: 0.8 }}>unreachable</span>
+                  ) : (
+                    <><Icon.folder/>{cli.cwd}</>
+                  )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 9 }}>
-                  {statuses.map((s, i) => <span key={i} className={`dot ${s}`}/>)}
+                  {unreachable
+                    ? <span style={{ fontSize: 11, color: "var(--fg-3)" }}>—</span>
+                    : statuses.map((s, i) => <span key={i} className={`dot ${s}`}/>)
+                  }
                   <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-2)" }}>
-                    <span className="mono" style={{ color: "var(--fg-0)" }}>{cli.agents.length}</span>
-                    {" "}agents · <span className="mono" style={{ color: "var(--fg-0)" }}>{fmtCost(cli.cost)}</span>
+                    <span className="mono" style={{ color: unreachable ? "var(--fg-3)" : "var(--fg-0)" }}>{cli.agents.length}</span>
+                    {" "}agents · <span className="mono" style={{ color: unreachable ? "var(--fg-3)" : "var(--fg-0)" }}>{fmtCost(cli.cost)}</span>
                   </span>
                 </div>
               </div>
@@ -492,6 +511,19 @@
         msgs.forEach(m => { if (out[m.from]) out[m.from].push(m); });
         return out;
       }, [agents, msgs]);
+
+      if (cli.status === "unreachable") {
+        return (
+          <div style={{
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6,
+            color: "var(--fg-3)", fontSize: 13, fontFamily: "var(--font-mono)",
+          }}>
+            <span style={{ color: "var(--st-error)", fontSize: 12 }}>⚠</span>
+            <span>Instance unreachable</span>
+            <span style={{ fontSize: 11, color: "var(--fg-3)" }}>{cli.id}</span>
+          </div>
+        );
+      }
 
       if (agents.length === 0) {
         return (

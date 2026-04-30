@@ -69,47 +69,53 @@ class TestTs:
 # ── _build_state ─────────────────────────────────────────────────────────────
 
 class TestBuildStateEmptyCrew:
-    def test_single_instance_in_result(self):
+    async def test_single_instance_in_result(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert len(state["instances"]) == 1
 
-    def test_instance_id_is_crew_id(self):
+    async def test_instance_id_is_crew_id(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["instances"][0]["id"] == broker.crew_id
 
-    def test_agents_empty_when_no_teammates(self):
+    async def test_agents_empty_when_no_teammates(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["instances"][0]["agents"] == []
 
-    def test_status_idle_when_no_agents(self):
+    async def test_status_idle_when_no_agents(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["instances"][0]["status"] == "idle"
 
-    def test_uptime_zero_when_no_teammates(self):
+    async def test_uptime_zero_when_no_teammates(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["instances"][0]["uptime"] == 0
 
-    def test_transcripts_keyed_by_crew_id(self):
+    async def test_transcripts_keyed_by_crew_id(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert broker.crew_id in state["transcripts"]
 
-    def test_transcript_empty_when_no_messages(self):
+    async def test_transcript_empty_when_no_messages(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["transcripts"][broker.crew_id] == []
+
+    async def test_local_instance_has_is_local_true(self):
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        state = await ui._build_state()
+        assert state["instances"][0]["is_local"] is True
 
 
 def _stub_factory(id: str, name: str, role: str, **_kwargs):
@@ -139,13 +145,13 @@ class TestBuildStateWithTeammates:
     async def test_agents_count_matches_alive_teammates(self, broker_with_teammates):
         broker = broker_with_teammates
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert len(state["instances"][0]["agents"]) == 2
 
     async def test_agent_has_required_fields(self, broker_with_teammates):
         broker = broker_with_teammates
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         agent = state["instances"][0]["agents"][0]
         for field in ("id", "role", "model", "status", "uptime", "lastMsg", "cost", "tokens", "tools", "current_tool"):
             assert field in agent, f"missing field: {field}"
@@ -153,7 +159,7 @@ class TestBuildStateWithTeammates:
     async def test_status_active_when_agents_present(self, broker_with_teammates):
         broker = broker_with_teammates
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         assert state["instances"][0]["status"] == "active"
 
     async def test_dead_teammate_excluded(self, broker_with_teammates):
@@ -163,14 +169,14 @@ class TestBuildStateWithTeammates:
         alive_ids = [info.id for info in broker._info.values() if info.alive]
         kill_id = alive_ids[0]
         await broker.kill_teammate(kill_id)
-        state = ui._build_state()
+        state = await ui._build_state()
         agent_ids = [a["id"] for a in state["instances"][0]["agents"]]
         assert kill_id not in agent_ids
 
     async def test_agent_roles_match(self, broker_with_teammates):
         broker = broker_with_teammates
         ui = UIServer(broker, port=0)
-        state = ui._build_state()
+        state = await ui._build_state()
         roles = {a["role"] for a in state["instances"][0]["agents"]}
         assert roles == {"builder", "reviewer"}
 
@@ -192,7 +198,7 @@ class TestBuildStateTranscript:
         )
         broker._log.append(err_env)
 
-        state = ui._build_state()
+        state = await ui._build_state()
         messages = state["transcripts"][broker.crew_id]
         bodies = [m["body"] for m in messages]
         assert not any("teammate_dead" in b for b in bodies)
@@ -212,7 +218,7 @@ class TestBuildStateTranscript:
         )
         broker._log.append(env)
 
-        state = ui._build_state()
+        state = await ui._build_state()
         messages = state["transcripts"][broker.crew_id]
         assert len(messages) == 1
         assert len(messages[0]["body"]) <= 500
@@ -231,7 +237,7 @@ class TestBuildStateTranscript:
             )
             broker._log.append(env)
 
-        state = ui._build_state()
+        state = await ui._build_state()
         messages = state["transcripts"][broker.crew_id]
         assert len(messages) <= 200
 

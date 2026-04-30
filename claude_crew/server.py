@@ -6,6 +6,7 @@ inject their own broker; production builds one fresh.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from typing import Any
@@ -271,6 +272,7 @@ def _pick_ui_port(preferred: int) -> int:
 def main() -> None:
     """Console entrypoint: run the MCP server over stdio."""
     import os
+    import signal
 
     import anyio
 
@@ -294,12 +296,20 @@ def main() -> None:
         server.run()
         return
 
+    from claude_crew.instance_registry import InstanceRegistry
     from claude_crew.ui_server import UIServer
 
-    ui = UIServer(broker, port=ui_port)
+    registry = InstanceRegistry(crew_id=broker.crew_id, port=ui_port)
+    ui = UIServer(broker, port=ui_port, registry=registry)
     sys.stderr.write(f"[claude-crew] ui -> http://127.0.0.1:{ui_port}\n")
 
     async def _run() -> None:
+        # Install SIGTERM handler inside the running event loop so it targets
+        # the correct loop (anyio creates its own; loop.add_signal_handler must
+        # be called from within it, not from main() before anyio.run()).
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, registry.deregister)
+
         async def _ui_safe() -> None:
             try:
                 await ui.serve()
