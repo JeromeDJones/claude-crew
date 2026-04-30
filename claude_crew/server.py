@@ -263,8 +263,14 @@ def _bind_ui_socket(preferred: int) -> "socket.socket | None":
 
     for port in [preferred, 0]:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
+            # listen() is the serialization point: with SO_REUSEADDR, two
+            # sockets can both bind() the same port (needed for TIME_WAIT),
+            # but only one can listen() — so this is where exclusivity is
+            # established atomically.
+            s.listen(socket.SOMAXCONN)
             return s
         except OSError:
             s.close()
