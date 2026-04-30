@@ -2,7 +2,7 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-30
-**Features Implemented**: 13 (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry)
+**Features Implemented**: 13 + post-#13 polish (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish)
 **Next up**: #14 token/cost telemetry · #15 expanded subagent pack · #16 message kind typing · #17 agent definition parity · #18 broker snapshot + dashboard polish · #19 tool-use events in dashboard
 
 ---
@@ -225,6 +225,26 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-04-30 — #13 Post-Implementation Polish + Leader Election Shipped
+
+Hardening and UX work carried out after #13's initial implementation during live testing. All shipped before merge to main.
+
+**Leader election:** The first instance now atomically claims port 7821 — the stable, bookmarkable URL. Followers get OS-assigned ephemeral ports and poll every 20 seconds; when 7821 is free, the follower promotes itself (new UIServer on 7821, logs the URL, clears ephemeral port from registry).
+
+**Race-free port binding (`_bind_ui_socket`):** The original `_pick_ui_port()` had a probe-release-rebind window — two concurrent instances could both see 7821 as free and both fail uvicorn's re-bind, falling back to ephemeral. The fix keeps the socket open from probe to serve, passing it to uvicorn via `fd=sock.fileno()`. `SO_REUSEADDR` handles TIME_WAIT residue from a previous leader. `listen()` is the serialization point — with `SO_REUSEADDR`, both can `bind()` but only one can `listen()`, confirmed empirically. Four new tests in `TestBindUiSocket` cover concurrent-caller isolation, hold-while-open, and TIME_WAIT fallback.
+
+**Orphan process fix:** MCP stdin close wasn't propagating to the UIServer — the uvicorn coroutine kept the process alive after Claude Code exited. Fix: `_mcp_then_cancel()` calls `tg.cancel_scope.cancel()` in its finally block.
+
+**Circular fanout fix:** Instance A's `/api/state` was calling B which was calling A, deadlocking. Fix: `?local=1` query param on remote calls skips the registry fanout at the receiving end.
+
+**SDK teammate suppression:** SDK teammates were spawning UIServers (inheriting the host's MCP config), polluting the instance registry. Fix: inject `CLAUDE_CREW_UI_PORT=0` via `ClaudeAgentOptions(env={...})` in `SdkTeammate`.
+
+**HTML no longer cached:** UIServer was caching dashboard HTML on first read, requiring a process restart for CSS changes to take effect on hard refresh. Removed the cache — reads the file on every request at negligible cost.
+
+**Dashboard UX:** Bidirectional messages in agent columns (lead→agent and agent→lead). Agent headers show name bold + role dimmed when they differ. Message bodies extracted from `payload["text"]` instead of raw JSON; cap raised 500→2000 chars. Theme: Clearwater-inspired blue palette, higher-contrast lightness range (bg-0: 0.91 → bg-4: 0.54).
+
+**Advances criteria:** SC #3 and #4 fully shipped and manually validated with two live concurrent instances.
 
 ### 2026-04-30 — Feature #13 (Multi-Instance Registry + Unified Dashboard) Shipped
 

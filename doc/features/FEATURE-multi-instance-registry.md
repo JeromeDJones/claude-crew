@@ -505,10 +505,30 @@ Post-T5 Sentinel caught 3 issues, all fixed before commit:
 
 ### Verification
 - [x] Feature works against Phase 1 success criteria
-- [x] No regressions — full test suite passes (486 passed, 9 skipped)
+- [x] No regressions — full test suite passes (492 passed, 9 skipped)
 - [x] Spec updated to match implementation
-- [ ] Jerome's manual testing complete
-- [ ] Merged to main
+- [x] Jerome's manual testing complete
+- [x] Merged to main
+
+### Post-Implementation Fixes (same session, pre-merge)
+
+After initial implementation, live multi-instance testing surfaced several bugs and prompted UX improvements. All resolved before merge.
+
+**Orphan process fix** — `_mcp_then_cancel()` wasn't cancelling the anyio task group when MCP stdin closed. The uvicorn coroutine kept the process alive indefinitely after Claude Code exited. Fix: `_mcp_then_cancel()` calls `tg.cancel_scope.cancel()` in its finally block.
+
+**Circular HTTP fanout fix** — Instance A's `_build_state()` would call B's `/api/state`, which would call A's `/api/state`, creating a deadlock. Fix: `/api/state?local=1` skips the registry fanout on remote calls. `_handle_state()` reads the query param and passes `local_only=True` to `_build_state()`.
+
+**SDK teammate UI suppression** — SDK teammates inherit the host's MCP config and were spawning their own UIServers, polluting the instance registry with non-crew entries. Fix: `SdkTeammate` injects `CLAUDE_CREW_UI_PORT=0` into the subprocess environment via `ClaudeAgentOptions(env={...})`.
+
+**Leader election** — First instance now atomically claims port 7821 (the stable, bookmarkable URL). Subsequent instances get OS-assigned ephemeral ports and poll every 20 seconds for 7821 to free up. When it does, the follower promotes itself — creates a new UIServer on 7821 and logs the promotion. Only the leader logs the dashboard URL to stderr; followers stay silent.
+
+**Race-free port binding** — The original `_pick_ui_port()` probed a port (bind → get port number → release socket), then returned the port number. Two concurrent processes could both see port 7821 as free during the probe and both fail the subsequent uvicorn bind, landing on ephemeral ports. Fix: `_bind_ui_socket(preferred)` holds the socket open and passes it to uvicorn via `fd=sock.fileno()`. Uvicorn inherits the already-bound fd instead of binding again — no re-bind race. `SO_REUSEADDR` is set so a port in TIME_WAIT (left by a previous leader's connections) doesn't block promotion. `listen()` is called before returning the socket — this is the serialization point: with `SO_REUSEADDR`, two processes can both `bind()` the same port, but only one can `listen()`. 4 new tests in `TestBindUiSocket` cover hold-while-open, TIME_WAIT fallback, and concurrent-caller isolation.
+
+**No HTML caching** — UIServer was caching the dashboard HTML in memory on first read, requiring a process restart to pick up CSS changes after a hard refresh. Removed the cache — `_get_html()` reads the file on every request. Cost is negligible (one small file read per page load).
+
+**Dashboard UX polish** — bidirectional message display in agent columns (lead→agent and agent→lead); agent column headers show name bold + role dimmed when they differ; message body extraction from `payload["text"]` instead of `json.dumps` blob; body cap raised 500→2000 chars.
+
+**Theme** — Blue palette inspired by the Clearwater Analytics design system (Poppins/Inter, navy-to-teal palette, bright blue accent). Higher-contrast lightness range (bg-0: 0.91 → bg-4: 0.54). Text anchored at near-black fg-0.
 
 ### Retrospective
 
@@ -518,16 +538,19 @@ Post-T5 Sentinel caught 3 issues, all fixed before commit:
 - The `is_local=True` search in `_fetch_remote_state()` was also Sentinel-driven. Blindly taking `instances[0]` was fragile; the fix makes aggregation order-independent.
 - Kael direct worked cleanly for this feature — all 5 tasks were well-scoped enough to run sequentially without subagent handoffs.
 - `asyncio.gather(..., return_exceptions=True)` + `httpx.AsyncClient(timeout=2.0)` gave exactly the bounded-fanout semantics SC-9 required, with no extra machinery.
+- `_bind_ui_socket`'s `bind+listen` pattern is the correct atomic primitive for leader election. The `listen()` insight (two sockets with `SO_REUSEADDR` can both `bind()`, but only one can `listen()`) was confirmed empirically before being baked into the implementation.
 
 **What was friction**:
 
 - The `_build_state()` async migration required touching every existing test in `TestBuildStateEmptyCrew` individually (7 tests, each converted from `def` to `async def`). The `replace_all` edit tool helped, but the conversion still required care to avoid silent coroutine-object comparisons (the tests would pass vacuously if not properly awaited).
-- An early attempt to add `is_local` to the agent fields assertion produced a malformed test mid-T2. Reverted immediately and added a clean separate test instead — but the attempt created a moment of test-state confusion.
+- The probe-then-bind race wasn't visible in tests — it only manifested with two live concurrent processes. A test that actually spawns two concurrent callers (like `TestBindUiSocket::test_two_concurrent_callers_get_different_ports`) is the only way to catch it. Write socket-binding tests that simulate concurrent use, not just sequential.
+- HTML caching was a recurring friction point during dashboard iteration — every CSS change required a process restart to verify. Removing the cache eliminated this entirely at negligible cost.
 
 **Improvements**:
 
 - When migrating a sync test class to async, do a single targeted conversion pass before writing any new tests in that class. Don't interleave conversion and addition.
 - Pre-Phase-3: for any feature touching async lifecycle methods, enumerate all test files that call those methods and note which need async migration. Prevents mid-implementation surprises.
+- Any new socket-binding helper must include a concurrent-caller test that holds one socket open while a second tries to bind the same port. The sequential probe is not sufficient.
 
 **Workflow updates made**:
 - [ ] TEMPLATE.md or SKILL.md updated
