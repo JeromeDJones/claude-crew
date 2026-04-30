@@ -700,6 +700,10 @@ class SdkTeammate(Teammate):
             "system_prompt": self._system_prompt,
             "setting_sources": self._setting_sources,
             "agents": self._agents,
+            # Suppress the UI server and instance registry inside SDK teammates.
+            # They inherit global MCP config (including claude-crew), so without
+            # this they'd each register themselves as a crew instance in the dashboard.
+            "env": {"CLAUDE_CREW_UI_PORT": "0"},
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort

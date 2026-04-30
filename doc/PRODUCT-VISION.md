@@ -2,7 +2,8 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-30
-**Features Implemented**: 12 (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui)
+**Features Implemented**: 13 + post-#13 polish (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish)
+**Next up**: #14 token/cost telemetry · #15 expanded subagent pack · #16 message kind typing · #17 agent definition parity · #18 broker snapshot + dashboard polish · #19 tool-use events in dashboard
 
 ---
 
@@ -56,8 +57,8 @@ After adopting claude-crew, a developer can:
 |---|-----------|---------------|--------|
 | 1 | A lead can spawn N persistent role-specialized teammates and exchange messages with them across a session, each teammate holding context across all exchanges | Scripted session with 3 teammates, 10+ exchanges each, teammates correctly reference earlier exchanges | Not started |
 | 2 | A teammate can recursively spawn its own subagents for focused work | Planner teammate spawns explorer + researcher subagents during a real planning task | Not started |
-| 3 | A developer can run two independent crews concurrently on one machine without interference | Two crews on different repos, both completing tasks, no message bleed between them | Not started |
-| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | **Partially met (2026-04-30)** — Mission Control UI (#12) ships a real-time browser dashboard at `http://127.0.0.1:7821`. Alive teammates, status dots, topology graph, and message streams all live-update via WebSocket. Single-crew only in v1; multi-crew aggregation and real token/cost tracking are backlog items. |
+| 3 | A developer can run two independent crews concurrently on one machine without interference | Two crews on different repos, both completing tasks, no message bleed between them | **Structurally met (2026-04-30)** — Multi-instance registry (#13) uses per-instance XDG files (keyed by crew_id) with PID liveness; two instances can co-exist without message bleed or registry corruption. Validated scenario (two real crews completing tasks end-to-end) is still a deferred v2 proof point. |
+| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | **Substantially met (2026-04-30)** — Mission Control UI (#12) ships a real-time browser dashboard. #13 extends it to all running instances: each peer's agents, status, and transcript stream into the same dashboard via server-side HTTP fanout. Token/cost tracking and crew-level filtering remain deferred. |
 | 5 | The system runs reliably enough to use on real work — completes a non-trivial task end-to-end without operator intervention beyond directing the lead | Successful real-task runs at home and at work, instrumented with a "needed manual rescue?" flag | **Met (home, 2026-04-26)** — MMM-35 backend slice shipped via SDD with claude-crew teammates, all 8 tripwires clean, ~$15-20 spend. Substrate findings captured for next-pass improvements. |
 
 **Guidance for writing criteria:**
@@ -183,17 +184,24 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 | 9 | **`get_messages` long-poll (blocking wait with early return).** Add a `wait_seconds: float = 0` parameter to the existing `get_messages` MCP tool. When `wait_seconds > 0` and no messages are available at call time, the server blocks until a message arrives for the lead or the timeout elapses — whichever comes first. Returns immediately if messages are already waiting. Zero (default) preserves current behaviour exactly. Implementation: add `asyncio.Condition` to the broker; `store_message` notifies on delivery; the async `get_messages` handler awaits the condition with a timeout. No new tool, no new protocol, no client changes — just smarter waiting. | 1 | 5 | S | **done** | **Shipped 2026-04-28** (`66e2e8f`). Promoted from deferred 2026-04-27. Broker `asyncio.Condition` + `wait_seconds` param on `get_messages`. Eliminates polling burn during team builds. See `doc/features/FEATURE-get-messages-long-poll.md`. |
 | 10 | **Agent config extension.** Add `skills`, `permissionMode`, `disallowedTools` to `PackFrontmatter` so pack files can declare them. Wire `permissionMode` and `disallowedTools` through to `ClaudeAgentOptions` when roles are spawned as top-level teammates. Add `cwd` to `spawn_teammate` for multi-repo work. | 1, 2 | 1 | S | **shipped** | Merged 2026-04-29. 340 tests. 4-task team build. Sentinel clean. Spawn-time permissionMode validation gap logged to BACKLOG. |
 | 11 | **Lightweight subagent context.** Explorer, planner, and general-purpose bundled agents load full user CLAUDE.md via `setting_sources=["user","project"]` by default — wasted tokens for utility roles. Add `setting_sources` to `PackFrontmatter` so roles can declare `setting_sources: []`. Update bundled explorer and general-purpose to use minimal context. Requires a parallel channel alongside the agents pack (AgentDefinition has no `setting_sources` field). | 1, 2 | 1 | S | **done** | **Shipped 2026-04-29.** `settingSources` in PackFrontmatter with validation; parallel `role_ss` dict threaded through full loader cascade; factory closure passes `setting_sources=role_ss.get(role)` to SdkTeammate. explorer: `[]`, general-purpose: `[]`, planner: `[project]`. 387 tests. SC-5 live probe deferred. See `doc/features/FEATURE-lightweight-subagent-context.md`. |
+| 13 | **Multi-instance registry and unified dashboard aggregation.** When multiple claude-crew instances run concurrently, each instance's Mission Control dashboard shows state from all peers. Per-instance XDG JSON files (`~/.local/state/claude-crew/instances/<crew_id>.json`) with PID liveness and atomic writes; UIServer fans out HTTP GET to peers, merges results, marks unreachable instances; SIGTERM deregisters cleanly. | 3, 4 | 5 | M | **done** | **Shipped 2026-04-30** (`153dd16`). Full SDD: 9 SCs, 10 design decisions D1-D10, 5 tasks Kael direct. 486 tests (68 new — registry unit, ui_server async, e2e multi-instance). Sentinel caught SIGTERM event-loop placement bug in Phase 2 spec (before any code); post-implementation Sentinel added `is_local=True` search robustness and SC-9 timeout coverage. "Live multi-crew UI" deferred item now shipped. See `doc/features/FEATURE-multi-instance-registry.md`. |
+| 14 | **Token/cost telemetry per crew.** Accumulate per-turn SDK usage stats in `SdkTeammate` (`_total_input_tokens`, `_total_output_tokens`, `_total_cost_usd`) from the response stream. Surface via `status_snapshot()`. Wire into `UIServer._build_local_instance()` so the dashboard cost and token columns show real numbers instead of `$0.000`. | 4 | 5 | M | **next** | Promoted from deferred. Closes the last visible SC #4 gap — dashboard cost column is a key operational metric and currently useless. |
+| 15 | **Expanded default subagent pack.** Add `reviewer` and `runner` roles to the bundled subagent pack. `reviewer`: code review, security audit, spec review — Sonnet, read-only + Write for annotations. `runner`: test execution, build orchestration, scripted tasks — Sonnet, Bash + Read. Both follow the existing pack frontmatter + `settingSources` patterns from #11. | 2 | 3 | S | **next** | Promoted from deferred. These are the roles that real-task builds (MMM-4b et al.) have been spinning up without a pack definition. `archaeologist` deferred until a real use case surfaces. |
+| 16 | **Message kind typing in transcript stream.** Transcript envelopes currently all emit `kind: "msg"`. Inspect payload shape to emit `kind: "tool"` for tool-call envelopes and `kind: "thinking"` for thinking-block envelopes. Dashboard stream columns then show the visual distinction (monospace pill vs. italic) the design intends. Requires coordination between broker envelope format and `UIServer._build_local_instance()`. | 4 | 3 | S | **next** | Backlog item from #12 retro. Tool calls and thinking entries are visually identical to plain messages today; operators lose the signal. |
+| 17 | **Agent definition parity (mcpServers, permissionMode, disallowedTools in PackFrontmatter).** `PackFrontmatter` is missing half the `AgentDefinition` field set — `mcpServers`, `permissionMode`, `disallowedTools`, `memory` cannot be declared in `.md` agent files today. Additive field extensions to `PackFrontmatter` + `_validate_frontmatter` + `parse_pack_text`, no architecture change. Also wire `spawn_teammate` permission_mode validation at the MCP boundary (currently invalid strings reach the SDK silently). | 1, 2 | 2 | S | **next** | Backlog items from #10 retro. Role-level config belongs in pack files, not spawn-time overrides — the validation gap makes incorrect spawns invisible to the caller. |
+| 18 | **Broker `snapshot()` read API + dashboard polish.** Add `broker.snapshot()` returning a frozen dataclass (`crew_id`, `alive_teammates`, `log`) so `UIServer` stops reading `_info`, `_log`, `_teammates` directly. Removes fragile private-attr coupling and makes UIServer unit-testable without a live broker. Bundle with two small dashboard fixes: git branch read at UIServer init (`git branch --show-current`, cached, fallback "main") instead of hardcoded `"main"`; and remove the stale `_get_redaction_version()` ImportError fallback in `teammate.py`. | 4 | 2 | S | **next** | Backlog items from #12 and #8 retros. The private-attr coupling is the reason `ui_server.py` can't be tested in isolation. All three changes are XS–S individually; bundled as one feature to keep the pipeline lean. |
+| 19 | **Tool-use events in the dashboard stream.** Surface `tool_start`/`tool_end` JSONL transcript records in the Mission Control message columns alongside envelope messages. Requires a broker-level per-teammate event list (or a parallel channel alongside `_log`) that `UIServer` reads and merges into the transcript stream, emitting `kind: "tool"` entries the dashboard already knows how to render. SDK teammates already write these records to the JSONL sink — the gap is getting them into the in-memory state the UI polls. | 4 | 4 | M | **next** | Surfaced during #13 session (2026-04-30). Dashboard already has `MiniMessage` render paths for `kind: "tool"` and `kind: "thinking"` — the visual layer is done; only the data pipeline is missing. Pairs naturally with #16 (message kind typing) and #18 (broker snapshot API, which cleans up the private-attr reads this feature would add). Recommend implementing after #18 so the snapshot API is the clean read surface. |
 
 ### Deferred (v2+)
 
 | Feature | Capability | Notes |
 |---|---|---|
-| Live multi-crew UI (TUI or web) | 4 | JSONL `tail -f` is MVP floor; rich UI ships once the bus shape is stable. |
-| Hook-based ambient inbound delivery to lead | 1 | Polling is the v1 contract; hooks add slickness once we know the bus shape is right. |
+| Hook-based ambient inbound delivery to lead | 1 | Polling is the v1 contract; hooks add slickness once we know the bus shape is right. Needs spike: do shell hooks fire in SDK mode (`CLAUDE_CODE_ENTRYPOINT=sdk-py`)? |
 | Multi-crew concurrent run as a *validated* scenario at work | 3, 5 | Multi-crew is structural in MVP; the validated work scenario follows. |
 | Adapter contract spec for non-SDK runtimes | 1 | Forward-looking design work; lock the bus protocol in v1 implementation, formalize the spec in v2. |
-| Expanded default subagent pack (reviewer, runner, archaeologist, etc.) | 2 | Grow the pack as real usage reveals what's missing. |
-| Token / cost telemetry per crew | 4 | Useful for the "cost is a real concern" feedback we got from Agent Teams users. |
+| MCP server injection + cwd on spawn_teammate | 1, 2 | Needs spike: does `--mcp-config` merge or replace? Do tool allowlists block MCP tools? Three unknowns documented in BACKLOG. |
+| Recursive crew spawning (teammate calls spawn_teammate) | 2 | One user-level config change away structurally, but lifecycle ownership (who kills a teammate spawned by another teammate) needs a design decision first. |
+| Skill invocation from SDK teammates | 2 | Needs spike: what does "invoking a skill from a subagent" mean mechanically? Gates on MCP spike results. |
 
 **Status values:**
 - `idea` — captured but not yet evaluated
@@ -201,9 +209,6 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 - `specced` — SDD feature file created, in progress
 - `done` — implemented and verified
 - `cut` — removed from pipeline (note why)
-
-**Status values:**
-- `idea` — Captured but not yet evaluated
 - `next` — Selected for implementation, ready for SDD handoff
 - `specced` — SDD feature file created, in progress
 - `done` — Implemented and verified
@@ -220,6 +225,45 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-04-30 — #13 Post-Implementation Polish + Leader Election Shipped
+
+Hardening and UX work carried out after #13's initial implementation during live testing. All shipped before merge to main.
+
+**Leader election:** The first instance now atomically claims port 7821 — the stable, bookmarkable URL. Followers get OS-assigned ephemeral ports and poll every 20 seconds; when 7821 is free, the follower promotes itself (new UIServer on 7821, logs the URL, clears ephemeral port from registry).
+
+**Race-free port binding (`_bind_ui_socket`):** The original `_pick_ui_port()` had a probe-release-rebind window — two concurrent instances could both see 7821 as free and both fail uvicorn's re-bind, falling back to ephemeral. The fix keeps the socket open from probe to serve, passing it to uvicorn via `fd=sock.fileno()`. `SO_REUSEADDR` handles TIME_WAIT residue from a previous leader. `listen()` is the serialization point — with `SO_REUSEADDR`, both can `bind()` but only one can `listen()`, confirmed empirically. Four new tests in `TestBindUiSocket` cover concurrent-caller isolation, hold-while-open, and TIME_WAIT fallback.
+
+**Orphan process fix:** MCP stdin close wasn't propagating to the UIServer — the uvicorn coroutine kept the process alive after Claude Code exited. Fix: `_mcp_then_cancel()` calls `tg.cancel_scope.cancel()` in its finally block.
+
+**Circular fanout fix:** Instance A's `/api/state` was calling B which was calling A, deadlocking. Fix: `?local=1` query param on remote calls skips the registry fanout at the receiving end.
+
+**SDK teammate suppression:** SDK teammates were spawning UIServers (inheriting the host's MCP config), polluting the instance registry. Fix: inject `CLAUDE_CREW_UI_PORT=0` via `ClaudeAgentOptions(env={...})` in `SdkTeammate`.
+
+**HTML no longer cached:** UIServer was caching dashboard HTML on first read, requiring a process restart for CSS changes to take effect on hard refresh. Removed the cache — reads the file on every request at negligible cost.
+
+**Dashboard UX:** Bidirectional messages in agent columns (lead→agent and agent→lead). Agent headers show name bold + role dimmed when they differ. Message bodies extracted from `payload["text"]` instead of raw JSON; cap raised 500→2000 chars. Theme: Clearwater-inspired blue palette, higher-contrast lightness range (bg-0: 0.91 → bg-4: 0.54).
+
+**Advances criteria:** SC #3 and #4 fully shipped and manually validated with two live concurrent instances.
+
+### 2026-04-30 — Feature #13 (Multi-Instance Registry + Unified Dashboard) Shipped
+
+The dashboard is no longer single-crew. Any instance's Mission Control now shows all co-running instances — agents, status, and transcript — in a unified view without a page refresh.
+
+**What shipped:**
+- `InstanceRegistry` — XDG-aware per-instance JSON files (`~/.local/state/claude-crew/instances/<crew_id>.json`). Atomic writes via `os.replace`; PID liveness check on every read; stale/corrupt entries self-healing (deleted on detection). No inter-process locking needed — per-instance files are inherently collision-free.
+- `UIServer` async migration — `_build_state()` converted to `async def`; `_build_local_instance()` extracted; `_fetch_remote_state()` fans out to peers' `/api/state` with a long-lived `httpx.AsyncClient(timeout=2.0)`. Failed/slow remotes produce `status: "unreachable"` entries, never blocking the push cycle.
+- Dashboard visual distinction — `is_local: true` badge chip on the local instance; red border + "unreachable" label for dead remotes.
+- SIGTERM handler — registers on startup, deregisters on clean shutdown. Handler installed via `asyncio.get_running_loop().add_signal_handler()` inside `async def _run()` (not before `anyio.run()` — anyio creates its own loop, so earlier placement would silently never fire).
+
+**Process highlights:**
+- Kael direct, 5 tasks. Phase 2 Sentinel caught the SIGTERM event-loop placement bug from the spec before any code was written — saving a subtle correctness issue that tests alone wouldn't have caught (handler would register without error but never fire).
+- Post-implementation Sentinel caught two more: `instances[0]` fragile ordering assumption fixed to `is_local=True` search; no SC-9 (timeout bound) test coverage added via `TestRemoteTimeout` with a real 10s-sleep server.
+- 68 new tests: `test_instance_registry.py` (19), `test_ui_server.py` async migration + new tests (total 40), `test_e2e_multi_instance.py` (20). Full suite: 486 passed, 9 skipped.
+
+**Advances criteria:** SC #3 (structurally met — per-instance files eliminate interference), SC #4 (substantially met — all crews visible in one dashboard).
+
+**Pipeline impact:** "Live multi-crew UI" deferred item closed. Token/cost tracking per crew remains the next SC #4 gap. SC #3 validated-scenario proof point (two real crews completing independent tasks end-to-end) is still deferred.
 
 ### 2026-04-27 — Feature #6 (Telemetry-Based Teammate Liveness) Shipped
 
