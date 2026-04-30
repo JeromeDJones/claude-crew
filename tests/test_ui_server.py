@@ -221,7 +221,45 @@ class TestBuildStateTranscript:
         state = await ui._build_state()
         messages = state["transcripts"][broker.crew_id]
         assert len(messages) == 1
-        assert len(messages[0]["body"]) <= 500
+        assert len(messages[0]["body"]) <= 2000
+
+    async def test_dict_payload_text_extracted(self):
+        """SDK agent responses with {"text": ..., "from": ...} render as plain text."""
+        from claude_crew.broker import LEAD_ID
+        from claude_crew.envelope import Envelope, new_message_id
+        import time
+
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        env = Envelope(
+            id=new_message_id(), seq=1, sender="t-abc",
+            recipient=LEAD_ID, timestamp=time.time(),
+            payload={"text": "Hello from agent", "from": "reviewer"},
+        )
+        broker._log.append(env)
+
+        state = await ui._build_state()
+        messages = state["transcripts"][broker.crew_id]
+        assert len(messages) == 1
+        assert messages[0]["body"] == "Hello from agent"
+
+    async def test_dict_payload_without_text_falls_back_to_json(self):
+        from claude_crew.envelope import Envelope, new_message_id
+        import time
+
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        env = Envelope(
+            id=new_message_id(), seq=1, sender="lead",
+            recipient="t-abc", timestamp=time.time(),
+            payload={"some": "other", "structure": 1},
+        )
+        broker._log.append(env)
+
+        state = await ui._build_state()
+        messages = state["transcripts"][broker.crew_id]
+        assert len(messages) == 1
+        assert '"some"' in messages[0]["body"]
 
     async def test_transcript_capped_at_200_messages(self):
         from claude_crew.envelope import Envelope, new_message_id
@@ -317,3 +355,81 @@ class TestWebSocket:
         # Server should still respond to HTTP
         resp = client.get("/api/state")
         assert resp.status_code == 200
+
+
+class TestBindUiSocket:
+    """Tests for _bind_ui_socket — the race-free port reservation helper."""
+
+    def test_returns_open_socket_on_success(self):
+        from claude_crew.server import _bind_ui_socket
+
+        sock = _bind_ui_socket(0)
+        assert sock is not None
+        try:
+            port = sock.getsockname()[1]
+            assert port > 0
+        finally:
+            sock.close()
+
+    def test_socket_holds_the_port(self):
+        """Port must remain bound while the socket is open (the whole point of this helper)."""
+        import socket as _socket
+
+        from claude_crew.server import _bind_ui_socket
+
+        sock = _bind_ui_socket(0)
+        assert sock is not None
+        port = sock.getsockname()[1]
+        try:
+            # While sock is open, no other process can bind the same port
+            probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", port))
+                assert False, "second bind should have failed while socket is open"
+            except OSError:
+                pass
+            finally:
+                probe.close()
+        finally:
+            sock.close()
+
+    def test_falls_back_to_ephemeral_when_preferred_busy(self):
+        """If preferred port is taken, returns a socket on an ephemeral port."""
+        import socket as _socket
+
+        from claude_crew.server import _bind_ui_socket
+
+        # Hold the preferred port
+        blocker = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        preferred = blocker.getsockname()[1]
+        try:
+            sock = _bind_ui_socket(preferred)
+            assert sock is not None
+            try:
+                got_port = sock.getsockname()[1]
+                assert got_port != preferred
+                assert got_port > 0
+            finally:
+                sock.close()
+        finally:
+            blocker.close()
+
+    def test_two_concurrent_callers_get_different_ports(self):
+        """Simulates the race: both callers ask for the same preferred port; each gets a unique port."""
+        from claude_crew.server import _bind_ui_socket
+
+        sock_a = _bind_ui_socket(0)
+        assert sock_a is not None
+        port_a = sock_a.getsockname()[1]
+
+        # With sock_a still open, try the same port
+        sock_b = _bind_ui_socket(port_a)
+        assert sock_b is not None
+        port_b = sock_b.getsockname()[1]
+
+        try:
+            assert port_a != port_b, "concurrent callers must get different ports"
+        finally:
+            sock_a.close()
+            sock_b.close()

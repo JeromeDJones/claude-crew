@@ -11,13 +11,13 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg-0: oklch(0.98 0.003 250);
-      --bg-1: oklch(0.95 0.004 250);
-      --bg-2: oklch(0.92 0.005 250);
-      --bg-3: oklch(0.88 0.006 250);
-      --bg-4: oklch(0.82 0.007 250);
-      --line: oklch(0.85 0.007 250);
-      --line-soft: oklch(0.90 0.005 250);
+      --bg-0: oklch(0.90 0.008 200);
+      --bg-1: oklch(0.86 0.010 200);
+      --bg-2: oklch(0.82 0.012 200);
+      --bg-3: oklch(0.78 0.013 200);
+      --bg-4: oklch(0.73 0.014 200);
+      --line: oklch(0.76 0.012 200);
+      --line-soft: oklch(0.81 0.010 200);
       --fg-0: oklch(0.14 0.008 250);
       --fg-1: oklch(0.32 0.010 250);
       --fg-2: oklch(0.50 0.012 250);
@@ -406,14 +406,23 @@
     function MiniMessage({ msg, agentMap }) {
       const isTool = msg.kind === "tool";
       const isThinking = msg.kind === "thinking";
+      const isFromLead = msg.from === "lead";
       const recipient = msg.to && !msg.to.startsWith("broker:") ? agentMap[msg.to] : null;
+      const sender = msg.from && msg.from !== "lead" ? agentMap[msg.from] : null;
       return (
-        <div style={{ padding: "7px 0", borderBottom: "1px solid var(--line-soft)" }}>
+        <div style={{
+          padding: "7px 0", borderBottom: "1px solid var(--line-soft)",
+          opacity: isFromLead ? 0.75 : 1,
+        }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--fg-3)", marginBottom: 3 }}>
-            <span>→</span>
+            {isFromLead
+              ? <span style={{ color: "var(--fg-2)", fontWeight: 600 }}>lead</span>
+              : <span style={{ color: "var(--fg-1)", fontWeight: 600 }}>{sender ? sender.role : msg.from}</span>
+            }
+            <span style={{ color: "var(--fg-3)" }}>→</span>
             {recipient
-              ? <span style={{ color: "var(--fg-1)" }}>{recipient.role}</span>
-              : <span className="mono">{msg.to === "lead" ? "lead" : "broker"}</span>
+              ? <span style={{ color: "var(--fg-2)" }}>{recipient.role}</span>
+              : <span className="mono">{msg.to === "lead" ? "lead" : msg.to}</span>
             }
             <span className="mono" style={{ marginLeft: "auto" }}>{fmtTime(msg.t)}</span>
           </div>
@@ -430,7 +439,7 @@
           ) : isThinking ? (
             <div style={{ fontSize: 11.5, color: "var(--fg-2)", fontStyle: "italic" }}>{msg.body}</div>
           ) : (
-            <div style={{ fontSize: 12, color: "var(--fg-0)", textWrap: "pretty", wordBreak: "break-word" }}>{msg.body}</div>
+            <div style={{ fontSize: 12, color: isFromLead ? "var(--fg-2)" : "var(--fg-0)", textWrap: "pretty", wordBreak: "break-word", whiteSpace: "pre-wrap" }}>{msg.body}</div>
           )}
         </div>
       );
@@ -459,7 +468,12 @@
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <AgentAvatar id={agent.id} role={agent.role} size={22}/>
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{agent.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {agent.name || agent.role}
+                  {agent.name && agent.name !== agent.role &&
+                    <span style={{ fontWeight: 400, color: "var(--fg-3)", marginLeft: 5, fontSize: 11 }}>{agent.role}</span>
+                  }
+                </div>
                 <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{agent.id}</div>
               </div>
               <StatusDot status={agent.status}/>
@@ -508,7 +522,10 @@
       const byAgent = useMemo(() => {
         const out = {};
         agents.forEach(a => { out[a.id] = []; });
-        msgs.forEach(m => { if (out[m.from]) out[m.from].push(m); });
+        msgs.forEach(m => {
+          if (out[m.from]) out[m.from].push(m);         // agent → lead (response)
+          else if (m.from === "lead" && out[m.to]) out[m.to].push(m); // lead → agent (prompt)
+        });
         return out;
       }, [agents, msgs]);
 

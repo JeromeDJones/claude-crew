@@ -79,10 +79,12 @@ class UIServer:
         broker: Broker,
         port: int = 7821,
         registry: InstanceRegistry | None = None,
+        sock: "Any | None" = None,
     ) -> None:
         self._broker = broker
         self._port = port
         self._registry = registry
+        self._sock = sock  # pre-bound socket; closed in serve() finally block
         self._html: str | None = None
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
@@ -129,6 +131,7 @@ class UIServer:
             agents.append({
                 "id": info.id,
                 "role": info.role,
+                "name": info.name,
                 "model": _normalize_model(model_raw),
                 "status": status,
                 "uptime": int(now - info.spawned_at),
@@ -144,13 +147,18 @@ class UIServer:
             payload = env.payload
             if isinstance(payload, dict) and payload.get("error"):
                 continue
-            body = payload if isinstance(payload, str) else json.dumps(payload)
+            if isinstance(payload, str):
+                body = payload
+            elif isinstance(payload, dict) and "text" in payload:
+                body = payload["text"]
+            else:
+                body = json.dumps(payload)
             messages.append({
                 "t": _ts(env.timestamp),
                 "from": env.sender,
                 "to": env.recipient,
                 "kind": "msg",
-                "body": str(body)[:500],
+                "body": str(body)[:2000],
             })
 
         spawn_times = [info.spawned_at for info in broker._info.values()]
@@ -177,7 +185,9 @@ class UIServer:
         if not port:
             return None
         try:
-            resp = await self._http_client.get(f"http://127.0.0.1:{port}/api/state")
+            # ?local=1 tells the remote to skip its own registry fanout, breaking
+            # the circular dependency where A fetches B which fetches A.
+            resp = await self._http_client.get(f"http://127.0.0.1:{port}/api/state?local=1")
             resp.raise_for_status()
             data = resp.json()
             # Find the remote's own local instance (is_local=True); fall back to [0].
@@ -201,28 +211,30 @@ class UIServer:
         except Exception:
             return None
 
-    async def _build_state(self) -> dict[str, Any]:
+    async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
         local_instance, local_messages = self._build_local_instance()
         instances: list[dict[str, Any]] = [local_instance]
         transcripts: dict[str, list] = {self._broker.crew_id: local_messages}
 
-        if self._registry is not None:
-            remote_entries = [
-                e for e in self._registry.read_all()
-                if e.get("crew_id") != self._broker.crew_id
-            ]
-            if remote_entries:
-                results = await asyncio.gather(
-                    *[self._fetch_remote_state(e) for e in remote_entries],
-                    return_exceptions=True,
-                )
-                for entry, result in zip(remote_entries, results):
-                    crew_id = entry.get("crew_id", "unknown")
-                    if isinstance(result, dict):
-                        instances.append(result["instance"])
-                        transcripts[result["crew_id"]] = result["transcript"]
-                    else:
-                        instances.append(_unreachable_instance(crew_id))
+        if local_only or self._registry is None:
+            return {"instances": instances, "transcripts": transcripts}
+
+        remote_entries = [
+            e for e in self._registry.read_all()
+            if e.get("crew_id") != self._broker.crew_id
+        ]
+        if remote_entries:
+            results = await asyncio.gather(
+                *[self._fetch_remote_state(e) for e in remote_entries],
+                return_exceptions=True,
+            )
+            for entry, result in zip(remote_entries, results):
+                crew_id = entry.get("crew_id", "unknown")
+                if isinstance(result, dict):
+                    instances.append(result["instance"])
+                    transcripts[result["crew_id"]] = result["transcript"]
+                else:
+                    instances.append(_unreachable_instance(crew_id))
 
         return {"instances": instances, "transcripts": transcripts}
 
@@ -231,7 +243,8 @@ class UIServer:
 
     async def _handle_state(self, request: Request) -> JSONResponse:
         try:
-            return JSONResponse(await self._build_state())
+            local_only = request.query_params.get("local") == "1"
+            return JSONResponse(await self._build_state(local_only=local_only))
         except Exception:
             _logger.exception("UI state build error")
             return JSONResponse({"error": "internal_error"}, status_code=500)
@@ -259,16 +272,29 @@ class UIServer:
         if self._registry is not None:
             self._registry.register()
         try:
-            config = uvicorn.Config(
-                self._make_app(),
-                host="127.0.0.1",
-                port=self._port,
-                log_level="error",
-                lifespan="off",
-            )
+            if self._sock is not None:
+                config = uvicorn.Config(
+                    self._make_app(),
+                    fd=self._sock.fileno(),
+                    log_level="error",
+                    lifespan="off",
+                )
+            else:
+                config = uvicorn.Config(
+                    self._make_app(),
+                    host="127.0.0.1",
+                    port=self._port,
+                    log_level="error",
+                    lifespan="off",
+                )
             server = uvicorn.Server(config)
             await server.serve()
         finally:
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except Exception:
+                    pass
             if self._registry is not None:
                 self._registry.deregister()
             await self._http_client.aclose()

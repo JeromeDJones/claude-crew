@@ -252,21 +252,23 @@ def make_server(
     return mcp
 
 
-def _pick_ui_port(preferred: int) -> int:
-    """Return the first free TCP port at or after *preferred*, or an OS-assigned one."""
+def _bind_ui_socket(preferred: int) -> "socket.socket | None":
+    """Bind *preferred* port (or OS ephemeral if busy) and return the open socket.
+
+    The socket stays open so the caller can pass it to uvicorn via fd=, eliminating
+    the probe-release-rebind race where two processes both see the port as free.
+    Caller is responsible for closing the socket (UIServer.serve() does this).
+    """
     import socket
 
-    for port in range(preferred, preferred + 20):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    # All candidates taken — let the OS pick anything free.
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    for port in [preferred, 0]:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+            return s
+        except OSError:
+            s.close()
+    return None
 
 
 def main() -> None:
@@ -277,8 +279,10 @@ def main() -> None:
     import anyio
 
     ui_port_str = os.environ.get("CLAUDE_CREW_UI_PORT", "auto")
+    ui_sock = None
     if ui_port_str.lower() == "auto":
-        ui_port = _pick_ui_port(7821)
+        ui_sock = _bind_ui_socket(7821)
+        ui_port = ui_sock.getsockname()[1] if ui_sock else 0
     else:
         try:
             ui_port = int(ui_port_str)
@@ -293,15 +297,22 @@ def main() -> None:
     server = make_server(broker=broker)
 
     if ui_port <= 0:
+        if ui_sock:
+            ui_sock.close()
         server.run()
         return
 
     from claude_crew.instance_registry import InstanceRegistry
     from claude_crew.ui_server import UIServer
 
+    _LEADER_PORT = 7821
+    is_leader = ui_port == _LEADER_PORT
+
     registry = InstanceRegistry(crew_id=broker.crew_id, port=ui_port)
-    ui = UIServer(broker, port=ui_port, registry=registry)
-    sys.stderr.write(f"[claude-crew] ui -> http://127.0.0.1:{ui_port}\n")
+    ui = UIServer(broker, port=ui_port, registry=registry, sock=ui_sock)
+
+    if is_leader:
+        sys.stderr.write(f"[claude-crew] ui -> http://127.0.0.1:{ui_port}\n")
 
     async def _run() -> None:
         # Install SIGTERM handler inside the running event loop so it targets
@@ -316,8 +327,40 @@ def main() -> None:
             except Exception:
                 sys.stderr.write("[claude-crew] ui server stopped unexpectedly (MCP still running)\n")
 
+        async def _leader_watcher() -> None:
+            """Follower instances: poll for the leader port and promote when free."""
+            if is_leader:
+                return
+            while True:
+                await asyncio.sleep(20)
+                # Attempt atomic bind — if it succeeds, we hold the socket and
+                # pass it directly to the promoted UIServer (no re-bind race).
+                leader_sock = _bind_ui_socket(_LEADER_PORT)
+                if leader_sock is not None and leader_sock.getsockname()[1] == _LEADER_PORT:
+                    try:
+                        registry.update_port(_LEADER_PORT)
+                        promoted = UIServer(broker, port=_LEADER_PORT, registry=registry, sock=leader_sock)
+                        sys.stderr.write(f"[claude-crew] promoted to leader: http://127.0.0.1:{_LEADER_PORT}\n")
+                        await promoted.serve()
+                    except Exception:
+                        if leader_sock:
+                            leader_sock.close()
+                        registry.update_port(ui_port)  # revert if promotion failed
+                elif leader_sock is not None:
+                    # Got an ephemeral port instead — 7821 still busy, discard
+                    leader_sock.close()
+
+        async def _mcp_then_cancel() -> None:
+            try:
+                await server.run_stdio_async()
+            finally:
+                # stdin closed (Claude exited) — deregister and cancel the UI server
+                registry.deregister()
+                tg.cancel_scope.cancel()
+
         async with anyio.create_task_group() as tg:
-            tg.start_soon(server.run_stdio_async)
+            tg.start_soon(_mcp_then_cancel)
             tg.start_soon(_ui_safe)
+            tg.start_soon(_leader_watcher)
 
     anyio.run(_run)

@@ -87,6 +87,11 @@ class InstanceRegistry:
             except Exception:
                 pass
 
+    def update_port(self, port: int) -> None:
+        """Switch to a new port and re-register (used on leader promotion)."""
+        self.port = port
+        self.register()
+
     def deregister(self) -> None:
         """Remove this instance's entry. Ignores missing-file and permission errors."""
         target = self._dir / f"{self.crew_id}.json"
