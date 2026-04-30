@@ -3,6 +3,7 @@
 **Created**: 2026-04-25
 **Last Updated**: 2026-04-30
 **Features Implemented**: 13 (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry)
+**Next up**: #14 token/cost telemetry · #15 expanded subagent pack · #16 message kind typing · #17 agent definition parity · #18 broker snapshot + dashboard polish
 
 ---
 
@@ -184,16 +185,22 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 | 10 | **Agent config extension.** Add `skills`, `permissionMode`, `disallowedTools` to `PackFrontmatter` so pack files can declare them. Wire `permissionMode` and `disallowedTools` through to `ClaudeAgentOptions` when roles are spawned as top-level teammates. Add `cwd` to `spawn_teammate` for multi-repo work. | 1, 2 | 1 | S | **shipped** | Merged 2026-04-29. 340 tests. 4-task team build. Sentinel clean. Spawn-time permissionMode validation gap logged to BACKLOG. |
 | 11 | **Lightweight subagent context.** Explorer, planner, and general-purpose bundled agents load full user CLAUDE.md via `setting_sources=["user","project"]` by default — wasted tokens for utility roles. Add `setting_sources` to `PackFrontmatter` so roles can declare `setting_sources: []`. Update bundled explorer and general-purpose to use minimal context. Requires a parallel channel alongside the agents pack (AgentDefinition has no `setting_sources` field). | 1, 2 | 1 | S | **done** | **Shipped 2026-04-29.** `settingSources` in PackFrontmatter with validation; parallel `role_ss` dict threaded through full loader cascade; factory closure passes `setting_sources=role_ss.get(role)` to SdkTeammate. explorer: `[]`, general-purpose: `[]`, planner: `[project]`. 387 tests. SC-5 live probe deferred. See `doc/features/FEATURE-lightweight-subagent-context.md`. |
 | 13 | **Multi-instance registry and unified dashboard aggregation.** When multiple claude-crew instances run concurrently, each instance's Mission Control dashboard shows state from all peers. Per-instance XDG JSON files (`~/.local/state/claude-crew/instances/<crew_id>.json`) with PID liveness and atomic writes; UIServer fans out HTTP GET to peers, merges results, marks unreachable instances; SIGTERM deregisters cleanly. | 3, 4 | 5 | M | **done** | **Shipped 2026-04-30** (`153dd16`). Full SDD: 9 SCs, 10 design decisions D1-D10, 5 tasks Kael direct. 486 tests (68 new — registry unit, ui_server async, e2e multi-instance). Sentinel caught SIGTERM event-loop placement bug in Phase 2 spec (before any code); post-implementation Sentinel added `is_local=True` search robustness and SC-9 timeout coverage. "Live multi-crew UI" deferred item now shipped. See `doc/features/FEATURE-multi-instance-registry.md`. |
+| 14 | **Token/cost telemetry per crew.** Accumulate per-turn SDK usage stats in `SdkTeammate` (`_total_input_tokens`, `_total_output_tokens`, `_total_cost_usd`) from the response stream. Surface via `status_snapshot()`. Wire into `UIServer._build_local_instance()` so the dashboard cost and token columns show real numbers instead of `$0.000`. | 4 | 5 | M | **next** | Promoted from deferred. Closes the last visible SC #4 gap — dashboard cost column is a key operational metric and currently useless. |
+| 15 | **Expanded default subagent pack.** Add `reviewer` and `runner` roles to the bundled subagent pack. `reviewer`: code review, security audit, spec review — Sonnet, read-only + Write for annotations. `runner`: test execution, build orchestration, scripted tasks — Sonnet, Bash + Read. Both follow the existing pack frontmatter + `settingSources` patterns from #11. | 2 | 3 | S | **next** | Promoted from deferred. These are the roles that real-task builds (MMM-4b et al.) have been spinning up without a pack definition. `archaeologist` deferred until a real use case surfaces. |
+| 16 | **Message kind typing in transcript stream.** Transcript envelopes currently all emit `kind: "msg"`. Inspect payload shape to emit `kind: "tool"` for tool-call envelopes and `kind: "thinking"` for thinking-block envelopes. Dashboard stream columns then show the visual distinction (monospace pill vs. italic) the design intends. Requires coordination between broker envelope format and `UIServer._build_local_instance()`. | 4 | 3 | S | **next** | Backlog item from #12 retro. Tool calls and thinking entries are visually identical to plain messages today; operators lose the signal. |
+| 17 | **Agent definition parity (mcpServers, permissionMode, disallowedTools in PackFrontmatter).** `PackFrontmatter` is missing half the `AgentDefinition` field set — `mcpServers`, `permissionMode`, `disallowedTools`, `memory` cannot be declared in `.md` agent files today. Additive field extensions to `PackFrontmatter` + `_validate_frontmatter` + `parse_pack_text`, no architecture change. Also wire `spawn_teammate` permission_mode validation at the MCP boundary (currently invalid strings reach the SDK silently). | 1, 2 | 2 | S | **next** | Backlog items from #10 retro. Role-level config belongs in pack files, not spawn-time overrides — the validation gap makes incorrect spawns invisible to the caller. |
+| 18 | **Broker `snapshot()` read API + dashboard polish.** Add `broker.snapshot()` returning a frozen dataclass (`crew_id`, `alive_teammates`, `log`) so `UIServer` stops reading `_info`, `_log`, `_teammates` directly. Removes fragile private-attr coupling and makes UIServer unit-testable without a live broker. Bundle with two small dashboard fixes: git branch read at UIServer init (`git branch --show-current`, cached, fallback "main") instead of hardcoded `"main"`; and remove the stale `_get_redaction_version()` ImportError fallback in `teammate.py`. | 4 | 2 | S | **next** | Backlog items from #12 and #8 retros. The private-attr coupling is the reason `ui_server.py` can't be tested in isolation. All three changes are XS–S individually; bundled as one feature to keep the pipeline lean. |
 
 ### Deferred (v2+)
 
 | Feature | Capability | Notes |
 |---|---|---|
-| Hook-based ambient inbound delivery to lead | 1 | Polling is the v1 contract; hooks add slickness once we know the bus shape is right. |
+| Hook-based ambient inbound delivery to lead | 1 | Polling is the v1 contract; hooks add slickness once we know the bus shape is right. Needs spike: do shell hooks fire in SDK mode (`CLAUDE_CODE_ENTRYPOINT=sdk-py`)? |
 | Multi-crew concurrent run as a *validated* scenario at work | 3, 5 | Multi-crew is structural in MVP; the validated work scenario follows. |
 | Adapter contract spec for non-SDK runtimes | 1 | Forward-looking design work; lock the bus protocol in v1 implementation, formalize the spec in v2. |
-| Expanded default subagent pack (reviewer, runner, archaeologist, etc.) | 2 | Grow the pack as real usage reveals what's missing. |
-| Token / cost telemetry per crew | 4 | Useful for the "cost is a real concern" feedback we got from Agent Teams users. |
+| MCP server injection + cwd on spawn_teammate | 1, 2 | Needs spike: does `--mcp-config` merge or replace? Do tool allowlists block MCP tools? Three unknowns documented in BACKLOG. |
+| Recursive crew spawning (teammate calls spawn_teammate) | 2 | One user-level config change away structurally, but lifecycle ownership (who kills a teammate spawned by another teammate) needs a design decision first. |
+| Skill invocation from SDK teammates | 2 | Needs spike: what does "invoking a skill from a subagent" mean mechanically? Gates on MCP spike results. |
 
 **Status values:**
 - `idea` — captured but not yet evaluated
@@ -201,9 +208,6 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 - `specced` — SDD feature file created, in progress
 - `done` — implemented and verified
 - `cut` — removed from pipeline (note why)
-
-**Status values:**
-- `idea` — Captured but not yet evaluated
 - `next` — Selected for implementation, ready for SDD handoff
 - `specced` — SDD feature file created, in progress
 - `done` — Implemented and verified
