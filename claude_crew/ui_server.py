@@ -85,23 +85,20 @@ class UIServer:
         self._port = port
         self._registry = registry
         self._sock = sock  # pre-bound socket; closed in serve() finally block
-        self._html: str | None = None
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
 
     def _get_html(self) -> str:
-        if self._html is None:
-            try:
-                self._html = _DASHBOARD_PATH.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                self._html = (
-                    "<html><body style='font-family:monospace;padding:2rem'>"
-                    "<p>claude-crew dashboard not found.</p>"
-                    f"<p>Expected: {_DASHBOARD_PATH}</p>"
-                    "</body></html>"
-                )
-        return self._html
+        try:
+            return _DASHBOARD_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return (
+                "<html><body style='font-family:monospace;padding:2rem'>"
+                "<p>claude-crew dashboard not found.</p>"
+                f"<p>Expected: {_DASHBOARD_PATH}</p>"
+                "</body></html>"
+            )
 
     def _build_local_instance(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Build the local broker's instance dict and transcript list."""
