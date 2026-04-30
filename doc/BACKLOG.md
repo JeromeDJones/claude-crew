@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-30] Bug + Feature: multi-instance dashboard aggregation
+
+### Dashboard only shows the local broker — other running instances invisible
+- **What**: Each claude-crew instance starts its own UIServer showing only its own broker. The Mission Control design shows N CLI instances in the instance strip, implying all running crews are visible in one place. Currently if you have two instances on ports 7821 and 7822, you need two browser tabs to see both.
+- **Where**: `claude_crew/ui_server.py:_build_state()` — hardcoded to one broker; no discovery mechanism exists
+- **Why it matters**: The design intent (and SC #4 in PRODUCT-VISION.md) is a single observability surface across all running crews. The current architecture requires the operator to find each instance's port separately and monitor them in isolation.
+- **Suggested action**: Instance registry file at `~/.local/state/claude-crew/instances.json` (or similar XDG path). Each UIServer writes `{crew_id, port, pid, started_at}` on startup and removes it on shutdown (atexit + signal handlers). Any dashboard reads the registry and aggregates state from all live instances via their `/api/state` endpoints. The dashboard's instance strip then shows all crews, not just the local one. M/L-size feature — design the registry format and failure modes (stale entries, PID reuse) carefully before implementation.
+
+---
+
 ## [2026-04-30] Feature: mission-control-ui (retro follow-ups)
 
 ### `ui_server.py` has zero test coverage

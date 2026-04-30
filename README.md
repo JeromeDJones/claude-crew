@@ -40,9 +40,15 @@ In any Claude Code session, ask: *"List my crew."* You should get back an empty 
 
 ### 5. Open the dashboard
 
-When claude-crew starts it also binds an HTTP server on port 7821. Open **http://127.0.0.1:7821** in a browser to see the Mission Control dashboard — live agent status, message stream, and topology graph, updated every 1.5 seconds via WebSocket.
+When claude-crew starts it binds an HTTP server and logs the URL to stderr:
 
-To use a different port, set `CLAUDE_CREW_UI_PORT` before starting Claude Code:
+```
+[claude-crew] ui -> http://127.0.0.1:7821
+```
+
+Port selection is automatic — it tries 7821 first and increments until a free port is found, so multiple claude-crew instances can run concurrently without colliding. Open the logged URL in a browser to see the Mission Control dashboard.
+
+To pin a specific port, set `CLAUDE_CREW_UI_PORT`:
 
 ```bash
 CLAUDE_CREW_UI_PORT=8080 claude

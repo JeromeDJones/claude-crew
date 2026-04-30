@@ -251,21 +251,41 @@ def make_server(
     return mcp
 
 
+def _pick_ui_port(preferred: int) -> int:
+    """Return the first free TCP port at or after *preferred*, or an OS-assigned one."""
+    import socket
+
+    for port in range(preferred, preferred + 20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    # All candidates taken — let the OS pick anything free.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def main() -> None:
     """Console entrypoint: run the MCP server over stdio."""
     import os
 
     import anyio
 
-    ui_port_str = os.environ.get("CLAUDE_CREW_UI_PORT", "7821")
-    try:
-        ui_port = int(ui_port_str)
-    except ValueError:
-        sys.stderr.write(
-            f"[claude-crew] CLAUDE_CREW_UI_PORT={ui_port_str!r} is not a valid integer"
-            " — UI disabled\n"
-        )
-        ui_port = 0
+    ui_port_str = os.environ.get("CLAUDE_CREW_UI_PORT", "auto")
+    if ui_port_str.lower() == "auto":
+        ui_port = _pick_ui_port(7821)
+    else:
+        try:
+            ui_port = int(ui_port_str)
+        except ValueError:
+            sys.stderr.write(
+                f"[claude-crew] CLAUDE_CREW_UI_PORT={ui_port_str!r} is not a valid integer"
+                " — UI disabled\n"
+            )
+            ui_port = 0
 
     broker = Broker()
     server = make_server(broker=broker)
