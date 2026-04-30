@@ -1,6 +1,6 @@
 # Feature: Multi-Instance Registry (Unified Dashboard)
 
-**Status**: Planning
+**Status**: Implementation complete — awaiting Jerome's manual testing before merge to main
 **Created**: 2026-04-30
 
 ---
@@ -477,29 +477,59 @@ Scenario: corrupt registry file skipped without crashing (SC-6b)
 
 ## Phase 4: Implementation
 
-*(Execution driven by SKILL.md. Update status in header as tasks complete.)*
+**Branch**: `feature/multi-instance-registry`  
+**Commit**: `153dd16`  
+**Approach**: Kael direct (all 5 tasks in main session)  
+**Completed**: 2026-04-30
+
+All 5 tasks complete. 486 tests pass, 9 skipped (live-SDK only).
+
+### Task completion summary
+
+- **T1 (InstanceRegistry)**: `claude_crew/instance_registry.py` — 19 unit tests. XDG-aware path resolution, atomic writes, PID liveness, stale-entry GC.
+- **T2 (UIServer async + aggregation)**: `_build_state()` made async, `_build_local_instance()` extracted, `_fetch_remote_state()` added with `is_local=True` search, long-lived `httpx.AsyncClient`, `_unreachable_instance()` helper. 40 tests (7 converted to async).
+- **T3 (server.py wiring + SIGTERM)**: `InstanceRegistry` created and passed to `UIServer`; SIGTERM handler installed via `asyncio.get_running_loop().add_signal_handler()` inside `async def _run()` (not before `anyio.run()` — critical placement).
+- **T4 (Dashboard is_local visual)**: `local` badge chip for local instance, red border + `unreachable` label for unreachable instances, `StreamColumns` unreachable guard.
+- **T5 (E2E tests)**: `tests/test_e2e_multi_instance.py` — 20 tests covering multi-instance aggregation, deregistration, dead PID exclusion, unreachable remotes, corrupt registry, startup race, 2s timeout bound, and no-registry regression.
+
+### Sentinel findings during implementation
+
+Post-T5 Sentinel caught 3 issues, all fixed before commit:
+1. `_fetch_remote_state()` was taking `instances[0]` unconditionally — changed to search for `is_local=True` first, fall back to `[0]`.
+2. Startup-race test assertion was conditional; made unconditional `assert status == "unreachable"`.
+3. No SC-9 timeout coverage existed; added `TestRemoteTimeout` with a real 10s-sleep server verifying completion in < 5s.
 
 ---
 
 ## Phase 5: Completion
 
 ### Verification
-- [ ] Feature works against Phase 1 success criteria
-- [ ] No regressions — full test suite passes
-- [ ] Spec updated to match implementation
-- [ ] Docs updated if user-facing behavior changed
+- [x] Feature works against Phase 1 success criteria
+- [x] No regressions — full test suite passes (486 passed, 9 skipped)
+- [x] Spec updated to match implementation
+- [ ] Jerome's manual testing complete
+- [ ] Merged to main
 
 ### Retrospective
 
 **What went well**:
 
+- The Sentinel chain caught real bugs. The SIGTERM event-loop placement issue (D7) was a silent correctness bug that would have gone undetected in testing — anyio replaces the event loop, so the handler installed before `anyio.run()` would never fire. Phase 2 Sentinel caught this from the spec before any code was written.
+- The `is_local=True` search in `_fetch_remote_state()` was also Sentinel-driven. Blindly taking `instances[0]` was fragile; the fix makes aggregation order-independent.
+- Kael direct worked cleanly for this feature — all 5 tasks were well-scoped enough to run sequentially without subagent handoffs.
+- `asyncio.gather(..., return_exceptions=True)` + `httpx.AsyncClient(timeout=2.0)` gave exactly the bounded-fanout semantics SC-9 required, with no extra machinery.
+
 **What was friction**:
 
+- The `_build_state()` async migration required touching every existing test in `TestBuildStateEmptyCrew` individually (7 tests, each converted from `def` to `async def`). The `replace_all` edit tool helped, but the conversion still required care to avoid silent coroutine-object comparisons (the tests would pass vacuously if not properly awaited).
+- An early attempt to add `is_local` to the agent fields assertion produced a malformed test mid-T2. Reverted immediately and added a clean separate test instead — but the attempt created a moment of test-state confusion.
+
 **Improvements**:
+
+- When migrating a sync test class to async, do a single targeted conversion pass before writing any new tests in that class. Don't interleave conversion and addition.
+- Pre-Phase-3: for any feature touching async lifecycle methods, enumerate all test files that call those methods and note which need async migration. Prevents mid-implementation surprises.
 
 **Workflow updates made**:
 - [ ] TEMPLATE.md or SKILL.md updated
 - [ ] Project knowledge base updated (`.claude/rules/`)
 - [ ] MEMORY.md updated (if cross-project insight)
-
-**Gate**: Feature verified, retrospective captured, workflow improved.
