@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from claude_crew.auth import validate_auth_or_exit
+from claude_crew.subagents._loader import _VALID_PERMISSION_MODES
 from claude_crew.broker import (
     LEAD_ID,
     Broker,
@@ -31,12 +32,10 @@ from claude_crew.envelope import Envelope, new_message_id
 # always cancel; FastMCP over stdio has no transport-level timeout.
 MAX_WAIT_SECONDS = 600.0
 
-# SDK PermissionMode literals — kept in sync with claude_agent_sdk.types.PermissionMode.
-# Validated at the MCP boundary (Feature #17 SC-4) so invalid strings fail loudly
-# at the protocol surface instead of traveling silently to the SDK options builder.
-_VALID_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
-)
+# Single source of truth for the valid PermissionMode set lives in
+# `claude_crew.subagents._loader` (used by both pack-load validation and
+# spawn_teammate MCP-boundary validation per Feature #17 SC-4). Importing
+# from there prevents the dual-constant drift sentinel M-1 flagged at merge.
 
 
 def _err(code: str, message: str) -> dict[str, Any]:
