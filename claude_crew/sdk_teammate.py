@@ -47,7 +47,7 @@ from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
 from claude_crew.subagents import load_default_pack
-from claude_crew.teammate import Teammate, _ToolUseEntry
+from claude_crew.teammate import Teammate, ToolEvent, _ToolUseEntry, _tool_events_maxlen
 from claude_crew.teammate_prompt import build_teammate_prompt
 
 if TYPE_CHECKING:
@@ -352,6 +352,11 @@ class SdkTeammate(Teammate):
         self._tool_uses: dict[str, Any] = {}
         self._recently_closed_tool_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_tool_completed: dict[str, Any] | None = None
+        # F19: completed tool-event deque (D-2). Populated by T2 hook append sites
+        # (_on_post_common, _close_open_tools); read by Broker.snapshot (T3).
+        self._completed_tool_events: collections.deque[ToolEvent] = collections.deque(
+            maxlen=_tool_events_maxlen()
+        )
 
         # F14: token/cost accumulation. Overwritten (not accumulated) per-turn-drain
         # from ResultMessage (D-1, D-2). Initialized to zero; reset on respawn (D-11).
