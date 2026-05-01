@@ -2543,6 +2543,29 @@ class TestF19CompletedToolEventsAppend:
         # Deque stays empty even though the orphan_post JSONL line was written.
         assert len(teammate._completed_tool_events) == 0
 
+    async def test_completed_tool_events_appended_on_post_interrupted(
+        self, broker, monkeypatch
+    ) -> None:
+        """Sentinel DEFER-2: is_interrupt routes through _on_post_common with outcome='interrupted'."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        await teammate._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_input": {"command": "sleep 60"}},
+            "tu-int", {},
+        )
+        await teammate._on_post_tool_use_failure(
+            {"agent_id": None, "tool_name": "Bash", "is_interrupt": True, "error": "user stop"},
+            "tu-int", {},
+        )
+
+        assert len(teammate._completed_tool_events) == 1
+        ev = teammate._completed_tool_events[0]
+        assert ev.outcome == "interrupted"
+        assert ev.error_summary is not None
+
     async def test_completed_tool_events_appended_when_transcript_disabled(
         self, broker, monkeypatch
     ) -> None:

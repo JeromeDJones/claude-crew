@@ -26,6 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from claude_crew.broker import Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
+from claude_crew.teammate import ToolEvent
 
 _logger = logging.getLogger(__name__)
 
@@ -82,6 +83,23 @@ def _detect_branch(cwd: str) -> str | None:
         return None
     branch = result.stdout.strip()
     return branch or None  # empty = detached HEAD → fail
+
+
+def _format_tool_event_body(ev: ToolEvent) -> str:
+    """Render a ToolEvent for the dashboard stream (F19 D-9).
+
+    Format: ``"<tool_name> (<outcome>, <duration>s)"`` with optional
+    ``" — <args_summary>"`` and ``" [<error_summary>]"`` suffixes when populated.
+    The typed ToolEvent fields stay available on the broker snapshot for any
+    future structured view; this string is purely for the operator-readable
+    dashboard column.
+    """
+    base = f"{ev.tool_name} ({ev.outcome}, {ev.duration_seconds:.2f}s)"
+    if ev.args_summary:
+        base += f" — {ev.args_summary}"
+    if ev.error_summary:
+        base += f" [{ev.error_summary}]"
+    return base
 
 
 def _unreachable_instance(crew_id: str) -> dict[str, Any]:
@@ -200,7 +218,10 @@ class UIServer:
                 total_in += int(info.total_input_tokens_at_death or 0)
                 total_out += int(info.total_output_tokens_at_death or 0)
 
-        messages: list[dict[str, Any]] = []
+        # F19 D-8 + sentinel D1: build messages as (float_ts, record) tuples so we
+        # sort on the RAW wallclock — _ts() truncates to whole seconds, sorting on
+        # the formatted string would be lossy within the same second.
+        merged: list[tuple[float, dict[str, Any]]] = []
         for env in snapshot.log:
             payload = env.payload
             if isinstance(payload, dict) and payload.get("error"):
@@ -211,13 +232,30 @@ class UIServer:
                 body = payload["text"]
             else:
                 body = json.dumps(payload)
-            messages.append({
+            merged.append((env.timestamp, {
                 "t": _ts(env.timestamp),
                 "from": env.sender,
                 "to": env.recipient,
                 "kind": "msg",
                 "body": str(body)[:10000],
-            })
+            }))
+
+        # F19 D-8: merge tool events as kind="tool" entries. Filter Task at this
+        # render step (Q2 revised) — preserve in snapshot.tool_events for any
+        # future view, hide from operator dashboard to avoid double-rendering #7.
+        for ev in snapshot.tool_events:
+            if ev.tool_name == "Task":
+                continue
+            merged.append((ev.finished_at_wallclock, {
+                "t": _ts(ev.finished_at_wallclock),
+                "from": ev.teammate_id,
+                "to": None,
+                "kind": "tool",
+                "body": _format_tool_event_body(ev),
+            }))
+
+        merged.sort(key=lambda pair: pair[0])  # stable, raw-float ordering
+        messages: list[dict[str, Any]] = [rec for _, rec in merged]
 
         spawn_times = [info.spawned_at for info in snapshot.teammates]
         crew_uptime = int(now - min(spawn_times)) if spawn_times else 0
