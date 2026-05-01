@@ -175,3 +175,52 @@ class TestStubActivityStamping:
         final_snap = teammate.status_snapshot()
         assert final_snap["current_turn_started_at_wallclock"] is None, \
             "Should clear current_turn_started_at after slow echo completes"
+
+    async def test_stub_status_snapshot_has_token_cost_zero_fields(
+        self, broker: Broker
+    ) -> None:
+        """SC-7: StubTeammate status_snapshot returns the three F14 fields with zero values."""
+        tid = await broker.spawn_teammate(role="counter", name=None, factory=_stub_factory)
+        teammate = broker._teammates[tid]
+
+        snap = teammate.status_snapshot()
+
+        assert "total_input_tokens" in snap, "total_input_tokens must be present in snapshot"
+        assert "total_output_tokens" in snap, "total_output_tokens must be present in snapshot"
+        assert "total_cost_usd" in snap, "total_cost_usd must be present in snapshot"
+
+        assert isinstance(snap["total_input_tokens"], int), (
+            f"total_input_tokens must be int, got {type(snap['total_input_tokens'])}"
+        )
+        assert isinstance(snap["total_output_tokens"], int), (
+            f"total_output_tokens must be int, got {type(snap['total_output_tokens'])}"
+        )
+        assert isinstance(snap["total_cost_usd"], float), (
+            f"total_cost_usd must be float, got {type(snap['total_cost_usd'])}"
+        )
+
+        assert snap["total_input_tokens"] == 0
+        assert snap["total_output_tokens"] == 0
+        assert snap["total_cost_usd"] == 0.0
+
+    async def test_no_existing_snapshot_keys_renamed_or_removed(
+        self, broker: Broker
+    ) -> None:
+        """SC-10: All pre-F14 snapshot keys are still present after the additive change."""
+        pre_feature_keys = [
+            "last_activity_at_wallclock",
+            "current_turn_started_at_wallclock",
+            "idle_seconds",
+            "current_tools",
+            "current_tool",
+            "current_tool_count",
+            "last_tool_completed",
+            "redaction_version",
+        ]
+        tid = await broker.spawn_teammate(role="keycheck", name=None, factory=_stub_factory)
+        teammate = broker._teammates[tid]
+
+        snap = teammate.status_snapshot()
+
+        for key in pre_feature_keys:
+            assert key in snap, f"Pre-feature key '{key}' was removed or renamed — SC-10 violation"

@@ -203,6 +203,10 @@ class Teammate(ABC):
             "current_tool_count": len(current_tools),
             "last_tool_completed": self._last_tool_completed,
             "redaction_version": _get_redaction_version(),
+            # F14 token/cost telemetry (SC-7 — zero baseline; SdkTeammate overrides).
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cost_usd": 0.0,
         }
 
 
