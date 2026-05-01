@@ -1343,3 +1343,45 @@ class TestF22TombstoneRace:
                 assert a.get("oldest_in_flight") is None or a["id"] != tid
         finally:
             await broker.shutdown_all()
+
+
+# ── F22 T3: Dashboard HTML sanity ────────────────────────────────────────────
+
+class TestF22DashboardHtml:
+    """T3: assert the rendering elements (CSS classes, JS hooks) are present in
+    the served dashboard HTML. JSON-shape tests do not exercise the browser; this
+    test prevents accidental deletion of the badge classes during future edits.
+    Per A-1, full visual verification is manual."""
+
+    @pytest.fixture
+    def html(self):
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        return ui._get_html()
+
+    def test_accent_bar_class_present(self, html):
+        assert "agent-column-accent" in html
+
+    def test_tool_chip_class_present(self, html):
+        assert "tool-chip" in html
+
+    def test_tool_chip_row_class_present(self, html):
+        assert "tool-chip-row" in html
+
+    def test_settle_frame_class_present(self, html):
+        assert "settled" in html
+
+    def test_uses_performance_now_for_elapsed(self, html):
+        """D-5: the elapsed-display code path MUST use performance.now() (monotonic)
+        and NOT Date.now() (wall-clock)."""
+        assert "performance.now()" in html
+        assert "computeElapsedSeconds" in html
+
+    def test_setinterval_not_requestanimationframe(self, html):
+        """D-5: the 1Hz tick driver MUST be setInterval, not requestAnimationFrame."""
+        assert "useTick1s" in html
+        assert "setInterval" in html
+
+    def test_pulse_keyframe_still_present(self, html):
+        """SC-10: do not break existing #19/#8 pulse-animation usage."""
+        assert "@keyframes pulse" in html
