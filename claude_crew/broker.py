@@ -64,7 +64,7 @@ class TeammateInfo:
     # alive=False) and step 8c — snapshot contributes zero events from this
     # teammate during that window (E-3, intentional). Empty tuple is a possible
     # final value (teammate ran no tools before death).
-    tool_events_at_death: "tuple[Any, ...] | None" = None
+    tool_events_at_death: "tuple[ToolEvent, ...] | None" = None
 
 
 @dataclass(frozen=True)
