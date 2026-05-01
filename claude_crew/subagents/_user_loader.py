@@ -40,8 +40,6 @@ __all__ = [
     "load_project_agents",
     "load_user_agents",
     "strict_parse",
-    "_discover_skill_names",
-    "_warn_unknown_skills",
 ]
 
 

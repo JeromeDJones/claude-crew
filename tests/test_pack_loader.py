@@ -223,14 +223,19 @@ class TestSkillsSettingSourcesConflict:
         text = _pack_text("skills: [foo]\nsettingSources: []")
         with pytest.raises(PackLoadError) as exc:
             parse_pack_text(text, tmp_path / "agent.md")
-        msg = str(exc.value).lower()
-        assert "contradict" in msg or "conflict" in msg
+        msg = str(exc.value)
+        # Pin to the specific SC-3 code path: must mention both settingSources
+        # and the contradiction, not a coincidental other error.
+        assert "contradictory" in msg
+        assert "settingSources" in msg
 
     def test_skills_all_with_explicit_empty_settingsources_raises(self, tmp_path: Path) -> None:
         text = _pack_text("skills: all\nsettingSources: []")
         with pytest.raises(PackLoadError) as exc:
             parse_pack_text(text, tmp_path / "agent.md")
-        assert "contradict" in str(exc.value).lower() or "conflict" in str(exc.value).lower()
+        msg = str(exc.value)
+        assert "contradictory" in msg
+        assert "settingSources" in msg
 
     def test_empty_skills_with_empty_settingsources_accepted(self, tmp_path: Path) -> None:
         """skills:[] + settingSources:[] is consistent (no-op + no-source)."""
