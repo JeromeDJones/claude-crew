@@ -62,6 +62,11 @@ When you need to read files, run searches, or do bounded "go look at this
 and report" work, dispatch a subagent rather than reading directly. Reserve
 your context for synthesis and judgment.
 
+If the read's content will appear in your response (a quoted line, a cited
+path, a small file you are showing the lead), read it yourself. If the
+read is research that informs your synthesis but won't appear verbatim,
+delegate.
+
 {explorer_hint}
 """
 
