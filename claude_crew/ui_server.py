@@ -22,7 +22,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from claude_crew.broker import Broker
+from claude_crew.broker import Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
 
 _logger = logging.getLogger(__name__)
@@ -100,26 +100,30 @@ class UIServer:
                 "</body></html>"
             )
 
-    def _build_local_instance(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Build the local broker's instance dict and transcript list."""
-        broker = self._broker
+    def _build_local_instance(
+        self, snapshot: BrokerSnapshot
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Build the local broker's instance dict and transcript list FROM A SNAPSHOT.
+
+        Production-path SC-2: reads zero broker or teammate private attrs.
+        Function-input decoupling (D-11 / SC-10): accepts a BrokerSnapshot so tests
+        can call this with synthetic data and no live Broker.
+        """
         now = time.time()
+
+        # Build a lookup from teammate id → LiveTeammateInfo for alive entries.
+        live_by_id = {entry.info.id: entry for entry in snapshot.live}
 
         agents: list[dict[str, Any]] = []
         total_cost = 0.0
         total_in = 0
         total_out = 0
-        for info in broker._info.values():
+        for info in snapshot.teammates:
             if info.alive:
-                teammate = broker._teammates.get(info.id)
-                snap: dict[str, Any] = {}
-                if teammate is not None:
-                    try:
-                        snap = teammate.status_snapshot()
-                    except Exception:
-                        pass
+                live_entry = live_by_id.get(info.id)
+                snap: dict[str, Any] = live_entry.status if live_entry is not None else {}
+                model_raw = live_entry.model if live_entry is not None else None
 
-                model_raw = getattr(teammate, "_model", None) if teammate else None
                 status = _derive_status(snap)
                 last_activity = snap.get("last_activity_at_wallclock")
 
@@ -155,7 +159,7 @@ class UIServer:
                 total_out += int(info.total_output_tokens_at_death or 0)
 
         messages: list[dict[str, Any]] = []
-        for env in broker._log[-200:]:
+        for env in snapshot.log:
             payload = env.payload
             if isinstance(payload, dict) and payload.get("error"):
                 continue
@@ -173,13 +177,13 @@ class UIServer:
                 "body": str(body)[:2000],
             })
 
-        spawn_times = [info.spawned_at for info in broker._info.values()]
+        spawn_times = [info.spawned_at for info in snapshot.teammates]
         crew_uptime = int(now - min(spawn_times)) if spawn_times else 0
 
         instance: dict[str, Any] = {
-            "id": broker.crew_id,
+            "id": snapshot.crew_id,
             "is_local": True,
-            "label": f"crew-{broker.crew_id}",
+            "label": f"crew-{snapshot.crew_id}",
             "cwd": "~",
             "branch": "main",
             "uptime": crew_uptime,
@@ -224,16 +228,17 @@ class UIServer:
             return None
 
     async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
-        local_instance, local_messages = self._build_local_instance()
+        snapshot = self._broker.snapshot(log_limit=200)
+        local_instance, local_messages = self._build_local_instance(snapshot)
         instances: list[dict[str, Any]] = [local_instance]
-        transcripts: dict[str, list] = {self._broker.crew_id: local_messages}
+        transcripts: dict[str, list] = {snapshot.crew_id: local_messages}
 
         if local_only or self._registry is None:
             return {"instances": instances, "transcripts": transcripts}
 
         remote_entries = [
             e for e in self._registry.read_all()
-            if e.get("crew_id") != self._broker.crew_id
+            if e.get("crew_id") != snapshot.crew_id
         ]
         if remote_entries:
             results = await asyncio.gather(

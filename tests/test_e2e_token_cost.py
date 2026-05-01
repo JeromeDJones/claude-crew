@@ -132,7 +132,7 @@ async def test_e2e_token_cost_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 
         # ── Assert pre-kill state ────────────────────────────────────────────
         ui = UIServer(broker, port=0)
-        instance, _ = ui._build_local_instance()
+        instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
 
         assert abs(instance["cost"] - 1.15) < 1e-9, (
             f"expected instance cost=1.15 (A=0.40 + B=0.75), got {instance['cost']}"
@@ -152,7 +152,7 @@ async def test_e2e_token_cost_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         # ── Kill A, re-build state ───────────────────────────────────────────
         await broker.kill_teammate(tid_a)
 
-        instance2, _ = ui._build_local_instance()
+        instance2, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
 
         # SC-3: tombstone preserves A's $0.40 in the instance aggregate.
         assert abs(instance2["cost"] - 1.15) < 1e-9, (
@@ -263,7 +263,7 @@ async def test_e2e_malformed_midstream_does_not_corrupt_totals(
 
         # E2E: dashboard also reflects the correct totals.
         ui = UIServer(broker, port=0)
-        instance, _ = ui._build_local_instance()
+        instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
         assert abs(instance["cost"] - 0.50) < 1e-9, (
             f"dashboard instance cost should be 0.50; got {instance['cost']}"
         )

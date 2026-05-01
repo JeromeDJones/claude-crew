@@ -426,7 +426,7 @@ class TestBuildStateTokenCost:
             await self._wait_for_lead(broker, 1)
 
             ui = UIServer(broker, port=0)
-            instance, _ = ui._build_local_instance()
+            instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
 
             assert len(instance["agents"]) == 1
             agent = instance["agents"][0]
@@ -485,7 +485,7 @@ class TestBuildStateTokenCost:
             await broker.kill_teammate(tid_b)
 
             ui = UIServer(broker, port=0)
-            instance, _ = ui._build_local_instance()
+            instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
 
             # Agents array: only A (alive), B excluded (D-10)
             agent_ids = [a["id"] for a in instance["agents"]]
@@ -548,7 +548,7 @@ class TestBuildStateTokenCost:
             await self._wait_for_lead(broker, 2)
 
             ui = UIServer(broker, port=0)
-            instance, _ = ui._build_local_instance()
+            instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
 
             # Only the alive instance in agents array
             assert len(instance["agents"]) == 1
@@ -564,7 +564,7 @@ class TestBuildStateTokenCost:
     async def test_empty_crew_aggregate_is_zero(self):
         broker = Broker()
         ui = UIServer(broker, port=0)
-        instance, _ = ui._build_local_instance()
+        instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
         assert instance["cost"] == 0.0
         assert instance["tokens"] == {"in": 0, "out": 0}
 
@@ -645,3 +645,167 @@ class TestBindUiSocket:
         finally:
             sock_a.close()
             sock_b.close()
+
+
+# ── T2: BrokerSnapshot decoupling ────────────────────────────────────────────
+
+class TestUIServerBrokerDecoupling:
+    """SC-2, SC-10: _build_local_instance accepts a BrokerSnapshot, reads no private attrs."""
+
+    def _make_snapshot(
+        self,
+        *,
+        crew_id: str = "crew-test",
+        alive_cost: float = 0.0,
+        alive_in: int = 0,
+        alive_out: int = 0,
+        dead_cost: float = 0.0,
+        dead_in: int = 0,
+        dead_out: int = 0,
+        log_count: int = 0,
+    ):
+        """Build a hand-rolled BrokerSnapshot for use without a live Broker."""
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, LiveTeammateInfo, TeammateInfo
+        from claude_crew.envelope import Envelope, new_message_id
+
+        now = _time.time()
+        info_alive = TeammateInfo(
+            id="t-1", name="alice", role="builder",
+            spawned_at=now - 100, alive=True,
+        )
+        info_dead = TeammateInfo(
+            id="t-2", name="bob", role="reviewer",
+            spawned_at=now - 200, alive=False,
+            total_cost_usd_at_death=dead_cost,
+            total_input_tokens_at_death=dead_in,
+            total_output_tokens_at_death=dead_out,
+        )
+        live_entry = LiveTeammateInfo(
+            info=info_alive,
+            status={
+                "current_tool_count": 0,
+                "current_turn_started_at_wallclock": None,
+                "total_input_tokens": alive_in,
+                "total_output_tokens": alive_out,
+                "total_cost_usd": alive_cost,
+                "current_tools": [],
+                "current_tool": None,
+                "last_activity_at_wallclock": None,
+            },
+            model="claude-sonnet-4-6",
+        )
+        log_entries = tuple(
+            Envelope(
+                id=new_message_id(), seq=i, sender="lead",
+                recipient="t-1", timestamp=now,
+                payload=f"msg-{i}",
+            )
+            for i in range(log_count)
+        )
+        return BrokerSnapshot(
+            crew_id=crew_id,
+            teammates=(info_alive, info_dead),
+            live=(live_entry,),
+            log=log_entries,
+        )
+
+    def test_build_state_from_synthetic_snapshot(self):
+        """SC-10: _build_local_instance works with a synthetic snapshot and no live broker."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+
+        snap = self._make_snapshot(
+            crew_id="crew-test",
+            alive_cost=0.25,
+            alive_in=100,
+            alive_out=50,
+            dead_cost=0.10,
+            dead_in=10,
+            dead_out=5,
+            log_count=5,
+        )
+
+        instance, messages = ui._build_local_instance(snap)
+
+        # Alive teammate in agents array; dead excluded (D-10)
+        assert len(instance["agents"]) == 1
+        assert instance["agents"][0]["id"] == "t-1"
+        assert instance["agents"][0]["cost"] == 0.25
+        assert instance["agents"][0]["tokens"] == {"in": 100, "out": 50}
+
+        # Instance-level aggregate: alive + dead (F14 preserved)
+        assert abs(instance["cost"] - 0.35) < 1e-9, f"expected 0.35, got {instance['cost']}"
+        assert instance["tokens"] == {"in": 110, "out": 55}
+
+        # crew_id sourced from snapshot, not self._broker
+        assert instance["id"] == "crew-test"
+
+        # 5 plain-text envelopes → 5 messages
+        assert len(messages) == 5
+
+    def test_ui_server_no_broker_private_attr_reads_in_production(self):
+        """SC-2: production paths in ui_server.py read zero broker/teammate private attrs.
+
+        The regex `(broker|teammate)\\._\\w+` matches patterns like `broker._info`,
+        `teammate._model`, etc. It does NOT match `self._broker` because `self._broker`
+        contains no `.<underscore>` sequence on a broker/teammate variable.
+        Comment lines are excluded from the check.
+        """
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).parent.parent
+        ui_path = repo_root / "claude_crew" / "ui_server.py"
+
+        result = subprocess.run(
+            ["grep", "-En", r"(broker|teammate)\._\w+", str(ui_path)],
+            capture_output=True, text=True,
+        )
+        # Filter out comment lines (grep returns the line content after "lineno:")
+        production_matches = [
+            line for line in result.stdout.splitlines()
+            if line.strip() and not line.split(":", 2)[-1].lstrip().startswith("#")
+        ]
+        assert production_matches == [], (
+            f"Found private-attr reads on broker/teammate in ui_server.py:\n"
+            + "\n".join(production_matches)
+        )
+
+        # Also verify crew_id not accessed directly on broker (must come from snapshot)
+        result2 = subprocess.run(
+            ["grep", "-En", r"broker\.crew_id", str(ui_path)],
+            capture_output=True, text=True,
+        )
+        crew_id_matches = [
+            line for line in result2.stdout.splitlines()
+            if line.strip() and not line.split(":", 2)[-1].lstrip().startswith("#")
+        ]
+        assert crew_id_matches == [], (
+            f"Found broker.crew_id reads in ui_server.py:\n"
+            + "\n".join(crew_id_matches)
+        )
+
+    async def test_dashboard_payload_shape_unchanged_post_refactor(self):
+        """Regression guard: top-level key set of dashboard payload is preserved after T2 refactor."""
+        from claude_crew.broker import Broker
+
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+
+        state = await ui._build_state()
+
+        # Top-level keys
+        assert set(state.keys()) >= {"instances", "transcripts"}
+        assert isinstance(state["instances"], list)
+        assert isinstance(state["transcripts"], dict)
+
+        # Local instance key shape
+        instance = state["instances"][0]
+        required_instance_keys = {
+            "id", "is_local", "label", "cwd", "branch",
+            "uptime", "status", "cost", "tokens", "agents",
+        }
+        assert required_instance_keys <= set(instance.keys()), (
+            f"Missing instance keys: {required_instance_keys - set(instance.keys())}"
+        )
