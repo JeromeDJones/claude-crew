@@ -189,6 +189,37 @@ class TestPeerList:
         assert "- **beta**" in result
         assert "—" not in result, "Non-string description must be treated as missing"
 
+    def test_peer_list_includes_tools_sub_bullet(self, default_pack_agents) -> None:
+        """Each peer entry lists its tool surface as an indented sub-bullet.
+
+        Surfacing tools to the parent prevents mis-routing tasks to subagents
+        that lack the required tool (BACKLOG 2026-05-01: parent dispatched a
+        Bash task to general-purpose, which has no Bash, and the subagent
+        fabricated). The sub-bullet alone doesn't enforce routing — that's a
+        separate hook-based fix — but it gives the parent the data to route
+        correctly and the operator a way to see what each peer can do.
+        """
+        result = _build_peer_list("nonexistent-role", default_pack_agents)
+        gp_tools = ", ".join(default_pack_agents["general-purpose"].tools)
+        assert f"  - tools: {gp_tools}" in result, (
+            f"general-purpose peer entry missing tools sub-bullet. Got:\n{result}"
+        )
+        explorer_tools = ", ".join(default_pack_agents["explorer"].tools)
+        assert f"  - tools: {explorer_tools}" in result, (
+            f"explorer peer entry missing tools sub-bullet. Got:\n{result}"
+        )
+
+    def test_peer_list_omits_tools_sub_bullet_when_tools_missing(self) -> None:
+        """Malformed user packs without a tools attribute fall back to
+        name-and-description-only, no sub-bullet, no crash."""
+        ns = types.SimpleNamespace(description="thing", tools=None)
+        fake_agents: dict[str, Any] = {"gamma": ns}
+        result = _build_peer_list("nonexistent-role", fake_agents)
+        assert "- **gamma** — thing" in result
+        assert "tools:" not in result, (
+            f"tools sub-bullet rendered despite tools=None: {result!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # EC-11 / R-7  Explorer hint
