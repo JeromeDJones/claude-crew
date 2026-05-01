@@ -36,6 +36,7 @@ from claude_agent_sdk.types import (
     AssistantMessage,
     HookMatcher,
     RateLimitEvent,
+    ResultMessage,
     TaskNotificationMessage,
     TextBlock,
 )
@@ -123,10 +124,21 @@ class TurnDrainResult:
         {"failed","stopped"} observed this turn, in arrival order. Used by
         SC-8(a) to synthesize an envelope when the parent didn't narrate
         over the failure. Empty list means no failures observed.
+    cumulative_input_tokens: session-cumulative input tokens from terminal
+        ResultMessage (includes cache tokens per D-3). None if no valid
+        ResultMessage was observed (interrupted, malformed, etc.).
+    cumulative_output_tokens: session-cumulative output tokens from terminal
+        ResultMessage. None under same conditions as cumulative_input_tokens.
+    cumulative_cost_usd: session-cumulative cost from ResultMessage.total_cost_usd.
+        None if ResultMessage was absent or total_cost_usd was None/malformed.
     """
 
     text: str
     failed_task_notifs: list[TaskNotificationMessage]
+    # D-8: None = no valid ResultMessage observed; caller skips assignment.
+    cumulative_input_tokens: int | None = None
+    cumulative_output_tokens: int | None = None
+    cumulative_cost_usd: float | None = None
 
 
 async def _collect_response_text(
@@ -150,8 +162,69 @@ async def _collect_response_text(
 
     The caller must wrap this in asyncio.wait_for to bound non-termination.
     """
+    def _extract_token_cost_from_rm(
+        rm: ResultMessage,
+    ) -> tuple[int | None, int | None, float | None]:
+        """Extract (total_input, total_output, cost_usd) from a ResultMessage.
+
+        D-1: ResultMessage is the single source; AssistantMessage.usage is never read.
+        D-3: total_input includes cache_read_input_tokens + cache_creation_input_tokens.
+        D-8: returns (None, None, None) on malformed/absent data; logs WARNING
+             with the offending dict's KEYS (not values) to avoid leaking content.
+        """
+        usage = rm.usage
+        cost = rm.total_cost_usd
+
+        # Both absent: nothing to extract.
+        if usage is None and cost is None:
+            return (None, None, None)
+
+        total_input: int | None = None
+        total_output: int | None = None
+        cost_usd: float | None = None
+
+        if usage is not None:
+            if not isinstance(usage, dict):
+                logger.warning(
+                    "_collect_response_text: ResultMessage.usage is not a dict "
+                    "(type=%s); leaving token totals unchanged",
+                    type(usage).__name__,
+                )
+                # cost may still be valid — fall through
+            else:
+                try:
+                    total_input = int(
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                    )
+                    total_output = int(usage.get("output_tokens", 0))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "_collect_response_text: malformed ResultMessage.usage values "
+                        "(keys=%s); leaving token totals unchanged",
+                        list(usage.keys()),
+                    )
+                    total_input = None
+                    total_output = None
+
+        if cost is not None:
+            try:
+                cost_usd = float(cost)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "_collect_response_text: ResultMessage.total_cost_usd is not "
+                    "convertible to float (type=%s); leaving cost unchanged",
+                    type(cost).__name__,
+                )
+
+        return (total_input, total_output, cost_usd)
+
     text_parts: list[str] = []
     failed_task_notifs: list[TaskNotificationMessage] = []
+    cumulative_input_tokens: int | None = None
+    cumulative_output_tokens: int | None = None
+    cumulative_cost_usd: float | None = None
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
         # event type (including RateLimitEvent, TaskNotificationMessage)
@@ -166,6 +239,17 @@ async def _collect_response_text(
             status = getattr(info, "status", None)
             if status == "rejected":
                 raise RateLimitedError(f"rate limit hit: {info}")
+            continue
+        if isinstance(msg, ResultMessage):
+            # D-1: single source for cost AND tokens — read from ResultMessage only.
+            # D-2/D-6: multiple ResultMessages → last wins (overwrite semantics).
+            ri, ro, rc = _extract_token_cost_from_rm(msg)
+            if ri is not None:
+                cumulative_input_tokens = ri
+            if ro is not None:
+                cumulative_output_tokens = ro
+            if rc is not None:
+                cumulative_cost_usd = rc
             continue
         if isinstance(msg, TaskNotificationMessage):
             # Fire callback for ALL statuses (completed/failed/stopped) so
@@ -184,7 +268,13 @@ async def _collect_response_text(
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
-    return TurnDrainResult(text="".join(text_parts), failed_task_notifs=failed_task_notifs)
+    return TurnDrainResult(
+        text="".join(text_parts),
+        failed_task_notifs=failed_task_notifs,
+        cumulative_input_tokens=cumulative_input_tokens,
+        cumulative_output_tokens=cumulative_output_tokens,
+        cumulative_cost_usd=cumulative_cost_usd,
+    )
 
 
 def _default_system_prompt(role: str) -> str:
@@ -237,6 +327,12 @@ class SdkTeammate(Teammate):
         self._tool_uses: dict[str, Any] = {}
         self._recently_closed_tool_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_tool_completed: dict[str, Any] | None = None
+
+        # F14: token/cost accumulation. Overwritten (not accumulated) per-turn-drain
+        # from ResultMessage (D-1, D-2). Initialized to zero; reset on respawn (D-11).
+        self._total_input_tokens: int = 0
+        self._total_output_tokens: int = 0
+        self._total_cost_usd: float = 0.0
 
         # F7 subagent-tracking namespace (completely separate from F8 tool-tracking)
         self._subagent_uses: dict[str, _SubagentUseEntry] = {}
@@ -630,8 +726,16 @@ class SdkTeammate(Teammate):
             self._closed_subagent_scratch.clear()
 
     def status_snapshot(self) -> dict[str, Any]:
-        """Extend base status_snapshot with F7 subagent-activity fields."""
+        """Extend base status_snapshot with F7 subagent-activity and F14 token/cost fields."""
         snap = super().status_snapshot()
+        # F14: overwrite the base zero values with live accumulated totals (D-5).
+        # D-2: overwrite semantics — ResultMessage values are session-cumulative.
+        # D-4: atomic co-assignment — _run() is single-threaded; no await between
+        #      the three assignments in _handle_one_turn, so readers cannot observe
+        #      a torn state (tokens from turn N paired with cost from turn N-1).
+        snap["total_input_tokens"] = self._total_input_tokens
+        snap["total_output_tokens"] = self._total_output_tokens
+        snap["total_cost_usd"] = self._total_cost_usd
         # Build current_subagents from BOTH in-flight and limbo-state scratch entries (D10)
         subagent_entries = [
             {
@@ -863,6 +967,17 @@ class SdkTeammate(Teammate):
                     to=env.sender, code=_classify_error(exc), message=str(exc),
                 )
                 return
+            # F14: apply token/cost overwrite from this turn's ResultMessage.
+            # D-4: atomic co-assignment under single-threaded _run() — no awaits
+            #      between these three statements; readers cannot see a torn state.
+            # D-2: overwrite semantics — ResultMessage values are session-cumulative.
+            # D-8: only assign when not None (malformed/missing → unchanged).
+            if result.cumulative_input_tokens is not None:
+                self._total_input_tokens = result.cumulative_input_tokens
+            if result.cumulative_output_tokens is not None:
+                self._total_output_tokens = result.cumulative_output_tokens
+            if result.cumulative_cost_usd is not None:
+                self._total_cost_usd = result.cumulative_cost_usd
             # Success path: text/no-text/SC-8(a) subagent failure synthesis.
             text = result.text
             if not text:

@@ -6,6 +6,28 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-30] Feature: token-cost-telemetry (#14) follow-ups
+
+### SC-9 scientific-notation guard is fragile at sub-cent costs below ~1e-5
+- **What**: `total_cost_usd` is serialized via Python's default `json.dumps` float repr. Probe value `0.0001` renders as `"0.0001"` (safe). Costs below ~`1e-5` (e.g., `0.00001`) would render as `"1e-05"` (scientific notation), which the SC-9 contract forbids and which the dashboard JS may not parse cleanly.
+- **Where**: `claude_crew/ui_server.py` `_build_local_instance` per-agent `cost` field; instance summary `cost` field. No `format()` or rounding guard today.
+- **Why it matters**: Realistic per-turn costs for cached/short turns can drop into the sub-cent range. A single `1e-05` in JSON breaks the SC-9 contract silently — the dashboard wouldn't crash but the JSON payload would violate the spec.
+- **Suggested action**: Add `format(value, ".10f")` (or similar) at the serialization boundary in `_build_local_instance`. Trim trailing zeros if cosmetic. Trivial XS change; defer to a future polish pass or fold into #18 (broker snapshot + dashboard polish).
+
+### Tombstone race-path tests are F14-only; pre-F14 fields had the same gap
+- **What**: The `teammate is None` race in `_tombstone_teammate` (called after the teammate self-removed from `_teammates`) was untested before F14 — the F14 sentinel review found the gap because F14 made the path crashable rather than just incomplete. Pre-F14 fields in the `else` branch produced stale tombstones silently; F14 adds three uninitialized vars that turned silence into UnboundLocalError, which is what surfaced it.
+- **Where**: `claude_crew/broker.py:_tombstone_teammate` — the `else` branch when teammate is None.
+- **Why it matters**: The race is rare but reachable (teammate task self-cleanup before broker kill). Test `test_tombstone_when_teammate_already_removed_does_not_crash` (added 2026-04-30 in F14) covers F14's variant. Other branches may have similar latent issues if a future field is added without remembering this branch.
+- **Suggested action**: At each future addition of a new `_at_death` field, mechanically check both the `try`, `except AttributeError`, AND `else` branches initialize it. Consider a single helper `_extract_at_death_fields(teammate, snap_or_none) -> dict` that handles all three branches in one place — eliminates the trip-wire.
+
+### Spec D-4 wording was contradicted by D-8 until the F14 retro
+- **What**: D-4 stated "atomic co-assignment — a reader never sees tokens from turn N and cost from turn N-1" but D-8's per-field independence explicitly violates this for malformed ResultMessages. The spec was updated 2026-04-30 to acknowledge the override; would have been better to write D-4 with the override scope from the start.
+- **Where**: `doc/features/FEATURE-token-cost-telemetry.md` Phase 2 D-4.
+- **Why it matters**: Specs that contain internal contradictions confuse future readers and erode trust in the doc.
+- **Suggested action**: Pattern for future SDD specs — when two decisions interact (one constrains, one relaxes), call out the relationship explicitly in BOTH decisions, not just in retrospect.
+
+---
+
 ## [2026-04-30] Bug + Feature: multi-instance dashboard aggregation
 
 ### Dashboard only shows the local broker — other running instances invisible

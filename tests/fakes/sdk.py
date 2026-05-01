@@ -50,6 +50,51 @@ def text_response(text: str) -> list[Any]:
     ]
 
 
+def text_response_with_usage(
+    text: str,
+    *,
+    cumulative_input_tokens: int,
+    cumulative_output_tokens: int,
+    cumulative_cost_usd: float,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> list[Any]:
+    """text_response variant that scripts ResultMessage with cumulative usage/cost.
+
+    Tokens passed are the cumulative session totals as ResultMessage would
+    carry them. Cache tokens are included IN ResultMessage.usage — the
+    SdkTeammate's extraction logic sums them into total_input_tokens (D-3).
+    input_tokens in usage = cumulative_input_tokens - cache_read - cache_creation
+    so that the SdkTeammate's sum recovers the original cumulative value.
+    """
+    net_input = (
+        cumulative_input_tokens
+        - cache_read_input_tokens
+        - cache_creation_input_tokens
+    )
+    usage: dict[str, int] = {
+        "input_tokens": net_input,
+        "output_tokens": cumulative_output_tokens,
+    }
+    if cache_read_input_tokens:
+        usage["cache_read_input_tokens"] = cache_read_input_tokens
+    if cache_creation_input_tokens:
+        usage["cache_creation_input_tokens"] = cache_creation_input_tokens
+    return [
+        AssistantMessage(content=[TextBlock(text=text)], model="fake-model"),
+        ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=1,
+            session_id="fake",
+            total_cost_usd=cumulative_cost_usd,
+            usage=usage,
+        ),
+    ]
+
+
 def task_notification(
     *, status: str, summary: str | None,
     task_id: str = "task-fake",

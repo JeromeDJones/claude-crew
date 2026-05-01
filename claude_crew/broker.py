@@ -52,6 +52,11 @@ class TeammateInfo:
     # F7: subagent-activity snapshot at death.
     in_flight_subagents_at_death: int | None = None
     last_subagent_completed_at_death: dict[str, Any] | None = None
+    # F14: token/cost snapshot at death (numeric zero when snap available but no turns ran;
+    # None only if status_snapshot() raised — callers coerce None → 0 on the wire).
+    total_input_tokens_at_death: int | None = None
+    total_output_tokens_at_death: int | None = None
+    total_cost_usd_at_death: float | None = None
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -177,18 +182,29 @@ class Broker:
                     len(getattr(teammate, "_subagent_uses", {})) +
                     len(getattr(teammate, "_closed_subagent_scratch", {}))
                 )
+                # F14: capture last cumulative token/cost values (D-7: numeric zero
+                # when no turns ran; overwrite semantics mean final value == cumulative).
+                total_input_tokens_at_death: int = snap.get("total_input_tokens", 0)
+                total_output_tokens_at_death: int = snap.get("total_output_tokens", 0)
+                total_cost_usd_at_death: float = snap.get("total_cost_usd", 0.0)
             except AttributeError:
                 last_activity = None
                 idle_at_death = None
                 last_tool_completed_at_death = None
                 last_subagent_completed_at_death = None
                 in_flight_subagents_at_death = 0
+                total_input_tokens_at_death = None
+                total_output_tokens_at_death = None
+                total_cost_usd_at_death = None
         else:
             last_activity = None
             idle_at_death = None
             last_tool_completed_at_death = None
             last_subagent_completed_at_death = None
             in_flight_subagents_at_death = 0
+            total_input_tokens_at_death = None
+            total_output_tokens_at_death = None
+            total_cost_usd_at_death = None
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(
@@ -201,6 +217,9 @@ class Broker:
             last_tool_completed_at_death=last_tool_completed_at_death,
             in_flight_subagents_at_death=in_flight_subagents_at_death,
             last_subagent_completed_at_death=last_subagent_completed_at_death,
+            total_input_tokens_at_death=total_input_tokens_at_death,
+            total_output_tokens_at_death=total_output_tokens_at_death,
+            total_cost_usd_at_death=total_cost_usd_at_death,
         )
 
         # 6. Pop from active set
@@ -494,6 +513,10 @@ class Broker:
                 "current_subagents": [],
                 "last_subagent_completed": info.last_subagent_completed_at_death,
                 "in_flight_subagents_at_death": info.in_flight_subagents_at_death,
+                # F14: token/cost fields preserved from tombstone (always numeric on wire).
+                "total_input_tokens": info.total_input_tokens_at_death if info.total_input_tokens_at_death is not None else 0,
+                "total_output_tokens": info.total_output_tokens_at_death if info.total_output_tokens_at_death is not None else 0,
+                "total_cost_usd": info.total_cost_usd_at_death if info.total_cost_usd_at_death is not None else 0.0,
             }
 
         # Alive: combine TeammateInfo lifecycle fields with live activity snapshot
@@ -524,4 +547,8 @@ class Broker:
             "current_subagents": snap.get("current_subagents", []),
             "last_subagent_completed": snap.get("last_subagent_completed"),
             "in_flight_subagents_at_death": None,
+            # F14: token/cost fields from live snapshot (always numeric per T2 contract).
+            "total_input_tokens": snap.get("total_input_tokens", 0),
+            "total_output_tokens": snap.get("total_output_tokens", 0),
+            "total_cost_usd": snap.get("total_cost_usd", 0.0),
         }

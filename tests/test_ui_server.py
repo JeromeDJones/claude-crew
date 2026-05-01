@@ -357,6 +357,218 @@ class TestWebSocket:
         assert resp.status_code == 200
 
 
+class TestBuildStateTokenCost:
+    """T4 — token/cost wired from snap into dashboard payload."""
+
+    @pytest.fixture
+    def monkeypatch(self):
+        import pytest
+        mp = pytest.MonkeyPatch()
+        yield mp
+        mp.undo()
+
+    async def _spawn_sdk_teammate(self, broker, monkeypatch, scripted_responses):
+        from claude_crew import sdk_teammate as sdk_module
+        from claude_crew.sdk_teammate import SdkTeammate
+        from tests.fakes.sdk import FakeSDKClient
+
+        fake = FakeSDKClient(scripted_responses=scripted_responses)
+
+        def _ctor(options=None):
+            fake.options = options
+            return fake
+
+        monkeypatch.setattr(sdk_module, "ClaudeSDKClient", _ctor)
+
+        def _factory(id, name, role, **_kwargs):
+            return SdkTeammate(id=id, name=name, role=role)
+
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        return tid, fake
+
+    async def _wait_for_lead(self, broker, count, timeout=3.0):
+        import asyncio
+        from claude_crew.broker import LEAD_ID
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            if len(broker.get_messages(recipient=LEAD_ID)) >= count:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(
+            f"timed out waiting for {count} lead messages; "
+            f"got {len(broker.get_messages(recipient=LEAD_ID))}"
+        )
+
+    async def test_per_agent_cost_reads_from_snap(self, monkeypatch):
+        from claude_crew.broker import LEAD_ID, Broker
+        from claude_crew.envelope import Envelope, new_message_id
+        from tests.fakes.sdk import text_response_with_usage
+
+        broker = Broker()
+        try:
+            tid, fake = await self._spawn_sdk_teammate(
+                broker,
+                monkeypatch,
+                scripted_responses=[
+                    text_response_with_usage(
+                        "hello",
+                        cumulative_input_tokens=200,
+                        cumulative_output_tokens=100,
+                        cumulative_cost_usd=0.15,
+                    )
+                ],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload="hi",
+            ))
+            await self._wait_for_lead(broker, 1)
+
+            ui = UIServer(broker, port=0)
+            instance, _ = ui._build_local_instance()
+
+            assert len(instance["agents"]) == 1
+            agent = instance["agents"][0]
+            assert agent["cost"] == 0.15
+            assert agent["tokens"]["in"] == 200
+            assert agent["tokens"]["out"] == 100
+        finally:
+            await broker.shutdown_all()
+
+    async def test_instance_summary_includes_tombstoned_teammate_cost(self, monkeypatch):
+        from claude_crew.broker import LEAD_ID, Broker
+        from claude_crew.envelope import Envelope, new_message_id
+        from tests.fakes.sdk import text_response_with_usage
+
+        broker = Broker()
+        try:
+            tid_a, _ = await self._spawn_sdk_teammate(
+                broker,
+                monkeypatch,
+                scripted_responses=[
+                    text_response_with_usage(
+                        "a",
+                        cumulative_input_tokens=100,
+                        cumulative_output_tokens=50,
+                        cumulative_cost_usd=0.30,
+                    )
+                ],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid_a, timestamp=0.0,
+                payload="hi",
+            ))
+            await self._wait_for_lead(broker, 1)
+
+            tid_b, _ = await self._spawn_sdk_teammate(
+                broker,
+                monkeypatch,
+                scripted_responses=[
+                    text_response_with_usage(
+                        "b",
+                        cumulative_input_tokens=200,
+                        cumulative_output_tokens=80,
+                        cumulative_cost_usd=1.20,
+                    )
+                ],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=1,
+                sender=LEAD_ID, recipient=tid_b, timestamp=0.0,
+                payload="hi",
+            ))
+            await self._wait_for_lead(broker, 2)
+
+            # Kill B — it should contribute via tombstone
+            await broker.kill_teammate(tid_b)
+
+            ui = UIServer(broker, port=0)
+            instance, _ = ui._build_local_instance()
+
+            # Agents array: only A (alive), B excluded (D-10)
+            agent_ids = [a["id"] for a in instance["agents"]]
+            assert tid_b not in agent_ids
+            assert len(instance["agents"]) == 1
+
+            # Instance aggregate: A ($0.30) + B tombstone ($1.20) = $1.50
+            assert abs(instance["cost"] - 1.50) < 1e-9, (
+                f"expected 1.50, got {instance['cost']}"
+            )
+        finally:
+            await broker.shutdown_all()
+
+    async def test_respawn_with_tombstone_present_aggregates_both(self, monkeypatch):
+        from claude_crew.broker import LEAD_ID, Broker
+        from claude_crew.envelope import Envelope, new_message_id
+        from tests.fakes.sdk import text_response_with_usage
+
+        broker = Broker()
+        try:
+            # First instance: $1.20, then killed
+            tid1, _ = await self._spawn_sdk_teammate(
+                broker,
+                monkeypatch,
+                scripted_responses=[
+                    text_response_with_usage(
+                        "first",
+                        cumulative_input_tokens=300,
+                        cumulative_output_tokens=100,
+                        cumulative_cost_usd=1.20,
+                    )
+                ],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid1, timestamp=0.0,
+                payload="hi",
+            ))
+            await self._wait_for_lead(broker, 1)
+            await broker.kill_teammate(tid1)
+
+            # Second instance (different UUID, same role): $0.05
+            tid2, _ = await self._spawn_sdk_teammate(
+                broker,
+                monkeypatch,
+                scripted_responses=[
+                    text_response_with_usage(
+                        "second",
+                        cumulative_input_tokens=50,
+                        cumulative_output_tokens=20,
+                        cumulative_cost_usd=0.05,
+                    )
+                ],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=1,
+                sender=LEAD_ID, recipient=tid2, timestamp=0.0,
+                payload="hi",
+            ))
+            await self._wait_for_lead(broker, 2)
+
+            ui = UIServer(broker, port=0)
+            instance, _ = ui._build_local_instance()
+
+            # Only the alive instance in agents array
+            assert len(instance["agents"]) == 1
+            assert instance["agents"][0]["id"] == tid2
+
+            # Aggregate: tombstone $1.20 + alive $0.05 = $1.25
+            assert abs(instance["cost"] - 1.25) < 1e-9, (
+                f"expected 1.25, got {instance['cost']}"
+            )
+        finally:
+            await broker.shutdown_all()
+
+    async def test_empty_crew_aggregate_is_zero(self):
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance()
+        assert instance["cost"] == 0.0
+        assert instance["tokens"] == {"in": 0, "out": 0}
+
+
 class TestBindUiSocket:
     """Tests for _bind_ui_socket — the race-free port reservation helper."""
 
