@@ -167,6 +167,40 @@ style violations, and architectural concerns. Be direct and specific.
 
 Roles are loaded once at MCP startup and frozen for the session.
 
+### Skills
+
+Roles can declare access to user/project skills (`~/.claude/skills/<name>/SKILL.md` and `<project>/.claude/skills/<name>/SKILL.md`) — the same skills the lead Claude Code session invokes via `/<skill-name>`. The bundled `general-purpose` role declares `skills: all` by default, so spawned `general-purpose` teammates have parity-of-invocation with the lead. Other bundled roles (`explorer`, `planner`) declare no skills to keep their context light.
+
+To declare skills on a custom role:
+
+```markdown
+---
+name: reviewer
+description: Reviews code changes
+model: claude-sonnet-4-6
+tools: [Read, Grep, Glob]
+skills: [security-review, docs-maintain]   # explicit allowlist
+# OR
+# skills: all                                # all discoverable skills
+---
+
+You are a code reviewer...
+```
+
+**`settingSources` interaction.** The Claude Agent SDK auto-injects `setting_sources=["user","project"]` for skill discovery when `settingSources` is omitted or set to `["user","project"]`. Setting `settingSources: []` (explicit empty list) blocks discovery — the loader rejects this configuration with `PackLoadError: ... settingSources=[] (explicit empty list) is contradictory ...`. Either omit `settingSources` (recommended) or set it explicitly to `["user","project"]`.
+
+**Discovery and warnings.** At MCP-server startup the loader walks `~/.claude/skills/` and `<cwd>/.claude/skills/` to enumerate discoverable skills. If a role declares `skills: [foo]` and `foo` is not on disk, a WARN logs to stderr in this exact format:
+
+```
+WARNING claude_crew.subagents.loader: agent 'reviewer' declares unknown skills ['foo'] — not found in user or project skill dirs at startup; teammate will fail to invoke them at runtime
+```
+
+Grep stderr for `declares unknown skills` to find these. The loader does NOT raise — operators may add the SKILL.md after server startup, or skills may live in a search path the loader doesn't traverse. The teammate will surface the missing-skill error if/when it tries to invoke.
+
+**Project-skill cwd trap.** Project skills resolve from the cwd at MCP-server startup. Launch claude-crew from your project root for `<project>/.claude/skills/` to be discovered.
+
+**Dashboard surfacing.** Startup-time WARNs are not yet visible in the Mission Control dashboard — pack-load happens before any teammate exists. Tracked as vision row #25 (`doc/PRODUCT-VISION.md`).
+
 ---
 
 ## Development
