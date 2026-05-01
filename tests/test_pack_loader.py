@@ -589,3 +589,174 @@ class TestMinimalPack:
         assert fm.tools == ()
         assert agent.tools == []
         assert agent.model is None
+
+
+# ---------------------------------------------------------------------------
+# T3 (Pillar A+D): canonical name resolution + name/color fields
+#
+# Covers SC-1, SC-2, SC-2a, SC-6 from FEATURE-claude-code-agent-format-compatibility.md.
+# Per Claude Code spec, `name:` is REQUIRED at the format level. claude-crew
+# accepts it as canonical role key when present; falls back to file stem
+# otherwise. `color:` is UI metadata, captured-and-ignored.
+# ---------------------------------------------------------------------------
+
+
+class TestNameField:
+    """SC-1, SC-2, Q-10: name field handling."""
+
+    def test_name_silent_accepted(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: senior-reviewer",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("unsupported" in m and "name" in m for m in warns), warns
+        assert fm.name == "senior-reviewer"
+
+    def test_name_overrides_stem_as_canonical_key(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: senior-reviewer",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            key, _, _, _ = parse_pack_text(text, tmp_path / "old-file.md")
+        assert key == "senior-reviewer"
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "senior-reviewer" in m and "old-file" in m for m in info_msgs
+        ), f"expected transition INFO, got {info_msgs}"
+
+    def test_stem_fallback_when_name_absent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack([
+            "description: T",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            key, _, fm, _ = parse_pack_text(text, tmp_path / "scout.md")
+        assert key == "scout"
+        assert fm.name is None
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        # No transition INFO when names match (none here, since name is absent).
+        assert not any(
+            "declares name" in m for m in info_msgs
+        ), info_msgs
+
+    def test_no_transition_info_when_name_matches_stem(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: scout",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            key, _, _, _ = parse_pack_text(text, tmp_path / "scout.md")
+        assert key == "scout"
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert not any("declares name" in m for m in info_msgs), info_msgs
+
+
+class TestNameValidation:
+    """Q-10: name validation surface."""
+
+    def test_name_int_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: 42",
+            "tools: [Read]",
+        ])
+        with pytest.raises(PackLoadError, match=r"name.*must be a string.*int"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_name_bool_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: true",
+            "tools: [Read]",
+        ])
+        with pytest.raises(PackLoadError, match=r"name.*must be a string.*bool"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_name_uppercase_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: MyRole",
+            "tools: [Read]",
+        ])
+        with pytest.raises(PackLoadError, match=r"invalid name"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_name_with_space_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            'name: "my role"',
+            "tools: [Read]",
+        ])
+        with pytest.raises(PackLoadError, match=r"invalid name"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_name_empty_string_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            'name: ""',
+            "tools: [Read]",
+        ])
+        with pytest.raises(PackLoadError, match=r"invalid name"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_name_null_falls_back_to_stem(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "name: ",
+            "tools: [Read]",
+        ])
+        key, _, fm, _ = parse_pack_text(text, tmp_path / "scout.md")
+        assert key == "scout"
+        assert fm.name is None
+
+    def test_name_with_digit_start_accepted(self, tmp_path: Path) -> None:
+        """Regex allows digit-leading names like `2fa-helper`."""
+        text = _build_pack([
+            "description: T",
+            "name: 2fa-helper",
+            "tools: [Read]",
+        ])
+        key, _, fm, _ = parse_pack_text(text, tmp_path / "old.md")
+        assert fm.name == "2fa-helper"
+        assert key == "2fa-helper"
+
+
+class TestColorField:
+    """SC-6: color field silent-accepted."""
+
+    def test_color_silent_accepted(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack([
+            "description: T",
+            "color: blue",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("unsupported" in m and "color" in m for m in warns), warns
+        assert fm.color == "blue"
+
+    def test_color_absent_is_none(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "tools: [Read]",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.color is None

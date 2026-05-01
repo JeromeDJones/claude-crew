@@ -1,4 +1,5 @@
 ---
+name: planner
 description: Spec writer. Restates the task, names acceptance criteria, produces a spec doc.
 model: sonnet
 tools: [Read, Grep, Glob, Write]

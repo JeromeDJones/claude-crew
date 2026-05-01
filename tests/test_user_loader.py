@@ -353,6 +353,38 @@ class TestIntraDirCollision:
             for m in msgs
         )
 
+    def test_cross_stem_name_collision_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-2a (#15): two files with DIFFERENT stems but the same `name:`
+        value collide via canonical-name keying. WARN names canonical name +
+        both file paths; alphabetically later path wins."""
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        agents_dir = tmp_path / ".claude" / "agents"
+        # Different stems, same canonical name.
+        _write_agent(
+            agents_dir,
+            "alpha-runner.md",
+            description="Alpha file.",
+            extra_frontmatter="name: runner",
+        )
+        _write_agent(
+            agents_dir,
+            "beta-runner.md",
+            description="Beta file.",
+            extra_frontmatter="name: runner",
+        )
+
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
+
+        # Alphabetical: alpha-runner.md < beta-runner.md → beta wins.
+        assert result["runner"].description == "Beta file."
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "runner" in m and "alpha-runner.md" in m and "beta-runner.md" in m
+            for m in msgs
+        ), f"expected canonical-name collision WARN, got {msgs}"
+
 
 # -----------------------------------------------------------------------------
 # SC-3: precedence (verified at the merge_packs composition layer)

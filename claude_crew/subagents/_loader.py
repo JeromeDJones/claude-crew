@@ -11,6 +11,7 @@ and re-usable by Feature #3b's user-defined-agent loader.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +20,11 @@ import yaml
 from claude_agent_sdk.types import AgentDefinition
 
 logger = logging.getLogger(__name__)
+
+# Per Claude Code's agent spec: lowercase, hyphens. Allow digits (operators
+# might want `2fa-helper` etc.). Type-check happens before regex (#15 sentinel
+# H-1 — `name: 42` parses as YAML int, str(42) would otherwise pass regex).
+_VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 class PackLoadError(Exception):
@@ -93,8 +99,10 @@ class PackFrontmatter:
     """
 
     description: str
+    name: str | None = None
     model: str | None = None
     tools: tuple[str, ...] = field(default_factory=tuple)
+    color: str | None = None
     effort: str | None = None
     maxTurns: int | None = None
     initialPrompt: str | None = None
@@ -108,9 +116,9 @@ class PackFrontmatter:
 
 
 _REQUIRED = ("description",)
-_OPTIONAL = ("model", "tools", "effort", "maxTurns", "initialPrompt", "background",
-             "skills", "permissionMode", "disallowedTools", "settingSources",
-             "mcpServers", "memory")
+_OPTIONAL = ("name", "model", "tools", "color", "effort", "maxTurns",
+             "initialPrompt", "background", "skills", "permissionMode",
+             "disallowedTools", "settingSources", "mcpServers", "memory")
 
 _VALID_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
@@ -177,7 +185,20 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     if not body.strip():
         raise PackLoadError(f"pack file {path} has empty body")
 
-    key = path.stem.replace("_", "-")
+    # Canonical key per Claude Code spec: `name:` if declared, else file-stem
+    # fallback (with underscore→hyphen normalization preserved for
+    # backward compat with bundled-pack files like general_purpose.md).
+    stem_key = path.stem.replace("_", "-")
+    key = fm.name if fm.name is not None else stem_key
+
+    # Transition INFO when `name:` and stem-derived key diverge (D-7). One
+    # INFO per divergent pack at load-time so operators see the canonical
+    # role they'll spawn under.
+    if fm.name is not None and fm.name != stem_key:
+        logger.info(
+            "pack %s declares name '%s' (file stem: '%s') — canonical key is '%s'",
+            path, fm.name, stem_key, fm.name,
+        )
 
     # X.3: no-tools INFO fires only when `tools:` is fully absent — distinguishes
     # "operator forgot" (INFO) from "operator chose empty" (silent).
@@ -246,10 +267,28 @@ def _split_frontmatter(text: str, path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
-    for field in _REQUIRED:
-        if field not in d:
+    for fld in _REQUIRED:
+        if fld not in d:
             raise PackLoadError(
-                f"pack file {path} missing required frontmatter field '{field}'"
+                f"pack file {path} missing required frontmatter field '{fld}'"
+            )
+
+    # name: optional. Two-stage validation per #15 sentinel H-1 + M-4:
+    #   1. type-check (catches YAML int, bool, list, dict before regex)
+    #   2. regex (lowercase, hyphens, digits per Claude Code spec)
+    # `name: ` with no value parses to YAML None → treated as absent
+    # (canonical key falls back to stem).
+    raw_name = d.get("name")
+    if raw_name is not None:
+        if not isinstance(raw_name, str):
+            raise PackLoadError(
+                f"pack file {path}: name must be a string, "
+                f"got {type(raw_name).__name__}"
+            )
+        if not _VALID_NAME_RE.match(raw_name):
+            raise PackLoadError(
+                f"pack file {path}: invalid name '{raw_name}': "
+                f"must match [a-z0-9][a-z0-9-]*"
             )
 
     pm = d.get("permissionMode")
@@ -361,8 +400,10 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
 
     return PackFrontmatter(
         description=str(d["description"]),
+        name=raw_name if raw_name is not None else None,
         model=str(d["model"]) if d.get("model") is not None else None,
         tools=tuple(_coerce_str_or_list(d["tools"], "tools", path)) if "tools" in d else (),
+        color=str(d["color"]) if d.get("color") is not None else None,
         effort=str(d["effort"]) if d.get("effort") is not None else None,
         maxTurns=int(d["maxTurns"]) if d.get("maxTurns") is not None else None,
         initialPrompt=(

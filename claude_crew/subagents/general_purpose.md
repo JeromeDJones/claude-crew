@@ -1,4 +1,5 @@
 ---
+name: general-purpose
 description: Catch-all assistant for shaped work — find, read, write, search, edit, fetch.
 model: sonnet
 tools: [Read, Grep, Glob, Edit, Write, WebFetch, WebSearch]

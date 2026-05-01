@@ -1,4 +1,5 @@
 ---
+name: explorer
 description: Read-only codebase investigator. Finds files, reads code, reports facts.
 model: haiku
 tools: [Read, Grep, Glob]
