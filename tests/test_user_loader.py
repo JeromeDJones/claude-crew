@@ -527,7 +527,9 @@ class TestSettingSourcesCascade:
         _merged, role_ss, _bodies = build_merged_pack(home_dir=empty_user, project_root=empty_project)
 
         assert role_ss.get("explorer") == [], "explorer.md must declare settingSources: []"
-        assert role_ss.get("general-purpose") == [], "general_purpose.md must declare settingSources: []"
+        assert role_ss.get("general-purpose") == ["user", "project"], (
+            "general_purpose.md must declare settingSources: [user, project] (#23 SC-6)"
+        )
         assert role_ss.get("planner") == ["project"], "planner.md must declare settingSources: [project]"
 
     def test_user_agent_with_setting_sources_captured_in_role_ss(
