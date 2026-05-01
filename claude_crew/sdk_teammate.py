@@ -613,6 +613,23 @@ class SdkTeammate(Teammate):
                 "duration_seconds": duration_seconds,
                 "error_summary": error_summary,
             }
+            # F19 D-3 / D-4: append to in-memory deque BEFORE transcript write so
+            # the dashboard sees the event even if the JSONL sink is disabled or
+            # raises. orphan_post path above intentionally skips this (D-3).
+            self._completed_tool_events.append(
+                ToolEvent(
+                    teammate_id=self.id,
+                    tool_name=entry.tool_name,
+                    tool_use_id=tool_use_id,
+                    started_at_wallclock=entry.started_at_wallclock,
+                    finished_at_wallclock=finished_at_wallclock,
+                    duration_seconds=duration_seconds,
+                    outcome=outcome,
+                    args_summary=entry.args_summary,
+                    error_summary=error_summary,
+                    redaction_version=REDACTION_VERSION,
+                )
+            )
             try:
                 broker = self._broker
                 if broker is not None:

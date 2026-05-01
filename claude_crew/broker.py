@@ -58,6 +58,13 @@ class TeammateInfo:
     total_input_tokens_at_death: int | None = None
     total_output_tokens_at_death: int | None = None
     total_cost_usd_at_death: float | None = None
+    # F19 D-7: per-teammate completed-tool-events snapshot at tombstone time.
+    # Captured AFTER _close_open_tools runs (step 8c) so abandoned/killed events
+    # land in this tuple. None during the brief window between tombstone (step 5,
+    # alive=False) and step 8c — snapshot contributes zero events from this
+    # teammate during that window (E-3, intentional). Empty tuple is a possible
+    # final value (teammate ran no tools before death).
+    tool_events_at_death: "tuple[Any, ...] | None" = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +288,20 @@ class Broker:
             teammate._close_open_tools(reason=close_reason)
             if hasattr(teammate, "_close_open_subagents"):
                 teammate._close_open_subagents(reason=close_reason)
+
+        # 8c. F19 D-7: capture per-teammate completed_tool_events into TeammateInfo.
+        # Must run AFTER 8b so abandoned/killed events appended by _close_open_tools
+        # are included in the captured tuple. dataclasses.replace because TeammateInfo
+        # is frozen (sentinel F1 — direct mutation would raise FrozenInstanceError).
+        # Defensive on missing attribute: a teammate that never initialized the deque
+        # (older test fixtures, bare-bones mocks) contributes None instead of crashing.
+        if teammate is not None:
+            captured = getattr(teammate, "_completed_tool_events", None)
+            if captured is not None:
+                self._info[teammate_id] = dataclasses.replace(
+                    self._info[teammate_id],
+                    tool_events_at_death=tuple(captured),
+                )
 
         # 9. Emit lifecycle event
         lifecycle_fields: dict[str, Any] = {"teammate_id": teammate_id}

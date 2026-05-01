@@ -50,6 +50,11 @@ class _NoopTeammate(Teammate):
         self._tool_uses: dict = {}
         self._recently_closed_tool_use_ids: collections.deque = collections.deque(maxlen=64)
         self._last_tool_completed = None
+        # F19: completed tool-event deque (required by Broker.snapshot()).
+        from claude_crew.teammate import _tool_events_maxlen
+        self._completed_tool_events: collections.deque = collections.deque(
+            maxlen=_tool_events_maxlen()
+        )
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker
@@ -1451,3 +1456,47 @@ class TestBrokerSnapshot:
         assert snap.tool_events == (), (
             f"expected empty tool_events tuple, got {snap.tool_events!r}"
         )
+
+
+class TestF19TombstoneCapture:
+    """T2: _tombstone_teammate captures _completed_tool_events into TeammateInfo (D-7 / sentinel F1)."""
+
+    async def test_tombstone_preserves_tool_events_at_death(self, broker: Broker) -> None:
+        """SC-4 / sentinel F1: tombstone uses dataclasses.replace (no FrozenInstanceError)
+        and includes events appended by _close_open_tools (step 8c runs AFTER 8b)."""
+        from claude_crew.teammate import ToolEvent, _ToolUseEntry
+
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]
+
+        # 3 already-completed tool events.
+        for i in range(3):
+            teammate._completed_tool_events.append(
+                ToolEvent(
+                    teammate_id=tid, tool_name="Bash", tool_use_id=f"done-{i}",
+                    started_at_wallclock=1.0 + i, finished_at_wallclock=1.5 + i,
+                    duration_seconds=0.5, outcome="ok",
+                    args_summary=None, error_summary=None, redaction_version="v1",
+                )
+            )
+        # 1 in-flight tool that will be abandoned by _close_open_tools at step 8b.
+        teammate._tool_uses["in-flight-1"] = _ToolUseEntry(
+            tool_name="Read", tool_use_id="in-flight-1",
+            started_at_wallclock=time.time() - 0.1, args_summary=None,
+        )
+
+        # Tombstone via the kill path (lifecycle="kill").
+        await broker.kill_teammate(tid)
+        await asyncio.sleep(0.05)  # allow tombstone task to complete
+
+        info = broker._info[tid]
+        assert info.alive is False
+        # 3 originally completed + 1 killed by _close_open_tools at step 8b.
+        assert info.tool_events_at_death is not None
+        assert len(info.tool_events_at_death) == 4
+        outcomes = [ev.outcome for ev in info.tool_events_at_death]
+        assert outcomes.count("ok") == 3
+        assert outcomes.count("killed") == 1
+        # Last event is the killed one (appended last by _close_open_tools).
+        assert info.tool_events_at_death[-1].outcome == "killed"
+        assert info.tool_events_at_death[-1].tool_name == "Read"

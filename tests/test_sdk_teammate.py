@@ -2448,3 +2448,125 @@ class TestTokenCostTelemetry:
             f"json.dumps of total_cost_usd={snap['total_cost_usd']!r} "
             f"produced scientific notation: {serialized!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Feature #19 T2: hook append sites for completed_tool_events
+# ---------------------------------------------------------------------------
+
+
+class TestF19CompletedToolEventsAppend:
+    """T2: PostToolUse / PostToolUseFailure / orphan_post / Pre-only behavior."""
+
+    async def test_completed_tool_events_appended_on_post_ok(
+        self, broker, monkeypatch
+    ) -> None:
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        await teammate._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_input": {"command": "ls /tmp"}},
+            "tu-ok", {},
+        )
+        await asyncio.sleep(0.005)
+        await teammate._on_post_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_response": "ok"},
+            "tu-ok", {},
+        )
+
+        assert len(teammate._completed_tool_events) == 1
+        ev = teammate._completed_tool_events[0]
+        assert ev.tool_name == "Bash"
+        assert ev.outcome == "ok"
+        assert ev.tool_use_id == "tu-ok"
+        assert ev.error_summary is None
+        assert ev.args_summary is not None and "command=" in ev.args_summary
+        assert ev.duration_seconds > 0
+
+    async def test_completed_tool_events_appended_on_post_failed(
+        self, broker, monkeypatch
+    ) -> None:
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        await teammate._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_input": {"command": "false"}},
+            "tu-fail", {},
+        )
+        await teammate._on_post_tool_use_failure(
+            {"agent_id": None, "tool_name": "Bash", "error": "exit code 1"},
+            "tu-fail", {},
+        )
+
+        assert len(teammate._completed_tool_events) == 1
+        ev = teammate._completed_tool_events[0]
+        assert ev.outcome == "failed"
+        assert ev.error_summary is not None and "exit code 1" in ev.error_summary
+
+    async def test_pre_tool_use_does_not_append_to_completed_events(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-7 / sentinel D2: PreToolUse alone never reaches the completed-events deque."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        await teammate._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_input": {"command": "sleep 5"}},
+            "tu-pending", {},
+        )
+
+        # PreToolUse populated the in-flight dict but NOT the completed-events deque.
+        assert "tu-pending" in teammate._tool_uses
+        assert len(teammate._completed_tool_events) == 0
+
+    async def test_orphan_post_not_appended_to_completed_events(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-3 / D-3: PostToolUse with no matching Pre writes JSONL orphan_post but skips deque."""
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        # Fire Post without prior Pre.
+        await teammate._on_post_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_response": "ok"},
+            "tu-orphan", {},
+        )
+
+        # Deque stays empty even though the orphan_post JSONL line was written.
+        assert len(teammate._completed_tool_events) == 0
+
+    async def test_completed_tool_events_appended_when_transcript_disabled(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-8 / D-4: in-memory append must NOT be gated on JSONL write success."""
+        from unittest.mock import MagicMock
+
+        fake = ProgrammableSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory_for(fake))
+        teammate = broker._teammates[tid]
+
+        # Make the transcript sink raise on write; the hook should still append to deque.
+        broker._sink = MagicMock()
+        broker._sink.write_tool_event.side_effect = RuntimeError("disk full")
+
+        await teammate._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_input": {"command": "ls"}},
+            "tu-disk", {},
+        )
+        await teammate._on_post_tool_use(
+            {"agent_id": None, "tool_name": "Bash", "tool_response": "ok"},
+            "tu-disk", {},
+        )
+
+        # Deque has the event despite the JSONL failure.
+        assert len(teammate._completed_tool_events) == 1
+        assert teammate._completed_tool_events[0].tool_use_id == "tu-disk"

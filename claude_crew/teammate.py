@@ -169,6 +169,23 @@ class Teammate(ABC):
                 finished_at_wallclock = time.time()
                 duration_seconds = finished_at_wallclock - entry.started_at_wallclock
                 error_summary = f"tool was in flight when {reason} closed it"
+                # F19 D-3 / D-4: append to in-memory deque BEFORE transcript write
+                # so SC-4 in-flight-at-tombstone events reach the dashboard even if
+                # the JSONL sink raises.
+                self._completed_tool_events.append(
+                    ToolEvent(
+                        teammate_id=self.id,
+                        tool_name=entry.tool_name,
+                        tool_use_id=tool_use_id,
+                        started_at_wallclock=entry.started_at_wallclock,
+                        finished_at_wallclock=finished_at_wallclock,
+                        duration_seconds=duration_seconds,
+                        outcome=outcome,
+                        args_summary=entry.args_summary,
+                        error_summary=error_summary,
+                        redaction_version=REDACTION_VERSION,
+                    )
+                )
                 try:
                     broker = self._broker
                     if broker is not None:

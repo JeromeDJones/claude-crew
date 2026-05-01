@@ -451,3 +451,46 @@ class TestToolEventDataclass:
         # First event (id-0) was evicted; oldest now is id-1.
         assert teammate._completed_tool_events[0].tool_use_id == "id-1"
         assert teammate._completed_tool_events[-1].tool_use_id == "id-5"
+
+
+class TestF19CloseOpenToolsAppend:
+    """T2: _close_open_tools appends ToolEvent(outcome=abandoned/killed) for in-flight tools."""
+
+    def test_close_open_tools_death_appends_abandoned(self) -> None:
+        """SC-4 / D-3: in-flight tools at death-time become outcome='abandoned' events."""
+        teammate = _make_teammate_with_mock_broker()
+        # Two in-flight tools.
+        for i, name in enumerate(("Bash", "Read")):
+            teammate._tool_uses[f"tu-{i}"] = _ToolUseEntry(
+                tool_name=name,
+                tool_use_id=f"tu-{i}",
+                started_at_wallclock=time.time() - 0.5,
+                args_summary=None,
+            )
+
+        teammate._close_open_tools(reason="death")
+
+        assert len(teammate._completed_tool_events) == 2
+        assert all(ev.outcome == "abandoned" for ev in teammate._completed_tool_events)
+        # _tool_uses cleared (existing F8 D9).
+        assert len(teammate._tool_uses) == 0
+
+    def test_close_open_tools_kill_appends_killed(self) -> None:
+        """SC-4 / D-3: kill-time in-flight tools become outcome='killed' events."""
+        teammate = _make_teammate_with_mock_broker()
+        teammate._tool_uses["tu-x"] = _ToolUseEntry(
+            tool_name="Bash",
+            tool_use_id="tu-x",
+            started_at_wallclock=time.time() - 0.2,
+            args_summary="command=long_build",
+        )
+
+        teammate._close_open_tools(reason="kill")
+
+        assert len(teammate._completed_tool_events) == 1
+        ev = teammate._completed_tool_events[0]
+        assert ev.outcome == "killed"
+        assert ev.tool_name == "Bash"
+        assert ev.error_summary is not None and "kill" in ev.error_summary
+        # args_summary preserved from the in-flight entry.
+        assert ev.args_summary == "command=long_build"
