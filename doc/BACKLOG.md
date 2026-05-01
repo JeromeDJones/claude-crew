@@ -6,6 +6,22 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-01] Feature: global-skills-for-sdk-teammates (#23)
+
+### general-purpose teammate context size grew with #23 SC-6 — measure and consider general-purpose-light variant
+- **What**: SC-6 flipped bundled `general_purpose.md` from `settingSources: []` → `settingSources: ["user", "project"]` (required for skill discovery). Side effect: a spawned `general-purpose` teammate now loads CLAUDE.md again, partially undoing #11's lightweight-context win for this specific role. This is intentional per #23 A-3 (parity-of-invocation requires the setting sources), but the token-cost delta at live spawn is unmeasured.
+- **Where**: `claude_crew/subagents/general_purpose.md` frontmatter; observable post-spawn in `_system_prompt` size and at the SDK boundary in initialize-time tokens. `test_teammate_prompt.py`'s prompt-size assertions test the pack-load path, not live spawn — they will not catch this.
+- **Why it matters**: As `/crew-showcase` and similar dogfood patterns spawn `general-purpose` teammates routinely, a bigger system prompt = more tokens per turn = real cost over many sessions. Operators who don't need skills on `general-purpose` are paying for them.
+- **Suggested action**: After #15 (reviewer/runner pack), measure the token delta on a live `general-purpose` spawn pre/post-#23. If the delta is meaningful (>~1k tokens), consider a bundled `general-purpose-light` variant (no skills, settingSources=[]) for high-fanout dispatch scenarios. Operators who want narrow defaults today can override via `~/.claude/agents/general-purpose.md`.
+
+### Promote vision row #25 (startup diagnostics on dashboard) from idea → next when scope allows
+- **What**: #23 ships the skill-discovery WARN at pack-load time. The WARN goes to stderr only — Mission Control cannot surface it because pack-load happens before any teammate envelope exists. Documented in README under Custom Roles → Skills, but stderr-only is a weak operational story; operators must tail the claude-crew server stderr to catch their config errors.
+- **Where**: `claude_crew/subagents/_user_loader.py:_warn_unknown_skills` and the existing pack-shadow INFO logs. Future home is `BrokerSnapshot` reserved field or sibling channel that `UIServer` reads. Vision row #25 already filed.
+- **Why it matters**: As skill+role surface grows (post-#15 reviewer/runner), more configs will be authored, more typos will happen. Today they're invisible until a runtime invocation fails. A startup-notices panel on the dashboard closes the operator-feedback loop and serves future startup-time diagnostics on the same channel (frontmatter typos, MCP issues, bundled-pack shadowing).
+- **Suggested action**: Spec + ship #25. Adjacent: #18 BrokerSnapshot reserved field pattern is the obvious carrier. Consider promoting `idea` → `next` after #15/#17 land so the diagnostic-signal volume justifies the surface.
+
+---
+
 ## [2026-05-01] Subagent dispatch telemetry gaps — F7 misses Agent dispatches, args_summary blind
 
 ### F7 subagent tracking and redaction allowlist both miss the `Agent` tool

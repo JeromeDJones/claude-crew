@@ -84,6 +84,18 @@ class TestPackContents:
         assert "Bash" not in gp.tools
         assert "Task" not in gp.tools
 
+    def test_general_purpose_has_skills_all(self) -> None:
+        """SC-6: bundled general-purpose declares skills: all for parity-of-invocation."""
+        pack, _role_ss, _bodies = load_default_pack()
+        gp = pack["general-purpose"]
+        assert gp.skills == "all"
+
+    def test_explorer_planner_skills_unset(self) -> None:
+        """SC-10: explorer and planner stay narrow; #11's lightweight-context win is preserved."""
+        pack, _role_ss, _bodies = load_default_pack()
+        assert pack["explorer"].skills is None
+        assert pack["planner"].skills is None
+
     def test_no_pack_member_has_task_tool(self) -> None:
         """Subagents are leaves. None of them get Task — locked by Phase 1."""
         pack, _role_ss, _bodies = load_default_pack()

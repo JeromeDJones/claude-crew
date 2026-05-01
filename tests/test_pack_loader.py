@@ -179,3 +179,110 @@ class TestSettingSourcesMixedItems:
         with pytest.raises(PackLoadError) as exc:
             parse_pack_text(text, path)
         assert "bad" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Feature #23: skills field validation (T1)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsAllForm:
+    """Scenario: skills: all (string form) is accepted (D-1)."""
+
+    def test_skills_all_string_accepted(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: all")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == "all"
+        assert agent.skills == "all"
+
+
+class TestSkillsListForm:
+    """Scenario: skills: [foo, bar] is accepted as tuple → list (existing-shape regression)."""
+
+    def test_skills_list_accepted(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: [foo, bar]")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == ("foo", "bar")
+        assert agent.skills == ["foo", "bar"]
+
+
+class TestSkillsEmptyListNoOp:
+    """Scenario: skills: [] is accepted as no-op (D-2)."""
+
+    def test_empty_list_does_not_set_agent_skills(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: []")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == ()
+        assert agent.skills is None
+
+
+class TestSkillsSettingSourcesConflict:
+    """Scenario: skills + settingSources=[] is rejected (SC-3, D-3)."""
+
+    def test_active_skills_with_explicit_empty_settingsources_raises(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: [foo]\nsettingSources: []")
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_text(text, tmp_path / "agent.md")
+        msg = str(exc.value)
+        # Pin to the specific SC-3 code path: must mention both settingSources
+        # and the contradiction, not a coincidental other error.
+        assert "contradictory" in msg
+        assert "settingSources" in msg
+
+    def test_skills_all_with_explicit_empty_settingsources_raises(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: all\nsettingSources: []")
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_text(text, tmp_path / "agent.md")
+        msg = str(exc.value)
+        assert "contradictory" in msg
+        assert "settingSources" in msg
+
+    def test_empty_skills_with_empty_settingsources_accepted(self, tmp_path: Path) -> None:
+        """skills:[] + settingSources:[] is consistent (no-op + no-source)."""
+        text = _pack_text("skills: []\nsettingSources: []")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == ()
+        assert fm.settingSources == []
+        assert agent.skills is None
+
+    def test_omitted_skills_with_empty_settingsources_accepted(self, tmp_path: Path) -> None:
+        text = _pack_text("settingSources: []")
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills is None
+        assert fm.settingSources == []
+
+    def test_skills_with_explicit_user_project_settingsources_accepted(self, tmp_path: Path) -> None:
+        text = _pack_text("skills: [foo]\nsettingSources: [user, project]")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == ("foo",)
+        assert fm.settingSources == ["user", "project"]
+        assert agent.skills == ["foo"]
+
+    def test_skills_with_omitted_settingsources_accepted(self, tmp_path: Path) -> None:
+        """SDK auto-injects ['user','project'] when settingSources is None."""
+        text = _pack_text("skills: [foo]")
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.skills == ("foo",)
+        assert fm.settingSources is None
+        assert agent.skills == ["foo"]
+
+
+class TestSkillsInvalidShape:
+    """Scenario: malformed skills values raise PackLoadError (SC-5, sentinel M-1)."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            '""',                # empty string
+            '" all "',           # whitespace-padded
+            '"All"',             # wrong case
+            "42",                # int
+            "{foo: bar}",        # dict
+            "[42, foo]",         # mixed types in list
+            "[null]",            # list with null element
+        ],
+    )
+    def test_invalid_shape_raises(self, tmp_path: Path, value: str) -> None:
+        text = _pack_text(f"skills: {value}")
+        with pytest.raises(PackLoadError):
+            parse_pack_text(text, tmp_path / "agent.md")

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from claude_agent_sdk.types import AgentDefinition
@@ -39,7 +39,7 @@ class PackFrontmatter:
     maxTurns: int | None = None
     initialPrompt: str | None = None
     background: bool | None = None
-    skills: tuple[str, ...] | None = None
+    skills: tuple[str, ...] | Literal["all"] | None = None
     permissionMode: str | None = None
     disallowedTools: tuple[str, ...] | None = None
     settingSources: list[str] | None = None
@@ -122,7 +122,13 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         "background": fm.background,
     }
     if fm.skills is not None:
-        agent_kwargs["skills"] = list(fm.skills)
+        if isinstance(fm.skills, str):
+            # "all" passes through as the SDK Literal (D-1)
+            agent_kwargs["skills"] = fm.skills
+        elif fm.skills:
+            # non-empty tuple → list for AgentDefinition
+            agent_kwargs["skills"] = list(fm.skills)
+        # empty tuple → no-op (D-2): leave AgentDefinition.skills at default None
     if fm.permissionMode is not None:
         agent_kwargs["permissionMode"] = fm.permissionMode
     if fm.disallowedTools is not None:
@@ -176,12 +182,59 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
 
     ss = d.get("settingSources")
     if ss is not None:
+        if not isinstance(ss, list):
+            raise PackLoadError(
+                f"pack file {path}: settingSources must be a list; "
+                f"got {type(ss).__name__}"
+            )
         for item in ss:
             if item not in _VALID_SETTING_SOURCES:
                 raise PackLoadError(
                     f"pack file {path}: unknown settingSources item {item!r}; "
                     f"valid values: {sorted(_VALID_SETTING_SOURCES)}"
                 )
+
+    # skills: tuple[str, ...] | Literal["all"] | None — three accepted shapes (D-1).
+    raw_skills = d.get("skills")
+    parsed_skills: tuple[str, ...] | Literal["all"] | None
+    if raw_skills is None:
+        parsed_skills = None
+    elif isinstance(raw_skills, str):
+        if raw_skills != "all":
+            raise PackLoadError(
+                f"pack file {path}: skills string value must be 'all'; "
+                f"got {raw_skills!r}"
+            )
+        parsed_skills = "all"
+    elif isinstance(raw_skills, list):
+        for s in raw_skills:
+            if not isinstance(s, str):
+                raise PackLoadError(
+                    f"pack file {path}: skills list elements must be strings; "
+                    f"got element {s!r} of type {type(s).__name__}"
+                )
+        parsed_skills = tuple(raw_skills)  # may be empty (D-2 no-op)
+    else:
+        raise PackLoadError(
+            f"pack file {path}: skills must be a list of strings or the string 'all'; "
+            f"got {type(raw_skills).__name__}"
+        )
+
+    # SC-3: reject the silent-misconfig where active skills are declared with an
+    # explicit empty settingSources. Skills would be sent on the wire as
+    # --allowedTools Skill(name) but SKILL.md discovery would be blocked, so
+    # the teammate would silently have nothing to invoke. None is OK (SDK
+    # auto-injects ['user','project']); empty tuple skills is a no-op (D-2)
+    # and pairs cleanly with empty settingSources.
+    skills_active = parsed_skills is not None and parsed_skills != ()
+    ss_explicit_empty = ss is not None and len(ss) == 0
+    if skills_active and ss_explicit_empty:
+        raise PackLoadError(
+            f"pack file {path}: declaring skills with settingSources=[] (explicit "
+            f"empty list) is contradictory — skills are sent on the wire but "
+            f"SKILL.md discovery is blocked. Either omit settingSources (SDK "
+            f"auto-injects ['user','project']), or set it explicitly."
+        )
 
     return PackFrontmatter(
         description=str(d["description"]),
@@ -193,9 +246,7 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             str(d["initialPrompt"]) if d.get("initialPrompt") is not None else None
         ),
         background=bool(d["background"]) if d.get("background") is not None else None,
-        skills=(
-            tuple(str(s) for s in d["skills"]) if d.get("skills") is not None else None
-        ),
+        skills=parsed_skills,
         permissionMode=pm,
         disallowedTools=(
             tuple(str(t) for t in d["disallowedTools"])
