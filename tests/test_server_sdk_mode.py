@@ -125,9 +125,14 @@ class TestSDKModeIntegration:
             for valid in ("default", "acceptEdits", "plan", "bypassPermissions",
                           "dontAsk", "auto"):
                 assert valid in text, f"expected accepted value {valid!r} in error: {text!r}"
-            # Crew should not contain a planner — validation fired before broker spawn.
+            # Validation fired before broker.spawn_teammate — crew length unchanged.
+            # (Sentinel H-2: a fresh-broker "no planner" assertion is vacuously true;
+            # snapshot-then-compare proves the validation prevented spawn rather than
+            # spawn never being attempted in any test run.)
             crew = _content_json(await s.call_tool("list_crew", {}))
-            assert all(t.get("role") != "planner" for t in crew.get("teammates", []))
+            assert len(crew.get("teammates", [])) == 0, (
+                f"validation should prevent broker.spawn_teammate; got crew={crew}"
+            )
 
     async def test_spawn_with_valid_permission_mode_passes(self, monkeypatch) -> None:
         """Feature #17 SC-4: valid permission_mode passes validation cleanly."""

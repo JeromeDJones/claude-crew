@@ -21,6 +21,7 @@ intra-directory key-collision behavior.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -290,7 +291,6 @@ def _load_user_mcp_server_names(home_dir: Path | None = None) -> set[str]:
     only the spawn-time path (``sdk_teammate._load_user_mcp_servers``) needs
     the full configs.
     """
-    import json
     home = home_dir if home_dir is not None else Path.home()
     cfg_path = home / ".claude.json"
     try:

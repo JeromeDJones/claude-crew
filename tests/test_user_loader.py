@@ -1088,6 +1088,13 @@ class TestWarnShadowDrop:
         from claude_crew.subagents._user_loader import _warn_shadow_drop
         default = {"explorer": self._bundled_role(disallowedTools=["Bash"])}
         user = {"explorer": self._bundled_role(disallowedTools=[])}
+        # Premise guard (sentinel H-1): if a future SDK version normalizes
+        # empty list → None, this test would silently flip premise; assert
+        # the premise so a flip fails loudly with a clear message.
+        assert user["explorer"].disallowedTools == [], (
+            "test premise broken: expected explicit-empty to survive AgentDefinition "
+            f"construction; got {user['explorer'].disallowedTools!r}"
+        )
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             _warn_shadow_drop(default, user, None)
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]

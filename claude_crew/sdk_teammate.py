@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
+from pathlib import Path
+
 from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate, ToolEvent, _ToolUseEntry, _tool_events_maxlen
 from claude_crew.teammate_prompt import build_teammate_prompt
@@ -286,6 +288,83 @@ async def _collect_response_text(
 
 def _default_system_prompt(role: str) -> str:
     return f"You are a {role}. Help the lead with {role}-level work."
+
+
+def _load_user_mcp_servers(home_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Return the full ``{name: config}`` map from ``~/.claude.json``'s mcpServers.
+
+    Distinct from ``_user_loader._load_user_mcp_server_names`` (set of names only):
+    the spawn-time path needs the full config dicts to inline into
+    ``ClaudeAgentOptions.mcp_servers``. Best-effort: missing file, malformed
+    JSON, or absent ``mcpServers`` key all return the empty dict (no exception).
+    No module-level cache (Feature #17 D-11) — pytest tests planting fake
+    ``~/.claude.json`` would otherwise leak across tests.
+    """
+    home = home_dir if home_dir is not None else Path.home()
+    cfg_path = home / ".claude.json"
+    try:
+        text = cfg_path.read_text()
+    except (OSError, FileNotFoundError):
+        return {}
+    try:
+        cfg = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    servers = cfg.get("mcpServers")
+    if not isinstance(servers, dict):
+        return {}
+    return {name: cfg for name, cfg in servers.items() if isinstance(cfg, dict)}
+
+
+def _resolve_mcp_servers(
+    entries: list[str | dict[str, Any]] | tuple[str | dict[str, Any], ...],
+    role: str,
+    teammate_id: str,
+    home_dir: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Translate pack ``mcpServers`` (list of str|dict) → ClaudeAgentOptions dict.
+
+    Per Feature #17 D-4, D-7, D-11, D-13:
+
+    - String entries resolve against ``~/.claude.json``'s ``mcpServers`` map.
+      Unresolvable names are skipped with a WARN; spawn does not fail.
+    - Dict entries (already validated at pack-load to have ``type`` ∈
+      ``{stdio, sse, http}`` — ``sdk`` is rejected) are assigned a key via
+      the entry's ``name`` field, falling back to ``<type>_<index>``. The
+      ``name`` field is stripped from the value before insertion since
+      ``McpServerConfig`` does not include it.
+    - Every inline-dict pass-through emits an INFO breadcrumb naming role,
+      teammate id, server name, and type — connective tissue between D-12's
+      accepted teammate-death-on-malformed-dict and #19/#22 dashboards.
+
+    ``home_dir`` is an explicit param for test isolation: production callers
+    pass ``None`` (defaults to ``Path.home()``); tests inject ``tmp_path``.
+    """
+    user_servers = _load_user_mcp_servers(home_dir)
+    resolved: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if isinstance(entry, dict):
+            name = entry.get("name") or f"{entry.get('type', 'unnamed')}_{len(resolved)}"
+            resolved[name] = {k: v for k, v in entry.items() if k != "name"}
+            logger.info(
+                "teammate=%s role=%s mcpServers passing through inline dict "
+                "name=%s type=%s",
+                teammate_id, role, name, entry.get("type"),
+            )
+        else:  # str
+            cfg = user_servers.get(entry)
+            if cfg is None:
+                logger.warning(
+                    "teammate=%s role=%s mcpServers names %r but server is not "
+                    "registered in ~/.claude.json; skipping (load-time WARN may "
+                    "have already fired)",
+                    teammate_id, role, entry,
+                )
+                continue
+            resolved[entry] = cfg
+    return resolved
 
 
 class SdkTeammate(Teammate):
@@ -896,6 +975,28 @@ class SdkTeammate(Teammate):
                 opts_kwargs["skills"] = role_skills
             if role_disallowed is not None:
                 opts_kwargs["disallowed_tools"] = role_disallowed
+
+            # Feature #17 D-4: mcpServers translates list[str|dict] → dict
+            # via name resolution against ~/.claude.json (string entries) and
+            # name-stripped inline pass-through (dict entries).
+            role_mcp = getattr(role_def, "mcpServers", None)
+            if role_mcp:
+                opts_kwargs["mcp_servers"] = _resolve_mcp_servers(
+                    role_mcp, self.role, self.id, home_dir=None,
+                )
+
+            # Feature #17 D-8: ClaudeAgentOptions has no `memory` field.
+            # `memory` is honored on the subagent path (rides AgentDefinition
+            # serialization) but the teammate path has no carrier. WARN at
+            # spawn so an operator who declared it sees the constraint.
+            role_memory = getattr(role_def, "memory", None)
+            if role_memory is not None:
+                logger.warning(
+                    "teammate=%s role=%s pack declares memory=%r; "
+                    "ClaudeAgentOptions has no memory carrier — this field "
+                    "applies only to subagent dispatch contexts",
+                    self.id, self.role, role_memory,
+                )
 
         # cwd: spawn-time only.
         if self._cwd is not None:
