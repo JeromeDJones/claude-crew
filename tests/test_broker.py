@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from claude_crew import sdk_teammate as sdk_module
 from claude_crew.broker import (
     Broker,
     LEAD_ID,
@@ -23,7 +24,8 @@ from claude_crew.broker import (
 )
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import StubTeammate, Teammate, _ToolUseEntry
-from claude_crew.sdk_teammate import _SubagentUseEntry
+from claude_crew.sdk_teammate import SdkTeammate, _SubagentUseEntry
+from tests.fakes.sdk import FakeSDKClient, text_response_with_usage
 
 
 class _NoopTeammate(Teammate):
@@ -1087,3 +1089,169 @@ class TestLeadMessageLongPoll:
         assert poll_task in done, (
             "wait_for_lead_message did not return after shutdown_all"
         )
+
+
+# ---------- F14 (T3): tombstone token/cost preservation + broker forwarding ----------
+
+
+def _patch_sdk_broker(monkeypatch: pytest.MonkeyPatch, fake: FakeSDKClient) -> None:
+    """Patch ClaudeSDKClient in sdk_teammate module to use FakeSDKClient."""
+    captured: dict[str, Any] = {}
+
+    def _ctor(*args: Any, **kwargs: Any) -> FakeSDKClient:
+        captured.update(kwargs)
+        return fake
+
+    monkeypatch.setattr(sdk_module, "ClaudeSDKClient", _ctor)
+
+
+def _sdk_factory(id: str, name: str, role: str, **_kwargs: Any) -> SdkTeammate:
+    return SdkTeammate(id=id, name=name, role=role)
+
+
+async def _wait_lead_msgs_broker(broker: Broker, count: int, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if len(broker.get_messages(recipient=LEAD_ID)) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"timed out waiting for {count} lead messages; "
+        f"got {len(broker.get_messages(recipient=LEAD_ID))}"
+    )
+
+
+@pytest.mark.asyncio
+class TestTokenCostBrokerIntegration:
+    """T3 BDD: tombstone preservation of token/cost + get_teammate_status forwarding.
+
+    Scenarios:
+      1. Tombstone preserves last cumulative cost after multiple turns
+      2. Tombstone with no completed turns has zero at-death values (D-7)
+      3. Alive teammate's status returns live snap token/cost fields
+    """
+
+    async def test_tombstone_preserves_last_cumulative_after_n_turns(
+        self, broker: Broker, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SC-4: three turns with progressive cumulative cost 0.10 → 0.30 → 0.60.
+
+        After killing the teammate, TeammateInfo._at_death fields reflect the
+        final cumulative values, and get_teammate_status returns them on the dead branch.
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "turn1",
+                    cumulative_input_tokens=100,
+                    cumulative_output_tokens=50,
+                    cumulative_cost_usd=0.10,
+                ),
+                text_response_with_usage(
+                    "turn2",
+                    cumulative_input_tokens=300,
+                    cumulative_output_tokens=150,
+                    cumulative_cost_usd=0.30,
+                ),
+                text_response_with_usage(
+                    "turn3",
+                    cumulative_input_tokens=600,
+                    cumulative_output_tokens=300,
+                    cumulative_cost_usd=0.60,
+                ),
+            ]
+        )
+        _patch_sdk_broker(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        for i in range(3):
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload=f"q{i}",
+            ))
+        await _wait_lead_msgs_broker(broker, 3)
+
+        # Kill and verify tombstone at-death values
+        await broker.kill_teammate(tid)
+
+        info = broker._info[tid]
+        assert info.alive is False
+        assert info.total_cost_usd_at_death == 0.60, (
+            f"expected 0.60 at death, got {info.total_cost_usd_at_death}"
+        )
+        assert info.total_input_tokens_at_death == 600
+        assert info.total_output_tokens_at_death == 300
+
+        # get_teammate_status dead branch must forward the values
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["total_cost_usd"] == 0.60
+        assert status["total_input_tokens"] == 600
+        assert status["total_output_tokens"] == 300
+
+    async def test_tombstone_with_no_turns_has_zero_at_death_values(
+        self, broker: Broker,
+    ) -> None:
+        """D-7: teammate killed before any turn produces a ResultMessage → zeros, not None.
+
+        Uses StubTeammate (which returns zeros from status_snapshot() per SC-7 / D-5).
+        The broker extracts from snap.get("total_*", 0/0/0.0) → numeric zero defaults.
+        get_teammate_status dead branch coerces None → 0 on the wire, but here extraction
+        succeeds so at-death fields ARE numeric zero (not None).
+        """
+        # StubTeammate starts immediately with zero tokens/cost — no turns needed.
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_stub_factory_for_transcript,
+        )
+        await broker.kill_teammate(tid)
+
+        info = broker._info[tid]
+        assert info.alive is False
+        assert info.total_input_tokens_at_death == 0, (
+            f"expected 0, got {info.total_input_tokens_at_death!r} (should not be None per D-7)"
+        )
+        assert info.total_output_tokens_at_death == 0
+        assert info.total_cost_usd_at_death == 0.0
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["total_input_tokens"] == 0
+        assert status["total_output_tokens"] == 0
+        assert status["total_cost_usd"] == 0.0
+
+    async def test_get_teammate_status_alive_forwards_token_cost(
+        self, broker: Broker, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SC-4 (alive branch): get_teammate_status on a live SdkTeammate reads
+        token/cost from the live status_snapshot().
+
+        Drive one turn with cumulative cost 0.25, tokens 200/100.
+        Assert the alive status response contains those values.
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "hi",
+                    cumulative_input_tokens=200,
+                    cumulative_output_tokens=100,
+                    cumulative_cost_usd=0.25,
+                ),
+            ]
+        )
+        _patch_sdk_broker(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hello",
+        ))
+        await _wait_lead_msgs_broker(broker, 1)
+
+        # Teammate is still alive — read from live snap
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is True
+        assert status["total_input_tokens"] == 200
+        assert status["total_output_tokens"] == 100
+        assert status["total_cost_usd"] == 0.25
