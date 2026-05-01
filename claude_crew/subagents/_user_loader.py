@@ -70,7 +70,7 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, st
 
     - ``setting_sources`` is ``None`` if the frontmatter does not declare
       ``settingSources``.
-    - ``raw_body`` is the body text without the leaf suffix, for use by
+    - ``raw_body`` is the body text without the substrate prefix, for use by
       the teammate spawn path.
 
     Raises:
@@ -120,7 +120,7 @@ def discover_dir(
 
     - ``role_ss`` maps role keys to their ``settingSources`` list.
       Keys without ``settingSources`` are absent from ``role_ss``.
-    - ``bodies`` maps role keys to the raw body text (no leaf suffix),
+    - ``bodies`` maps role keys to the raw body text (no substrate prefix),
       for use by the teammate spawn path.
     """
     if not directory.is_dir():
@@ -427,7 +427,7 @@ def build_merged_pack(
 
     - ``role_ss`` maps role keys to their ``settingSources`` list.
       Precedence mirrors the agents dict: project > user > default.
-    - ``bodies`` maps role keys to raw body text (no leaf suffix).
+    - ``bodies`` maps role keys to raw body text (no substrate prefix).
       Precedence mirrors the agents dict: project > user > default.
     """
     default, default_ss, default_bodies = load_default_pack()

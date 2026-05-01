@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from claude_crew.subagents import load_default_pack
-from claude_crew.subagents._loader import _LEAF_SUFFIX
+from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
 from claude_crew.teammate_prompt import (
     NEGATIVE_PATTERNS,
     SENTINEL_ANTIPATTERNS,
@@ -93,7 +93,7 @@ class TestStaticContradictionLint:
                 idx = body.find(pattern)
                 assert idx == -1, (
                     f"role={role!r}: pack body contains negative pattern {pattern!r} "
-                    f"at position {idx}. The leaf-language must live in _LEAF_SUFFIX "
+                    f"at position {idx}. The leaf-language must live in SUBSTRATE_SUBAGENT_GUIDANCE "
                     f"only.\nSurrounding context: {body[max(0, idx-40):idx+60]!r}"
                 )
 
@@ -255,18 +255,18 @@ class TestExplorerHint:
 # ---------------------------------------------------------------------------
 
 
-class TestLeafSuffixOnSubagentPath:
-    """SC-4 — the loader's subagent path still appends _LEAF_SUFFIX."""
+class TestSubstrateGuidanceOnSubagentPath:
+    """SC-4 / #15 SC-7 — the loader's subagent path leads with SUBSTRATE_SUBAGENT_GUIDANCE."""
 
-    def test_assembled_subagent_prompt_contains_leaf_suffix(
+    def test_assembled_subagent_prompt_starts_with_substrate_guidance(
         self, default_pack_agents
     ) -> None:
-        # _LEAF_SUFFIX is appended by the loader; the AgentDefinition.prompt
-        # must end with it for all bundled roles.
+        # SUBSTRATE_SUBAGENT_GUIDANCE is prepended by the loader; the
+        # AgentDefinition.prompt must start with it for all bundled roles.
         for role, agent in default_pack_agents.items():
-            assert agent.prompt.endswith(_LEAF_SUFFIX), (
-                f"AgentDefinition for role {role!r} must end with _LEAF_SUFFIX. "
-                f"Last 200 chars: {agent.prompt[-200:]!r}"
+            assert agent.prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE), (
+                f"AgentDefinition for role {role!r} must start with SUBSTRATE_SUBAGENT_GUIDANCE. "
+                f"First 200 chars: {agent.prompt[:200]!r}"
             )
 
 

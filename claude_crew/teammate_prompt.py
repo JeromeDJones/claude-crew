@@ -10,8 +10,11 @@ The addendum corrects any leaf-context language in the pack body and
 provides peer-awareness and delegation guidance appropriate for a
 top-level teammate (one that *can* dispatch subagents).
 
-The leaf-context suffix (_LEAF_SUFFIX in _loader.py) is appended
-separately for Task/subagent invocations and is NOT part of this module.
+The subagent path's substrate framing (SUBSTRATE_SUBAGENT_GUIDANCE +
+build_subagent_prompt in _loader.py) is composed separately for Task/
+subagent invocations and is NOT part of this module. The teammate path
+deliberately retains body-first ordering (the addendum injects late-bound
+peer-list context that may reference roles named in the body).
 """
 
 from __future__ import annotations
@@ -100,7 +103,7 @@ def build_teammate_prompt(role: str, pack_body: str, agents: dict[str, Any]) -> 
     Args:
         role: the teammate's own role key; filtered out of the peer list
               per OQ-6 / R-2 (a teammate cannot delegate to itself).
-        pack_body: raw pack body text, no leaf suffix, no frontmatter.
+        pack_body: raw pack body text, no substrate framing, no frontmatter.
         agents: the agents dict (role-key → AgentDefinition); used for the
                 peer list and the explorer-hint conditional. Defensive on
                 missing or malformed description fields (R-3).

@@ -439,24 +439,35 @@ prompt = build_subagent_prompt(body)
 
 **Empty-body guard preserved:** `parse_pack_text`'s existing check `if not body.strip(): raise PackLoadError(...)` continues to fire BEFORE composition. Whitespace-only bodies cannot reach `build_subagent_prompt`.
 
-**Lockstep updates (per SC-12 — full inventory from Phase 2 reconnaissance + sentinel M-2):**
+**Lockstep updates (per SC-12 — full inventory from T3-T4 boundary sentinel sweep):**
 
-Runtime composition site (the actual rename target):
-- `claude_crew/subagents/_loader.py:85` (constant definition: replace `_LEAF_SUFFIX` with `SUBSTRATE_SUBAGENT_GUIDANCE` + `build_subagent_prompt`)
-- `claude_crew/subagents/_loader.py:141` (composition site: `body.rstrip() + _LEAF_SUFFIX` → `build_subagent_prompt(body)`)
+Pre-T4 sentinel grep `_LEAF_SUFFIX|leaf suffix|leaf-suffix` found **21 lines**. Categorized:
 
-Test imports + assertions (must update in same commit):
-- `tests/test_subagents.py:138` (import), `:148`, `:158`, `:164` (4 assertions on `_LEAF_SUFFIX`)
-- `tests/test_subagents.py:173` (assertion `_LEAF_SUFFIX not in bodies[key]` → `SUBSTRATE_SUBAGENT_GUIDANCE not in bodies[key]`; logic unchanged — raw body must contain neither the old suffix nor the new prefix)
-- `tests/test_teammate_prompt.py:23` (import), `:267` (`assert prompt.endswith(_LEAF_SUFFIX)` becomes `assert prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)` for subagent path)
-- `tests/test_teammate_prompt.py:96, 264, 268` (string literals containing `_LEAF_SUFFIX` in error/assertion messages — non-blocking but stale post-rename; update for clarity)
+**Code (load-bearing — rename will fail at runtime if missed):**
+- `claude_crew/subagents/_loader.py:135` (constant definition: replace `_LEAF_SUFFIX` with `SUBSTRATE_SUBAGENT_GUIDANCE` + `build_subagent_prompt`)
+- `claude_crew/subagents/_loader.py:212` (composition site: `body.rstrip() + _LEAF_SUFFIX` → `build_subagent_prompt(body)`)
 
-Docstring references (must update):
-- `claude_crew/teammate_prompt.py:13` (mentions `_LEAF_SUFFIX`)
-- `claude_crew/subagents/__init__.py:53` (mentions `_LEAF_SUFFIX`)
-- `claude_crew/subagents/_loader.py:101,127` (existing docstrings reference the constant by name)
+**Tests with imports + assertions (must update in same commit — CI fails otherwise):**
+- `tests/test_subagents.py:138, 148, 158, 164` (4 import lines)
+- `tests/test_subagents.py:140, 150, 160` (3 `endswith(_LEAF_SUFFIX)` assertions → `startswith(SUBSTRATE_SUBAGENT_GUIDANCE)`)
+- `tests/test_subagents.py:132, 142, 152` (3 `prompt.startswith(body.rstrip())` assertions — broken by SC-7 prompt-composition reversal; flip to `endswith(body.rstrip())`) — sentinel H-1 finding
+- `tests/test_subagents.py:173` (`_LEAF_SUFFIX not in bodies[key]` → `SUBSTRATE_SUBAGENT_GUIDANCE not in bodies[key]`; semantics preserved — raw body contains neither)
+- `tests/test_teammate_prompt.py:23` (import)
+- `tests/test_teammate_prompt.py:267` (`endswith(_LEAF_SUFFIX)` → `startswith(SUBSTRATE_SUBAGENT_GUIDANCE)`)
 
-Total: **13 sites** (was sentinel-flagged at 9; full sweep finds 13). All updated in the same commit as the rename — CI must stay green.
+**Test docstrings/strings (update for accuracy — won't break CI but creates stale narrative):**
+- `tests/test_subagents.py:130, 163` (class + method docstrings)
+- `tests/test_teammate_prompt.py:96, 259, 264, 268` (error message + class docstring + comment + assertion message)
+
+**Production docstrings (update for accuracy):**
+- `claude_crew/subagents/_loader.py:151, 153, 177, 179` (parse_pack_file/parse_pack_text docstrings)
+- `claude_crew/subagents/__init__.py:53, 56` (load_default_pack docstring)
+- `claude_crew/teammate_prompt.py:13, 103` (module + build_teammate_prompt docstrings)
+- `claude_crew/subagents/_user_loader.py:73, 123, 430` (strict_parse + discover_dir + build_merged_pack docstrings)
+
+**Total: 21 sites** updated in the same commit as the rename — Phase 2 spec said 13; T3-T4 sentinel sweep found the full count. The 8 missed sites were docstrings + sentinel H-1's 3 `startswith(body.rstrip())` hermeticity assertions which break under SC-7's composition reversal.
+
+**Import path for `SUBSTRATE_SUBAGENT_GUIDANCE` and `build_subagent_prompt`** (sentinel M-5): keep them importable via `from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE, build_subagent_prompt`. This matches the existing `_LEAF_SUFFIX` import pattern. Names are public (no `_` prefix) inside the private `_loader.py` module — the existing convention. No `__all__` change in `subagents/__init__.py` needed.
 
 **Import path for `SUBSTRATE_SUBAGENT_GUIDANCE` and `build_subagent_prompt`** (sentinel M-5): keep them importable via `from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE, build_subagent_prompt`. This matches the existing `_LEAF_SUFFIX` import pattern. Names are public (no `_` prefix) inside the private `_loader.py` module — the existing convention. No `__all__` change in `subagents/__init__.py` needed.
 

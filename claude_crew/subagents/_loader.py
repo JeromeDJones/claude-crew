@@ -128,16 +128,39 @@ _VALID_MEMORY_MODES = frozenset({"user", "project", "local"})
 # in-process Python `instance` callable that cannot survive YAML serialization.
 _VALID_MCP_DICT_TYPES = frozenset({"stdio", "sse", "http"})
 
-# Appended to AgentDefinition.prompt for every subagent (leaf context).
-# The raw body (without this suffix) is returned as the 4th element of
-# parse_pack_text so the teammate spawn path can use it without the
-# leaf-specific constraints.
-_LEAF_SUFFIX = """
-## Leaf context
+# Prepended to AgentDefinition.prompt for every subagent. Substrate-context
+# framing leads with what claude-crew is, what the dispatch model is, and what
+# the agent's leaf-node responsibilities are. The raw body (without this prefix)
+# is returned as the 4th element of parse_pack_text so the teammate spawn path
+# can build its own substrate-context prompt without the leaf-specific framing.
+#
+# Model-agnostic by design (#15 X.2): post-#15 model is optional and resolves
+# at the SDK boundary. Guidance text must NOT mention specific models — it
+# would be inaccurate for inherit-default agents.
+SUBSTRATE_SUBAGENT_GUIDANCE = """\
+## Substrate context
 
-You are a leaf subagent. You have no Task tool by design — subagents are leaves
-and cannot spawn further subagents. Stop and report when your task is complete.
+You are operating as a subagent within claude-crew, a multi-agent substrate
+coordinated via an MCP server. The crew lead has dispatched you to complete a
+focused task. You are a leaf node in this dispatch — your role definition fixes
+your tool surface, and you cannot spawn further subagents (no Task tool by
+design). Complete the assigned task, report your findings clearly, and exit.
+
+---
+
 """
+
+
+def build_subagent_prompt(body: str) -> str:
+    """Compose a subagent's system prompt: substrate guidance, then role body.
+
+    Asymmetric with build_teammate_prompt (which retains body-first ordering
+    for peer-list injection — the addendum is computed from sibling agents
+    and must land after the body it may reference). The subagent path leads
+    with substrate framing because subagents have no peer context to inject;
+    the framing is foundational.
+    """
+    return SUBSTRATE_SUBAGENT_GUIDANCE + body.rstrip()
 _VALID_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 
@@ -148,9 +171,9 @@ def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, 
 
     - ``key`` is the file stem with underscores converted to hyphens
       (e.g., ``general_purpose.md`` → ``"general-purpose"``).
-    - ``agent_definition.prompt`` is ``raw_body.rstrip() + _LEAF_SUFFIX``
-      (subagent / Task context).
-    - ``raw_body`` is the body without the leaf suffix (teammate context).
+    - ``agent_definition.prompt`` is ``SUBSTRATE_SUBAGENT_GUIDANCE +
+      raw_body.rstrip()`` (subagent / Task context — substrate framing leads).
+    - ``raw_body`` is the body without the substrate prefix (teammate context).
 
     Raises:
         PackLoadError: if the file is missing, lacks frontmatter, omits a
@@ -173,11 +196,11 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     third element so callers can access fields (e.g., ``settingSources``)
     that do not map onto ``AgentDefinition``.
 
-    The fourth element ``raw_body`` is the body text without the appended
-    ``_LEAF_SUFFIX``. The teammate spawn path uses this to build a
-    teammate-context system prompt via ``teammate_prompt.build_teammate_prompt``.
-    ``AgentDefinition.prompt`` always has the leaf suffix appended — it is
-    the source of truth for subagent (Task) invocations.
+    The fourth element ``raw_body`` is the body text without the substrate
+    framing. The teammate spawn path uses this to build a teammate-context
+    system prompt via ``teammate_prompt.build_teammate_prompt``.
+    ``AgentDefinition.prompt`` always leads with ``SUBSTRATE_SUBAGENT_GUIDANCE``
+    — it is the source of truth for subagent (Task) invocations.
     """
     fm_dict, body = _split_frontmatter(text, path)
     fm = _validate_frontmatter(fm_dict, path)
@@ -209,7 +232,7 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         )
     agent_kwargs: dict[str, Any] = {
         "description": fm.description,
-        "prompt": body.rstrip() + _LEAF_SUFFIX,
+        "prompt": build_subagent_prompt(body),
         "tools": list(fm.tools),
         "model": fm.model,
         "effort": fm.effort,

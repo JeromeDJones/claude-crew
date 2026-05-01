@@ -760,3 +760,63 @@ class TestColorField:
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
         assert fm.color is None
+
+
+# ---------------------------------------------------------------------------
+# T4 (Pillar B): subagent prompt composition refactor
+#
+# Covers SC-7, SC-12 from FEATURE-claude-code-agent-format-compatibility.md.
+# Substrate guidance leads on the subagent path. The helper is asymmetric
+# with build_teammate_prompt (which keeps body-first ordering for peer-list
+# injection — deliberate carve-out).
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSubagentPrompt:
+    """SC-7: substrate guidance leads, body follows."""
+
+    def test_helper_returns_guidance_then_body(self) -> None:
+        from claude_crew.subagents._loader import (
+            SUBSTRATE_SUBAGENT_GUIDANCE,
+            build_subagent_prompt,
+        )
+        result = build_subagent_prompt("You are a probe.")
+        assert result.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
+        assert result.endswith("You are a probe.")
+
+    def test_helper_strips_trailing_whitespace_from_body(self) -> None:
+        from claude_crew.subagents._loader import build_subagent_prompt
+        result = build_subagent_prompt("You are a probe.\n\n   \n")
+        assert result.endswith("You are a probe.")
+
+    def test_substrate_guidance_is_model_agnostic(self) -> None:
+        """X.2: post-#15 model is optional. Guidance text must NOT mention any
+        specific model name (Sonnet/Opus/Haiku) — would be inaccurate for
+        inherit-default agents."""
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
+        guidance_lower = SUBSTRATE_SUBAGENT_GUIDANCE.lower()
+        for model_name in ("sonnet", "opus", "haiku", "claude-3", "claude-4"):
+            assert model_name not in guidance_lower, (
+                f"substrate guidance references model {model_name!r} — must be "
+                f"model-agnostic per X.2 since model is optional post-#15"
+            )
+
+    def test_pack_with_body_yields_guidance_prefixed_prompt(self, tmp_path: Path) -> None:
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
+        text = _build_pack(
+            ["description: T", "tools: [Read]"],
+            body="My role-specific body.",
+        )
+        _, agent, _, raw_body = parse_pack_text(text, tmp_path / "agent.md")
+        assert agent.prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
+        assert agent.prompt.endswith("My role-specific body.")
+        # raw_body (4th return) is unmodified — no substrate framing.
+        assert SUBSTRATE_SUBAGENT_GUIDANCE not in raw_body
+        assert raw_body.strip() == "My role-specific body."
+
+    def test_empty_body_raises_before_composition(self, tmp_path: Path) -> None:
+        """SC-7 sentinel M-3: existing empty-body guard fires BEFORE composition.
+        Whitespace-only bodies cannot reach build_subagent_prompt."""
+        text = _build_pack(["description: T", "tools: [Read]"], body="   \n  \n")
+        with pytest.raises(PackLoadError, match="empty body"):
+            parse_pack_text(text, tmp_path / "agent.md")

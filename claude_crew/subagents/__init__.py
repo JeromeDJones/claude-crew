@@ -50,11 +50,12 @@ def load_default_pack() -> tuple[dict[str, AgentDefinition], dict[str, list[str]
 
     Returns a ``(pack, role_ss, bodies)`` tuple where:
 
-    - ``pack`` maps role keys to ``AgentDefinition`` (prompt has ``_LEAF_SUFFIX``).
+    - ``pack`` maps role keys to ``AgentDefinition`` (prompt leads with
+      ``SUBSTRATE_SUBAGENT_GUIDANCE``).
     - ``role_ss`` maps role keys to their ``settingSources`` list. Keys
       without ``settingSources`` are absent (not ``None``-valued entries).
-    - ``bodies`` maps role keys to the raw body text (no leaf suffix), for
-      use by the teammate spawn path to build teammate-context prompts.
+    - ``bodies`` maps role keys to the raw body text (no substrate prefix),
+      for use by the teammate spawn path to build teammate-context prompts.
     """
     pack: dict[str, AgentDefinition] = {}
     role_ss: dict[str, list[str] | None] = {}

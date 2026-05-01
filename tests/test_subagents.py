@@ -127,41 +127,44 @@ class TestPackContents:
 
 
 class TestPackHermeticity:
-    """SC-5 — pack content is in-repo, prompt starts with the file body + leaf suffix appended."""
+    """SC-5 — pack content is in-repo. Post-#15 SC-7: substrate guidance leads,
+    file body follows. The bodies dict (4th return value) is the raw body, no
+    substrate framing."""
 
-    def test_explorer_prompt_starts_with_file_body(self) -> None:
+    def test_explorer_prompt_ends_with_file_body(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "explorer.md")
-        assert pack["explorer"].prompt.startswith(body.rstrip())
+        assert pack["explorer"].prompt.endswith(body.rstrip())
 
-    def test_explorer_prompt_has_leaf_suffix(self) -> None:
-        from claude_crew.subagents._loader import _LEAF_SUFFIX
+    def test_explorer_prompt_starts_with_substrate_guidance(self) -> None:
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
         pack, _role_ss, _bodies = load_default_pack()
-        assert pack["explorer"].prompt.endswith(_LEAF_SUFFIX)
+        assert pack["explorer"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
 
-    def test_planner_prompt_starts_with_file_body(self) -> None:
+    def test_planner_prompt_ends_with_file_body(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "planner.md")
-        assert pack["planner"].prompt.startswith(body.rstrip())
+        assert pack["planner"].prompt.endswith(body.rstrip())
 
-    def test_planner_prompt_has_leaf_suffix(self) -> None:
-        from claude_crew.subagents._loader import _LEAF_SUFFIX
+    def test_planner_prompt_starts_with_substrate_guidance(self) -> None:
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
         pack, _role_ss, _bodies = load_default_pack()
-        assert pack["planner"].prompt.endswith(_LEAF_SUFFIX)
+        assert pack["planner"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
 
-    def test_general_purpose_prompt_starts_with_file_body(self) -> None:
+    def test_general_purpose_prompt_ends_with_file_body(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "general_purpose.md")
-        assert pack["general-purpose"].prompt.startswith(body.rstrip())
+        assert pack["general-purpose"].prompt.endswith(body.rstrip())
 
-    def test_general_purpose_prompt_has_leaf_suffix(self) -> None:
-        from claude_crew.subagents._loader import _LEAF_SUFFIX
+    def test_general_purpose_prompt_starts_with_substrate_guidance(self) -> None:
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
         pack, _role_ss, _bodies = load_default_pack()
-        assert pack["general-purpose"].prompt.endswith(_LEAF_SUFFIX)
+        assert pack["general-purpose"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
 
     def test_bodies_dict_matches_raw_file_body(self) -> None:
-        """The bodies dict returned by load_default_pack contains the raw body (no leaf suffix)."""
-        from claude_crew.subagents._loader import _LEAF_SUFFIX
+        """The bodies dict returned by load_default_pack contains the raw body
+        — no substrate framing on either end."""
+        from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
         _pack, _role_ss, bodies = load_default_pack()
         for key, fname in [
             ("explorer", "explorer.md"),
@@ -170,7 +173,7 @@ class TestPackHermeticity:
         ]:
             raw = _read_body(PACK_DIR / fname)
             assert bodies[key] == raw
-            assert _LEAF_SUFFIX not in bodies[key]
+            assert SUBSTRATE_SUBAGENT_GUIDANCE not in bodies[key]
 
 
 class TestParsePackFile:
