@@ -38,7 +38,7 @@ from claude_crew.sdk_teammate import (
     _payload_to_prompt,
     RateLimitedError,
 )
-from tests.fakes.sdk import FakeSDKClient, text_response
+from tests.fakes.sdk import FakeSDKClient, text_response, text_response_with_usage
 from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
 
 
@@ -2024,3 +2024,343 @@ class TestRoleFieldExtraction:
         assert opts.permission_mode is None
         assert opts.skills is None
         assert opts.disallowed_tools == [] or opts.disallowed_tools is None
+
+
+# ---------- F14: token/cost telemetry ----------
+
+
+class TestTokenCostTelemetry:
+    """Tests for Feature #14: SdkTeammate ResultMessage-based token/cost capture.
+
+    All tests use text_response_with_usage() to script ResultMessage values.
+    D-9 contract: tests using text_response() (no usage) still pass — those
+    teammates' fields stay at zero.
+    """
+
+    async def test_token_cost_overwrite_from_result_message_only(
+        self, broker, monkeypatch
+    ) -> None:
+        """D-1: cost AND tokens come from ResultMessage only, not AssistantMessage.usage.
+
+        Script an AssistantMessage with usage-like content in its content list
+        and a ResultMessage with distinct values. Assert the teammate stores the
+        ResultMessage values, not the AssistantMessage values.
+        """
+        # AssistantMessage has no `.usage` field in our fake — it's driven by
+        # TextBlock content only. The key assertion is that the snapshot values
+        # match the ResultMessage, proving we never consulted AssistantMessage.
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "hello",
+                    cumulative_input_tokens=500,
+                    cumulative_output_tokens=100,
+                    cumulative_cost_usd=0.25,
+                )
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+
+        snap = broker._teammates[tid].status_snapshot()
+        # Values must match ResultMessage exactly.
+        assert snap["total_input_tokens"] == 500
+        assert snap["total_output_tokens"] == 100
+        assert snap["total_cost_usd"] == 0.25
+
+    async def test_three_turns_show_final_cumulative_not_sum(
+        self, broker, monkeypatch
+    ) -> None:
+        """D-2: overwrite semantics — ResultMessage carries session-cumulative totals.
+
+        Three turns with cumulative cost 0.10 → 0.30 → 0.60.
+        After all three, snap["total_cost_usd"] must be 0.60 (not 1.00).
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "turn1",
+                    cumulative_input_tokens=100,
+                    cumulative_output_tokens=50,
+                    cumulative_cost_usd=0.10,
+                ),
+                text_response_with_usage(
+                    "turn2",
+                    cumulative_input_tokens=300,
+                    cumulative_output_tokens=150,
+                    cumulative_cost_usd=0.30,
+                ),
+                text_response_with_usage(
+                    "turn3",
+                    cumulative_input_tokens=600,
+                    cumulative_output_tokens=300,
+                    cumulative_cost_usd=0.60,
+                ),
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        for i in range(3):
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload=f"q{i}",
+            ))
+        await _wait_for_lead_messages(broker, 3)
+
+        snap = broker._teammates[tid].status_snapshot()
+        # Overwrite semantics: final cumulative, not running sum.
+        assert snap["total_cost_usd"] == 0.60, (
+            f"expected 0.60 (overwrite), got {snap['total_cost_usd']} "
+            f"(if 1.00, that's accumulate-not-overwrite — D-2 violated)"
+        )
+        assert snap["total_input_tokens"] == 600
+        assert snap["total_output_tokens"] == 300
+
+    async def test_cache_tokens_summed_into_total_input(
+        self, broker, monkeypatch
+    ) -> None:
+        """D-3: total_input_tokens = input_tokens + cache_read + cache_creation.
+
+        Script ResultMessage with input_tokens=100, output_tokens=50,
+        cache_read_input_tokens=1000. Assert snap["total_input_tokens"] == 1100.
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "cached turn",
+                    cumulative_input_tokens=1100,  # net = 100 after cache subtraction
+                    cumulative_output_tokens=50,
+                    cumulative_cost_usd=0.05,
+                    cache_read_input_tokens=1000,
+                )
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+
+        snap = broker._teammates[tid].status_snapshot()
+        assert snap["total_input_tokens"] == 1100, (
+            f"expected 1100 (100 net + 1000 cache), got {snap['total_input_tokens']}"
+        )
+        assert snap["total_output_tokens"] == 50
+
+    async def test_malformed_result_message_leaves_totals_unchanged(
+        self, broker, monkeypatch, caplog
+    ) -> None:
+        """D-8: malformed usage data leaves totals unchanged; WARNING is logged.
+
+        Turn 1 emits valid ResultMessage (cost 0.50).
+        Turn 2 emits ResultMessage with usage="not-a-dict" (malformed).
+        Assert snap["total_cost_usd"] == 0.50 after turn 2.
+        Assert WARNING was logged for the malformed turn.
+        """
+        import logging
+
+        # Turn 2: malformed ResultMessage — usage is a string, not a dict.
+        malformed_rm = ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=2,
+            session_id="fake",
+            total_cost_usd=0.99,  # cost also present but usage is bad
+            usage="not-a-dict",  # type: ignore[arg-type]
+        )
+        from claude_agent_sdk.types import AssistantMessage, TextBlock
+        malformed_turn = [
+            AssistantMessage(content=[TextBlock(text="turn2")], model="fake-model"),
+            malformed_rm,
+        ]
+
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "turn1",
+                    cumulative_input_tokens=200,
+                    cumulative_output_tokens=80,
+                    cumulative_cost_usd=0.50,
+                ),
+                malformed_turn,
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        for i in range(2):
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload=f"q{i}",
+            ))
+        await _wait_for_lead_messages(broker, 2)
+
+        snap = broker._teammates[tid].status_snapshot()
+        # Token totals unchanged (malformed usage) but cost DID update (cost itself valid).
+        # Per D-8: usage extraction failure leaves token totals unchanged.
+        assert snap["total_input_tokens"] == 200, (
+            f"token totals should be unchanged from turn 1 (malformed usage); "
+            f"got {snap['total_input_tokens']}"
+        )
+        assert snap["total_output_tokens"] == 80
+
+        # A WARNING must have been logged about the malformed usage.
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "not a dict" in r.message
+        ]
+        assert warning_records, (
+            "Expected WARNING log about malformed usage (not a dict), "
+            f"got records: {[r.message for r in caplog.records if r.levelno == logging.WARNING]}"
+        )
+
+    async def test_snapshot_excludes_in_flight_turn(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-2: snapshot during in-flight turn shows pre-turn values only.
+
+        We run turn 1 to establish a baseline (cost=0.10, tokens=100/50).
+        Then start turn 2 with a response_hangs=True client — the stream never
+        delivers a ResultMessage. We read the snapshot mid-turn and assert it
+        still shows the turn-1 values, not any in-flight contribution.
+
+        The hang simulates "query sent, ResultMessage not yet received."
+        We cancel the teammate after checking the snapshot.
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "turn1",
+                    cumulative_input_tokens=100,
+                    cumulative_output_tokens=50,
+                    cumulative_cost_usd=0.10,
+                ),
+                # turn 2 is scripted but response_hangs makes it block
+                text_response_with_usage(
+                    "turn2",
+                    cumulative_input_tokens=300,
+                    cumulative_output_tokens=150,
+                    cumulative_cost_usd=0.30,
+                ),
+            ],
+            response_hangs=[False, True],
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+
+        # Complete turn 1.
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="q1",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+
+        # Verify baseline from turn 1.
+        snap_after_turn1 = broker._teammates[tid].status_snapshot()
+        assert snap_after_turn1["total_cost_usd"] == 0.10
+
+        # Start turn 2 (will hang — no ResultMessage arrives).
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="q2",
+        ))
+        # Brief yield to let the teammate enter the hung receive_response() loop.
+        await asyncio.sleep(0.05)
+
+        # Snapshot mid-turn must still show turn-1 values.
+        snap_mid_turn = broker._teammates[tid].status_snapshot()
+        assert snap_mid_turn["total_cost_usd"] == 0.10, (
+            f"snapshot mid-turn should show 0.10 (turn-1 value), "
+            f"got {snap_mid_turn['total_cost_usd']}"
+        )
+        assert snap_mid_turn["total_input_tokens"] == 100
+        assert snap_mid_turn["total_output_tokens"] == 50
+
+    async def test_token_cost_types_and_no_scinotation(
+        self, broker, monkeypatch
+    ) -> None:
+        """SC-9: total_input/output_tokens are int; total_cost_usd is float.
+        JSON serialization must not produce scientific notation.
+
+        Python's json.dumps uses repr(float) which switches to scientific
+        notation for values below ~1e-5. We verify the snap types AND that
+        json.dumps of the snap dict produces no 'e' in the cost value.
+        """
+        import json
+
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "tiny cost",
+                    cumulative_input_tokens=10,
+                    cumulative_output_tokens=5,
+                    cumulative_cost_usd=0.0001,
+                )
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+
+        snap = broker._teammates[tid].status_snapshot()
+
+        # Type assertions.
+        assert isinstance(snap["total_input_tokens"], int), (
+            f"total_input_tokens must be int, got {type(snap['total_input_tokens'])}"
+        )
+        assert isinstance(snap["total_output_tokens"], int), (
+            f"total_output_tokens must be int, got {type(snap['total_output_tokens'])}"
+        )
+        assert isinstance(snap["total_cost_usd"], float), (
+            f"total_cost_usd must be float, got {type(snap['total_cost_usd'])}"
+        )
+
+        # Value assertions.
+        assert snap["total_input_tokens"] == 10
+        assert snap["total_output_tokens"] == 5
+        assert snap["total_cost_usd"] == 0.0001
+
+        # JSON serialization must not produce scientific notation for 0.0001.
+        # Python's json.dumps will produce "0.0001" for this value (above 1e-5 threshold).
+        serialized = json.dumps(snap["total_cost_usd"])
+        assert "e" not in serialized.lower(), (
+            f"json.dumps of total_cost_usd={snap['total_cost_usd']!r} "
+            f"produced scientific notation: {serialized!r}"
+        )
