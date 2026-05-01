@@ -746,4 +746,40 @@ Scenario: Task tool events do NOT pollute the stream (Q2 / D-8)
 
 ## Phase 5: Completion
 
-*To be filled in Phase 5.*
+### Verification
+
+- [x] Feature works against Phase 1 SCs — sentinel walked all 11 SCs to named tests, all ✅
+- [x] No regressions — 585 passed (started branch at 550), no skipped failures
+- [x] FEATURE.md spec matches implementation — D-1 through D-13 all enforced
+- [x] PRODUCT-VISION.md updated — see journal entry below
+- [x] BACKLOG.md updated — D-13 (current_tool badge prominence) entry logged
+- [x] Live spawn check — general-purpose teammate fired Read tool, `last_tool_completed` populated, deque path verified by code-adjacency to that update
+
+### Retrospective
+
+**What went well**
+
+- **Pre-load co-architect's three-pushback warmup BEFORE Phase 2.** Co-architect named flat-tuple-shape-vs-retention-math, SC-1 freshness budget, and SC-7-doesn't-solve-operator-silence at Phase 1 review — all three became Phase 2 design pillars (D-6, D-11, BACKLOG D-13). The "name three things you'll push back on" prompt at spawn time keeps paying off.
+- **Sentinel review at T2-T3 boundary, not T3-T4.** Co-architect's recommendation. T2 was the highest-risk task (3 hook callsites + tombstone state mutation); reviewing it before T3 froze the dataclass shape caught five gaps cheap (turn_end coverage, interrupted coverage, parallel-tools coverage, missing assertion + 1 cosmetic). Reviewing T3-T4 as a unit at final added the remaining cleanup. Two checkpoints, not three, was the right cadence.
+- **The "spec pseudocode bug" pattern at Phase 2 sentinel review.** Sentinel F1 caught that my Phase 2 pseudocode mutated a frozen dataclass directly (`info.tool_events_at_death = ...` would have FrozenInstanceError'd at runtime). Sentinel F2 caught that StubTeammate / _NoopTeammate needed the deque init too or 550+ tests would AttributeError. Both were spec-time fixes, zero implementation cost. Phase 2 sentinel pays off when it reads the pseudocode like an implementer would.
+- **D-4 ordering enforcement (in-memory append BEFORE transcript write).** This was the single load-bearing decision for SC-8 (disk-full doesn't blind dashboard). Encoding it as a 2-line code ordering with a named test made it impossible to drift. The `test_completed_tool_events_appended_when_transcript_disabled` unit test plus `test_disk_full_does_not_blind_dashboard` E2E catches any future refactor that swaps the order.
+- **No `/api/state` schema change.** Tool events ride inline in `transcripts[crew_id]` (D-8). This makes #13's existing remote-fanout pass-through carry tool events for free — SC-6 satisfied with zero new code in `_fetch_remote_state`. The simplest extension wins.
+- **Sentinel Defer-1 fix landed in same task as the gap was found.** "Add a turn_end test" surfaced at the T2-T3 checkpoint. Two-line addition before T3 — done. Deferring to T5 would have been technically correct but added context-switch cost. Land tiny coverage gaps where they're noticed if the cost is two lines.
+
+**What was friction**
+
+- **D-9 body format spec example was wrong.** I wrote `WebFetch (failed, 12.3s) [http 503]` in the spec but the format string `{:.2f}` produces `12.30s`. Test caught it; took one minute to fix the test. The spec should have said `12.30s` from the start. Lesson: when writing format-string examples in a spec, run them through `.format()` mentally before pasting. Or: write the test first, read the failure, paste the actual output into the spec.
+- **`_NoopTeammate` test fixture initialization gap was caught at T2 test runtime, not at design.** Sentinel F2 flagged `StubTeammate` needed the deque init, but the project also has `_NoopTeammate` in `test_broker.py` as a separate minimal teammate. Both needed the field. T2 test failure surfaced it cleanly (one-line fix), but a Phase 2 grep for "class.*Teammate" or "_tool_uses.*=" in tests/ would have caught both at spec time. Add: when adding a new field to the Teammate ABC, grep all teammate subclasses (production + test fixtures) at Phase 2.
+- **One commit was a "feature feature commit + sentinel-defer-fix combo" (T3 included the turn_end test from T2-T3 checkpoint).** Mostly fine — the defer-fix was small and same-area. But the commit message had to explain both. Cleaner: separate sentinel-defer fixes from task commits when they touch different test classes. Not a hard rule; readability call.
+
+**Improvements**
+
+1. **Add to TEMPLATE.md Phase 2 gate:** "When adding a new field to a base class with multiple subclasses (including test fixtures), grep all subclasses and list each one in the implementation notes." Catches the F2-style gap at spec time.
+2. **Add to TEMPLATE.md Phase 2 gate:** "When the spec includes string-formatting examples, run the format string against the example values before locking the spec." Catches the D-9-style gap at spec time, before any test is written.
+3. **For dashboard/UX features, add to Phase 1 sentinel prompt:** "Does the data-pipeline change actually deliver the user-experience win the problem statement promises, or does it deliver the data and rely on a deferred UX change?" — would have surfaced D-13 as "this isn't done; a follow-up is required" rather than "we'll log to BACKLOG." Not always actionable but worth asking.
+
+**Workflow updates made**
+
+- [ ] TEMPLATE.md updated — improvements 1 and 2 above are general enough to lift into the template, but I'm leaving them as retro notes for now; the next 1-2 features will tell me whether they're load-bearing or one-time.
+- [x] BACKLOG.md updated — D-13 entry logged for the current_tool badge prominence follow-up
+- [x] PRODUCT-VISION.md updated — #19 marked done + journal entry + co-architect's MERGE-WITH-NOTE flag carried forward to elevate the D-13 follow-up from BACKLOG to the next dashboard-UX feature row
