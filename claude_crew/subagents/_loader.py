@@ -10,6 +10,7 @@ and re-usable by Feature #3b's user-defined-agent loader.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -17,9 +18,43 @@ from typing import Any, Literal
 import yaml
 from claude_agent_sdk.types import AgentDefinition
 
+logger = logging.getLogger(__name__)
+
 
 class PackLoadError(Exception):
     """Raised when a subagent pack file is missing, malformed, or incomplete."""
+
+
+def _coerce_str_or_list(value: Any, field_name: str, path: Path) -> list[str]:
+    """Coerce YAML string-or-list polymorphism into a list of stripped strings.
+
+    Closes a latent bug at the tools/disallowedTools call sites where bare
+    list(d["tools"]) silently iterated a string into characters when the
+    operator wrote `tools: Read` (no comma). Per Claude Code's agent file
+    spec, both fields accept either a comma-separated string or a YAML list.
+
+    Strict on element types: list elements must be strings. Coercing
+    [None, "Read"] silently to ["None", "Read"] would produce bogus tool
+    names that fail at spawn time with cryptic errors.
+    """
+    if isinstance(value, str):
+        return [s.strip() for s in value.split(",") if s.strip()]
+    if isinstance(value, list):
+        result: list[str] = []
+        for s in value:
+            if not isinstance(s, str):
+                raise PackLoadError(
+                    f"pack file {path}: {field_name} list element must be a string, "
+                    f"got {type(s).__name__}: {s!r}"
+                )
+            stripped = s.strip()
+            if stripped:
+                result.append(stripped)
+        return result
+    raise PackLoadError(
+        f"pack file {path}: {field_name} expected string or list, "
+        f"got {type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True)
@@ -312,7 +347,7 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
     return PackFrontmatter(
         description=str(d["description"]),
         model=str(d["model"]),
-        tools=list(d["tools"]),
+        tools=_coerce_str_or_list(d["tools"], "tools", path),
         effort=str(d["effort"]) if d.get("effort") is not None else None,
         maxTurns=int(d["maxTurns"]) if d.get("maxTurns") is not None else None,
         initialPrompt=(
@@ -322,7 +357,7 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
         skills=parsed_skills,
         permissionMode=pm,
         disallowedTools=(
-            tuple(str(t) for t in d["disallowedTools"])
+            tuple(_coerce_str_or_list(d["disallowedTools"], "disallowedTools", path))
             if d.get("disallowedTools") is not None else None
         ),
         settingSources=list(ss) if ss is not None else None,

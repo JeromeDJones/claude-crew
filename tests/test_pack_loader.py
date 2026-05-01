@@ -286,3 +286,180 @@ class TestSkillsInvalidShape:
         text = _pack_text(f"skills: {value}")
         with pytest.raises(PackLoadError):
             parse_pack_text(text, tmp_path / "agent.md")
+
+
+# ---------------------------------------------------------------------------
+# T1 (Pillar E): tools / disallowedTools comma-string coercion
+#
+# Covers SC-5 and SC-14 from FEATURE-claude-code-agent-format-compatibility.md.
+# Closes a latent bug where `tools: Read` (single string, no comma) was
+# silently iterated into characters by `list(d["tools"])`.
+# ---------------------------------------------------------------------------
+
+
+def _build_pack(frontmatter_lines: list[str], body: str = "You are a test agent.") -> str:
+    """Build a pack file text with explicit control over frontmatter lines."""
+    return "\n".join(["---", *frontmatter_lines, "---", "", body, ""])
+
+
+class TestToolsCoercion:
+    """SC-5: tools accepts string-or-list YAML polymorphism per Claude Code spec."""
+
+    def test_tools_list_form_unchanged(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read, Write]",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "Write"]
+
+    def test_tools_comma_string(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: Read, Write, Edit, Bash",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "Write", "Edit", "Bash"]
+
+    def test_tools_single_string_no_comma_does_not_iterate_chars(self, tmp_path: Path) -> None:
+        """REGRESSION: closes _loader.py:315 latent character-iteration bug.
+
+        Pre-T1: list("Read") returns ["R", "e", "a", "d"]. Silent corruption.
+        Post-T1: ["Read"].
+        """
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: Read",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read"]
+        assert fm.tools != ["R", "e", "a", "d"]
+
+    def test_tools_comma_string_with_mcp_prefix(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: Read, mcp__knowledge-graph__search_codebase_definitions",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "mcp__knowledge-graph__search_codebase_definitions"]
+
+    def test_tools_trailing_comma_tolerated(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: Read, Write,",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "Write"]
+
+    def test_tools_double_comma_drops_empty(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: Read,,Write",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "Write"]
+
+    def test_tools_quoted_comma_string(self, tmp_path: Path) -> None:
+        """A YAML-quoted single string with internal commas still splits.
+
+        The unbracketed form `tools: "Read", "Write"` is invalid YAML
+        (rejected by yaml.safe_load before reaching the coercer). The
+        realistic quoted form is `tools: "Read, Write"` — one YAML string
+        with an internal comma. Coercer splits it.
+        """
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            'tools: "Read, Write"',
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ["Read", "Write"]
+
+    def test_tools_int_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: 42",
+        ])
+        with pytest.raises(PackLoadError, match="tools.*expected string or list.*int"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_tools_list_with_none_element_raises(self, tmp_path: Path) -> None:
+        """SC-5 + sentinel L-1: list elements must be strings, not silently coerced."""
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [null, Read]",
+        ])
+        with pytest.raises(PackLoadError, match="tools.*list element must be a string"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_tools_list_with_int_element_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [42, Read]",
+        ])
+        with pytest.raises(PackLoadError, match="tools.*list element must be a string"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+
+class TestDisallowedToolsCoercion:
+    """SC-14: disallowedTools accepts string-or-list parity with tools."""
+
+    def test_disallowed_tools_list_form_unchanged(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+            "disallowedTools: [Bash, WebFetch]",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.disallowedTools == ("Bash", "WebFetch")
+
+    def test_disallowed_tools_comma_string(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+            "disallowedTools: Bash, WebFetch",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.disallowedTools == ("Bash", "WebFetch")
+
+    def test_disallowed_tools_single_string_no_comma(self, tmp_path: Path) -> None:
+        """Parity regression for the same character-iteration bug."""
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+            "disallowedTools: Bash",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.disallowedTools == ("Bash",)
+
+    def test_disallowed_tools_int_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+            "disallowedTools: 42",
+        ])
+        with pytest.raises(PackLoadError, match="disallowedTools.*expected string or list.*int"):
+            parse_pack_text(text, tmp_path / "agent.md")
+
+    def test_disallowed_tools_list_with_none_raises(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+            "disallowedTools: [null, Bash]",
+        ])
+        with pytest.raises(PackLoadError, match="disallowedTools.*list element must be a string"):
+            parse_pack_text(text, tmp_path / "agent.md")
