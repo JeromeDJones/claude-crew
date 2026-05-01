@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from claude_crew.auth import validate_auth_or_exit
 from claude_crew.broker import (
@@ -29,6 +30,13 @@ from claude_crew.envelope import Envelope, new_message_id
 # with margin, so mid-turn timeouts genuinely don't happen. The lead can
 # always cancel; FastMCP over stdio has no transport-level timeout.
 MAX_WAIT_SECONDS = 600.0
+
+# SDK PermissionMode literals — kept in sync with claude_agent_sdk.types.PermissionMode.
+# Validated at the MCP boundary (Feature #17 SC-4) so invalid strings fail loudly
+# at the protocol surface instead of traveling silently to the SDK options builder.
+_VALID_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+)
 
 
 def _err(code: str, message: str) -> dict[str, Any]:
@@ -76,6 +84,11 @@ def make_server(
                 "dontAsk", "auto". Overrides the role's pack-declared
                 permissionMode when provided.
         """
+        if permission_mode is not None and permission_mode not in _VALID_PERMISSION_MODES:
+            raise ToolError(
+                f"permission_mode {permission_mode!r} is not a valid PermissionMode; "
+                f"accepted: {sorted(_VALID_PERMISSION_MODES)}"
+            )
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,

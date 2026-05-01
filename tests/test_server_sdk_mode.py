@@ -102,6 +102,90 @@ class TestSDKModeIntegration:
             ))
             assert send.get("error") == "teammate_dead"
 
+    async def test_spawn_with_invalid_permission_mode_returns_tool_error(self) -> None:
+        """Feature #17 SC-4: invalid permission_mode at MCP boundary → ToolError surfaces.
+
+        Routes through FastMCP tool dispatch (not a direct closure call) so the
+        ToolError actually crosses the protocol boundary. FastMCP catches the
+        exception and the result has isError=True with our message visible in
+        the content text (FastMCP prefixes "Error executing tool spawn_teammate:"
+        per mcp/server/fastmcp/tools/base.py:117 — the prefix is observable but
+        the substantive content of the message is what we assert on)."""
+        async with _client_with_sdk_mode() as s:
+            await s.initialize()
+            result = await s.call_tool(
+                "spawn_teammate", {"role": "planner", "permission_mode": "superuser"},
+            )
+            assert result.isError is True
+            assert result.content
+            text = result.content[0].text
+            # Substantive content: field name, bad value, accepted set.
+            assert "permission_mode" in text
+            assert "superuser" in text
+            for valid in ("default", "acceptEdits", "plan", "bypassPermissions",
+                          "dontAsk", "auto"):
+                assert valid in text, f"expected accepted value {valid!r} in error: {text!r}"
+            # Crew should not contain a planner — validation fired before broker spawn.
+            crew = _content_json(await s.call_tool("list_crew", {}))
+            assert all(t.get("role") != "planner" for t in crew.get("teammates", []))
+
+    async def test_spawn_with_valid_permission_mode_passes(self, monkeypatch) -> None:
+        """Feature #17 SC-4: valid permission_mode passes validation cleanly."""
+        # Reuse the FakeCaptureSDKClient pattern from the next test to avoid real spawn.
+        captured: dict = {}
+
+        class FakeCaptureSDKClient:
+            def __init__(self, options=None):
+                if options is not None:
+                    captured["permission_mode"] = getattr(options, "permission_mode", None)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt, session_id=None):
+                pass
+
+            async def receive_response(self):
+                return
+                yield
+
+        monkeypatch.setattr(sdk_module, "ClaudeSDKClient", FakeCaptureSDKClient)
+        async with _client_with_sdk_mode() as s:
+            await s.initialize()
+            result = await s.call_tool(
+                "spawn_teammate", {"role": "planner", "permission_mode": "plan"},
+            )
+            assert result.isError is False or result.isError is None
+
+    async def test_spawn_with_none_permission_mode_skips_validation(self, monkeypatch) -> None:
+        """Feature #17 SC-4: permission_mode=None → no validation triggered, falls back to pack."""
+
+        class FakeCaptureSDKClient:
+            def __init__(self, options=None):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt, session_id=None):
+                pass
+
+            async def receive_response(self):
+                return
+                yield
+
+        monkeypatch.setattr(sdk_module, "ClaudeSDKClient", FakeCaptureSDKClient)
+        async with _client_with_sdk_mode() as s:
+            await s.initialize()
+            result = await s.call_tool("spawn_teammate", {"role": "planner"})
+            assert result.isError is False or result.isError is None
+
     async def test_spawn_with_cwd_and_permission_mode_reaches_options(self, monkeypatch) -> None:
         """Full chain: MCP server → broker → factory → SdkTeammate → ClaudeAgentOptions.
         Monkeypatch ClaudeSDKClient to capture options that were passed."""
