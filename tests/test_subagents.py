@@ -777,6 +777,185 @@ class TestPackFrontmatterExtension:
         )
 
 
+class TestPackFrontmatterFeature17:
+    """Feature #17 T1 — mcpServers and memory fields on PackFrontmatter.
+
+    Covers SC-1, SC-2, SC-3, SC-8.
+    """
+
+    def test_memory_valid_value_parsed(self, tmp_path: Path) -> None:
+        """memory: project → PackFrontmatter.memory == 'project' and forwarded to AgentDefinition."""
+        f = _write_agent(
+            tmp_path, "mem_agent.md", extra_frontmatter="memory: project\n"
+        )
+        key, agent, fm, _ = parse_pack_file(f)
+        assert key == "mem-agent"
+        assert fm.memory == "project"
+        assert agent.memory == "project"
+
+    def test_memory_invalid_value_raises(self, tmp_path: Path) -> None:
+        """memory: global → PackLoadError naming field, value, accepted set."""
+        f = _write_agent(
+            tmp_path, "bad_mem.md", extra_frontmatter="memory: global\n"
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        msg = str(exc.value)
+        assert "memory" in msg
+        assert "global" in msg
+        assert "user" in msg and "project" in msg and "local" in msg
+
+    def test_mcp_servers_string_entries_parsed(self, tmp_path: Path) -> None:
+        """mcpServers: ['atlassian'] → tuple stored, list forwarded to AgentDefinition."""
+        f = _write_agent(
+            tmp_path, "mcp_string.md",
+            extra_frontmatter="mcpServers:\n  - atlassian\n  - claude-crew\n",
+        )
+        key, agent, fm, _ = parse_pack_file(f)
+        assert fm.mcpServers == ("atlassian", "claude-crew")
+        assert agent.mcpServers == ["atlassian", "claude-crew"]
+
+    def test_mcp_servers_inline_dict_entries_parsed(self, tmp_path: Path) -> None:
+        """mcpServers: [{type: stdio, ...}] → dict preserved verbatim through parse."""
+        f = _write_agent(
+            tmp_path, "mcp_inline.md",
+            extra_frontmatter=(
+                "mcpServers:\n"
+                "  - type: stdio\n"
+                "    name: local-x\n"
+                "    command: uv\n"
+            ),
+        )
+        key, agent, fm, _ = parse_pack_file(f)
+        assert fm.mcpServers is not None
+        assert len(fm.mcpServers) == 1
+        entry = fm.mcpServers[0]
+        assert isinstance(entry, dict)
+        assert entry == {"type": "stdio", "name": "local-x", "command": "uv"}
+        assert agent.mcpServers == [{"type": "stdio", "name": "local-x", "command": "uv"}]
+
+    def test_mcp_servers_mixed_entries_parsed(self, tmp_path: Path) -> None:
+        """mcpServers: ['atlassian', {type: http, ...}] → both forms preserved in order."""
+        f = _write_agent(
+            tmp_path, "mcp_mixed.md",
+            extra_frontmatter=(
+                "mcpServers:\n"
+                "  - atlassian\n"
+                "  - type: http\n"
+                "    url: https://example.com\n"
+            ),
+        )
+        _, agent, fm, _ = parse_pack_file(f)
+        assert fm.mcpServers == (
+            "atlassian",
+            {"type": "http", "url": "https://example.com"},
+        )
+        assert agent.mcpServers == [
+            "atlassian",
+            {"type": "http", "url": "https://example.com"},
+        ]
+
+    def test_mcp_servers_not_a_list_raises(self, tmp_path: Path) -> None:
+        """mcpServers: atlassian (bare string) → PackLoadError."""
+        f = _write_agent(
+            tmp_path, "mcp_bad.md", extra_frontmatter="mcpServers: atlassian\n"
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        assert "mcpServers" in str(exc.value)
+        assert "list" in str(exc.value)
+
+    def test_mcp_servers_sdk_type_rejected(self, tmp_path: Path) -> None:
+        """mcpServers: [{type: sdk, ...}] → PackLoadError (D-7: sdk requires in-process callable)."""
+        f = _write_agent(
+            tmp_path, "mcp_sdk.md",
+            extra_frontmatter=(
+                "mcpServers:\n"
+                "  - type: sdk\n"
+                "    name: x\n"
+            ),
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        msg = str(exc.value)
+        assert "mcpServers[0]" in msg
+        assert "sdk" in msg
+        assert "in-process" in msg or "instance" in msg
+
+    def test_mcp_servers_unknown_dict_type_raises(self, tmp_path: Path) -> None:
+        """mcpServers: [{type: websocket}] → PackLoadError naming index, type, accepted set."""
+        f = _write_agent(
+            tmp_path, "mcp_ws.md",
+            extra_frontmatter="mcpServers:\n  - type: websocket\n",
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        msg = str(exc.value)
+        assert "mcpServers[0]" in msg
+        assert "websocket" in msg
+        assert "stdio" in msg and "sse" in msg and "http" in msg
+
+    def test_mcp_servers_non_str_non_dict_element_raises(self, tmp_path: Path) -> None:
+        """mcpServers: [42] → PackLoadError naming the index and the type."""
+        f = _write_agent(
+            tmp_path, "mcp_int.md", extra_frontmatter="mcpServers:\n  - 42\n"
+        )
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_file(f)
+        msg = str(exc.value)
+        assert "mcpServers[0]" in msg
+        assert "int" in msg
+
+    def test_mcp_servers_empty_list_accepted(self, tmp_path: Path) -> None:
+        """mcpServers: [] → PackFrontmatter.mcpServers is empty tuple, AgentDefinition gets []."""
+        f = _write_agent(
+            tmp_path, "mcp_empty.md", extra_frontmatter="mcpServers: []\n"
+        )
+        _, agent, fm, _ = parse_pack_file(f)
+        assert fm.mcpServers == ()
+        assert agent.mcpServers == []
+
+    def test_new_fields_absent_parses_cleanly(self, tmp_path: Path) -> None:
+        """No new fields → mcpServers/memory absent on both PackFrontmatter and AgentDefinition."""
+        f = _write_agent(tmp_path, "minimal17.md")
+        _, agent, fm, _ = parse_pack_file(f)
+        assert fm.mcpServers is None
+        assert fm.memory is None
+        assert agent.mcpServers is None
+        assert agent.memory is None
+
+    def test_new_fields_no_warning_in_strict_parse(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-8: mcpServers and memory declared → strict_parse emits no 'unsupported key' warning."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="claude_crew.subagents.loader")
+
+        f = _write_agent(
+            tmp_path, "f17_allfields.md",
+            extra_frontmatter=(
+                "mcpServers:\n  - atlassian\n"
+                "memory: project\n"
+            ),
+        )
+        from claude_crew.subagents._user_loader import strict_parse
+
+        key, agent, _ss, _body = strict_parse(f)
+        assert agent.mcpServers == ["atlassian"]
+        assert agent.memory == "project"
+
+        unsupported = [
+            r for r in caplog.records
+            if r.levelname == "WARNING"
+            and ("unsupported" in r.message.lower() or "unrecognized" in r.message.lower())
+            and r.name == "claude_crew.subagents.loader"
+        ]
+        assert unsupported == [], (
+            f"Expected no unsupported-key warnings; got: {unsupported}"
+        )
+
+
 # ---------- Task 4: Full chain integration + live behavioral proof ----------
 
 

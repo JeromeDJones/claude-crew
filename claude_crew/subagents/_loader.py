@@ -28,7 +28,25 @@ class PackFrontmatter:
 
     Required: description, model, tools.
     Optional: effort, maxTurns, initialPrompt, background, skills,
-              permissionMode, disallowedTools.
+              permissionMode, disallowedTools, settingSources, mcpServers, memory.
+
+    The ``mcpServers`` field accepts a list of (str | dict) entries — string
+    entries reference servers in ``~/.claude.json``; dict entries are inline
+    ``McpServerConfig`` (type ∈ {stdio, sse, http}; ``sdk``-type rejected at
+    pack-load because it requires an in-process Python callable). For inline
+    dicts, a ``name`` key on the entry sets the dict-form key in
+    ``ClaudeAgentOptions.mcp_servers`` (see Feature #17 D-7).
+
+    On the teammate path, malformed inline dicts (e.g., ``stdio`` without
+    ``command``) cause a CLI subprocess crash that surfaces via the existing
+    teammate death path — shallow validation here trades depth for not
+    duplicating SDK schema (D-12).
+
+    The ``memory`` field is honored on the subagent path (rides the SDK
+    initialize message via AgentDefinition serialization) but has no carrier
+    on ``ClaudeAgentOptions`` — declaring it on a role spawned as a top-level
+    teammate emits a WARN at spawn time (D-8).
+
     Unknown fields are ignored (forward-compat).
     """
 
@@ -43,15 +61,22 @@ class PackFrontmatter:
     permissionMode: str | None = None
     disallowedTools: tuple[str, ...] | None = None
     settingSources: list[str] | None = None
+    mcpServers: tuple[str | dict[str, Any], ...] | None = None
+    memory: Literal["user", "project", "local"] | None = None
 
 
 _REQUIRED = ("description", "model", "tools")
 _OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background",
-             "skills", "permissionMode", "disallowedTools", "settingSources")
+             "skills", "permissionMode", "disallowedTools", "settingSources",
+             "mcpServers", "memory")
 
 _VALID_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
 )
+_VALID_MEMORY_MODES = frozenset({"user", "project", "local"})
+# `sdk`-type is rejected in pack form: McpSdkServerConfig requires an
+# in-process Python `instance` callable that cannot survive YAML serialization.
+_VALID_MCP_DICT_TYPES = frozenset({"stdio", "sse", "http"})
 
 # Appended to AgentDefinition.prompt for every subagent (leaf context).
 # The raw body (without this suffix) is returned as the 4th element of
@@ -133,6 +158,10 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         agent_kwargs["permissionMode"] = fm.permissionMode
     if fm.disallowedTools is not None:
         agent_kwargs["disallowedTools"] = list(fm.disallowedTools)
+    if fm.mcpServers is not None:
+        agent_kwargs["mcpServers"] = list(fm.mcpServers)
+    if fm.memory is not None:
+        agent_kwargs["memory"] = fm.memory
 
     agent = AgentDefinition(**agent_kwargs)
     return key, agent, fm, body
@@ -236,6 +265,50 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             f"auto-injects ['user','project']), or set it explicitly."
         )
 
+    # memory: 3-string enum, mirrors permissionMode pattern (Feature #17 D-2).
+    raw_memory = d.get("memory")
+    if raw_memory is not None and raw_memory not in _VALID_MEMORY_MODES:
+        raise PackLoadError(
+            f"pack file {path}: memory {raw_memory!r} is invalid; "
+            f"accepted: {sorted(_VALID_MEMORY_MODES)}"
+        )
+
+    # mcpServers: list of (str | dict-with-known-type), shallow validation
+    # only. `sdk`-type is rejected in pack form (Feature #17 D-7) — it
+    # requires an in-process Python callable that cannot survive YAML.
+    raw_mcp = d.get("mcpServers")
+    parsed_mcp: tuple[str | dict[str, Any], ...] | None
+    if raw_mcp is None:
+        parsed_mcp = None
+    else:
+        if not isinstance(raw_mcp, list):
+            raise PackLoadError(
+                f"pack file {path}: mcpServers must be a list; "
+                f"got {type(raw_mcp).__name__}"
+            )
+        for i, entry in enumerate(raw_mcp):
+            if isinstance(entry, str):
+                continue
+            if isinstance(entry, dict):
+                t = entry.get("type")
+                if t == "sdk":
+                    raise PackLoadError(
+                        f"pack file {path}: mcpServers[{i}] type='sdk' is not "
+                        f"supported in pack form (requires in-process instance); "
+                        f"register the server in ~/.claude.json and reference by name"
+                    )
+                if t not in _VALID_MCP_DICT_TYPES:
+                    raise PackLoadError(
+                        f"pack file {path}: mcpServers[{i}] dict has type={t!r}; "
+                        f"accepted: {sorted(_VALID_MCP_DICT_TYPES)}"
+                    )
+                continue
+            raise PackLoadError(
+                f"pack file {path}: mcpServers[{i}] must be str or dict; "
+                f"got {type(entry).__name__}"
+            )
+        parsed_mcp = tuple(raw_mcp)
+
     return PackFrontmatter(
         description=str(d["description"]),
         model=str(d["model"]),
@@ -253,4 +326,6 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
             if d.get("disallowedTools") is not None else None
         ),
         settingSources=list(ss) if ss is not None else None,
+        mcpServers=parsed_mcp,
+        memory=raw_memory,
     )
