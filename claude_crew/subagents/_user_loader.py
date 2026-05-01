@@ -434,6 +434,24 @@ def build_merged_pack(
     user, user_ss, user_bodies = load_user_agents(home_dir)
     project, project_ss, project_bodies = load_project_agents(project_root)
 
+    # Per-source INFO contract (#15 SC-11): one log per source naming the
+    # source label, count, and role keys loaded. Operator's authoritative
+    # startup record of which packs the substrate is using.
+    home = home_dir if home_dir is not None else Path.home()
+    project_dir = project_root if project_root is not None else Path.cwd()
+    logger.info(
+        "loaded %d pack(s) from bundled (claude_crew/subagents): %s",
+        len(default), sorted(default.keys()),
+    )
+    logger.info(
+        "loaded %d pack(s) from user (%s/.claude/agents): %s",
+        len(user), home, sorted(user.keys()),
+    )
+    logger.info(
+        "loaded %d pack(s) from project (%s/.claude/agents): %s",
+        len(project), project_dir, sorted(project.keys()),
+    )
+
     for key in user:
         if key in default:
             logger.info("agent %r from user-level shadows default pack", key)
