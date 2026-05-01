@@ -6,6 +6,22 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-01] Feature: agent-definition-parity (#17)
+
+### Existing user-level packs declaring `memory: user` now emit spawn-time WARN
+- **What**: User-level agent files at `~/.claude/agents/{sentinel,builder,scout}.md` (and possibly other operator configs) declare `memory: user` as frontmatter. Pre-#17 this field was silently ignored by forward-compat. Post-#17 it parses successfully into `PackFrontmatter.memory` and triggers the D-8 WARN at every top-level teammate spawn for those roles ("ClaudeAgentOptions has no memory carrier — this field applies only to subagent dispatch contexts"). The WARN is correct (memory has no teammate-path carrier) but is a noise regression for operators who had these packs working pre-#17.
+- **Where**: `~/.claude/agents/sentinel.md`, `~/.claude/agents/builder.md`, `~/.claude/agents/scout.md` (operator-level config, not in repo). Spawn-time WARN at `claude_crew/sdk_teammate.py:993-999`.
+- **Why it matters**: Common-case impact is small — these packs are typically dispatched as Task subagents (which legitimately use `memory`), not spawned as top-level teammates. But any operator who DOES spawn them as teammates (e.g., for `/sdd-workflow` co-architect via `mcp__claude-crew__spawn_teammate role=feature-planner`) sees a noisy WARN they didn't see before. Sentinel M-2 at #17 final review.
+- **Suggested action**: No code change. Document in #17 retrospective. Operators who don't want the WARN remove `memory: user` from their pack frontmatter (it was always a no-op on the teammate path; #17 just made it visible). If WARN noise becomes a real complaint, consider downgrading to DEBUG when `memory == "user"` (the SDK default — declaring it explicitly is essentially a no-op even on subagent dispatch).
+
+### Optional-AgentDef-fields drift guard is incomplete (test asserts hardcoded set, not SDK derivation)
+- **What**: `tests/test_user_loader.py::test_optional_fields_set_equals_expected` guards `_OPTIONAL_AGENTDEF_FIELDS` against drift but compares against a hardcoded `expected` set written into the test. If the SDK adds a new optional field to `AgentDefinition` (e.g., a future `tracing` or `quotas` field) and nobody updates `_OPTIONAL_AGENTDEF_FIELDS` AND nobody updates `expected`, the shadow-drop guard misses the new field silently. Same incomplete-guard pattern as the #22 stale-required-keys finding.
+- **Where**: `tests/test_user_loader.py` test method; `claude_crew/subagents/_user_loader.py:_OPTIONAL_AGENTDEF_FIELDS` constant.
+- **Why it matters**: Low probability today. Grows with each SDK version. The shadow-drop WARN is the only operator-facing signal that a project-level pack silently cleared a lower-precedence field; missing the new field means new operator footguns aren't caught.
+- **Suggested action**: Strengthen the test to derive `expected` from `AgentDefinition.__dataclass_fields__` minus the required-in-pack subset (`description`, `model`, `tools`, `prompt`). The required-subset is itself a small enumeration but its drift is easier to catch (pack-load fails on missing required fields). Sentinel L-2 at #17 final review.
+
+---
+
 ## [2026-05-01] Feature: global-skills-for-sdk-teammates (#23)
 
 ### general-purpose teammate context size grew with #23 SC-6 — measure and consider general-purpose-light variant

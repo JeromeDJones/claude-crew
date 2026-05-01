@@ -2593,3 +2593,323 @@ class TestF19CompletedToolEventsAppend:
         # Deque has the event despite the JSONL failure.
         assert len(teammate._completed_tool_events) == 1
         assert teammate._completed_tool_events[0].tool_use_id == "tu-disk"
+
+
+# ============================================================================
+# Feature #17 T4 — _load_user_mcp_servers + _resolve_mcp_servers + _run wiring
+# ============================================================================
+
+import json as _json
+import logging as _logging
+from pathlib import Path as _Path
+
+from claude_crew.sdk_teammate import (
+    _load_user_mcp_servers,
+    _resolve_mcp_servers,
+)
+
+
+def _write_claude_json(home: _Path, mcp_servers: dict | None) -> _Path:
+    home.mkdir(parents=True, exist_ok=True)
+    cfg: dict = {}
+    if mcp_servers is not None:
+        cfg["mcpServers"] = mcp_servers
+    path = home / ".claude.json"
+    path.write_text(_json.dumps(cfg))
+    return path
+
+
+class TestLoadUserMcpServersFullConfig:
+    """Spawn-time helper: returns full {name: config} map; best-effort on failures."""
+
+    def test_returns_full_configs(self, tmp_path: _Path) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, {
+            "atlassian": {"type": "http", "url": "https://x"},
+            "claude-crew": {"type": "stdio", "command": "uv"},
+        })
+        result = _load_user_mcp_servers(home)
+        assert result == {
+            "atlassian": {"type": "http", "url": "https://x"},
+            "claude-crew": {"type": "stdio", "command": "uv"},
+        }
+
+    def test_missing_file_returns_empty(self, tmp_path: _Path) -> None:
+        assert _load_user_mcp_servers(tmp_path / "nonexistent") == {}
+
+    def test_malformed_json_returns_empty(self, tmp_path: _Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir(parents=True)
+        (home / ".claude.json").write_text("{not valid")
+        assert _load_user_mcp_servers(home) == {}
+
+    def test_non_dict_server_config_filtered(self, tmp_path: _Path) -> None:
+        """If a server's config is not a dict (malformed user file), filter it."""
+        home = tmp_path / "home"
+        home.mkdir(parents=True)
+        (home / ".claude.json").write_text(_json.dumps({
+            "mcpServers": {
+                "good": {"type": "stdio"},
+                "bad": "not-a-dict",
+            }
+        }))
+        result = _load_user_mcp_servers(home)
+        assert "good" in result
+        assert "bad" not in result
+
+
+class TestResolveMcpServers:
+    """Unit tests for _resolve_mcp_servers (D-4, D-7, D-11, D-13)."""
+
+    def test_inline_dict_with_name_strips_name_and_uses_as_key(
+        self, tmp_path: _Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(_logging.INFO, logger="claude_crew.sdk_teammate"):
+            result = _resolve_mcp_servers(
+                [{"type": "stdio", "name": "local-x", "command": "uv"}],
+                role="explorer", teammate_id="t-123", home_dir=tmp_path,
+            )
+        assert result == {"local-x": {"type": "stdio", "command": "uv"}}
+        # D-13 breadcrumb
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "t-123" in m and "explorer" in m and "local-x" in m and "stdio" in m
+            for m in info_msgs
+        )
+
+    def test_inline_dict_without_name_falls_back_to_type_index(self, tmp_path: _Path) -> None:
+        result = _resolve_mcp_servers(
+            [{"type": "stdio", "command": "uv"}, {"type": "http", "url": "x"}],
+            role="r", teammate_id="t", home_dir=tmp_path,
+        )
+        assert "stdio_0" in result
+        assert "http_1" in result
+
+    def test_string_name_resolves_against_user_config(self, tmp_path: _Path) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, {"atlassian": {"type": "http", "url": "https://x"}})
+        result = _resolve_mcp_servers(
+            ["atlassian"], role="r", teammate_id="t", home_dir=home,
+        )
+        # Verbatim dict from ~/.claude.json (no transformation per spec).
+        assert result == {"atlassian": {"type": "http", "url": "https://x"}}
+
+    def test_string_name_unresolvable_warns_and_skips(
+        self, tmp_path: _Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, {})  # empty config
+        with caplog.at_level(_logging.WARNING, logger="claude_crew.sdk_teammate"):
+            result = _resolve_mcp_servers(
+                ["ghost-server"], role="explorer", teammate_id="t-xyz",
+                home_dir=home,
+            )
+        # Skipped, not crashed.
+        assert result == {}
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "t-xyz" in m and "explorer" in m and "ghost-server" in m
+            for m in warn_msgs
+        )
+
+    def test_mixed_entries_preserve_order_and_shape(self, tmp_path: _Path) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, {"atlassian": {"type": "http", "url": "x"}})
+        result = _resolve_mcp_servers(
+            ["atlassian", {"type": "stdio", "name": "local", "command": "uv"}],
+            role="r", teammate_id="t", home_dir=home,
+        )
+        assert result == {
+            "atlassian": {"type": "http", "url": "x"},
+            "local": {"type": "stdio", "command": "uv"},
+        }
+
+    def test_tuple_entries_accepted(self, tmp_path: _Path) -> None:
+        """PackFrontmatter stores mcpServers as a tuple; resolver must accept that."""
+        home = tmp_path / "home"
+        _write_claude_json(home, {"atlassian": {"type": "http"}})
+        result = _resolve_mcp_servers(
+            ("atlassian",), role="r", teammate_id="t", home_dir=home,
+        )
+        assert result == {"atlassian": {"type": "http"}}
+
+    def test_home_dir_injection_isolates_test(self, tmp_path: _Path) -> None:
+        """Sentinel D-11 / MF-3: explicit home_dir prevents reading the real ~/.claude.json."""
+        # Plant a unique server name nowhere except in tmp_path.
+        home = tmp_path / "isolated_home"
+        unique_name = "f17-isolation-probe-zzz"
+        _write_claude_json(home, {unique_name: {"type": "stdio"}})
+        result = _resolve_mcp_servers(
+            [unique_name], role="r", teammate_id="t", home_dir=home,
+        )
+        # If home_dir wasn't honored, this would be unresolvable and skipped.
+        assert unique_name in result
+
+
+class TestSdkTeammateMcpServersWiring:
+    """Integration: pack mcpServers reaches ClaudeAgentOptions.mcp_servers via _run."""
+
+    async def test_pack_inline_dict_reaches_options(self, broker, monkeypatch) -> None:
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Read"],
+            mcpServers=[{"type": "stdio", "name": "local-x", "command": "uv"}],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role, agents={"builder": agent_def},
+            )
+
+        tid = await broker.spawn_teammate(role="builder", name=None, factory=factory)
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.mcp_servers == {"local-x": {"type": "stdio", "command": "uv"}}
+
+    async def test_pack_string_name_resolves_via_patched_user_config(
+        self, broker, monkeypatch,
+    ) -> None:
+        """SC-5 string-name path. Monkeypatch _load_user_mcp_servers since
+        SdkTeammate._run calls the helper with home_dir=None (uses real ~)."""
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew import sdk_teammate as sdk_mod
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+        # Patch the helper called inside _resolve_mcp_servers to inject our config.
+        monkeypatch.setattr(
+            sdk_mod, "_load_user_mcp_servers",
+            lambda home_dir=None: {"atlassian": {"type": "http", "url": "https://x"}},
+        )
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Read"],
+            mcpServers=["atlassian"],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role, agents={"builder": agent_def},
+            )
+
+        tid = await broker.spawn_teammate(role="builder", name=None, factory=factory)
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        assert opts.mcp_servers == {"atlassian": {"type": "http", "url": "https://x"}}
+
+    async def test_pack_no_mcp_servers_no_options_key(
+        self, broker, monkeypatch,
+    ) -> None:
+        """Default behavior unchanged: no mcpServers in pack → mcp_servers stays at default."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Read"],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role, agents={"builder": agent_def},
+            )
+
+        tid = await broker.spawn_teammate(role="builder", name=None, factory=factory)
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        opts = captured["options"]
+        # ClaudeAgentOptions defaults mcp_servers to {} via field(default_factory=dict).
+        assert opts.mcp_servers == {} or opts.mcp_servers is None
+
+
+class TestSdkTeammateMemoryWarn:
+    """SC-6: pack memory at teammate spawn → WARN, no options key."""
+
+    async def test_memory_warns_and_no_options_key(
+        self, broker, monkeypatch, caplog,
+    ) -> None:
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        captured = _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Read"],
+            memory="project",
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role, agents={"my-role": agent_def},
+            )
+
+        with caplog.at_level(_logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tid = await broker.spawn_teammate(role="my-role", name=None, factory=factory)
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+            ))
+            await _wait_for_lead_messages(broker, 1)
+
+        # ClaudeAgentOptions has no `memory` field — verify nothing leaked there.
+        opts = captured["options"]
+        assert not hasattr(opts, "memory") or getattr(opts, "memory", None) is None
+
+        # WARN fired naming role, teammate_id, value.
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "my-role" in m and "memory" in m and "project" in m
+            for m in warn_msgs
+        ), f"expected memory WARN naming role + value; got {warn_msgs}"
+
+    async def test_no_memory_no_warn(self, broker, monkeypatch, caplog) -> None:
+        """No memory in pack → no WARN (negative path scoped per Sentinel guidance)."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        fake = FakeSDKClient(scripted_responses=[text_response("ok")])
+        _patch_sdk(monkeypatch, fake)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Read"],
+        )
+
+        def factory(id, name, role, **_kwargs):
+            return SdkTeammate(
+                id=id, name=name, role=role, agents={"builder": agent_def},
+            )
+
+        with caplog.at_level(_logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tid = await broker.spawn_teammate(role="builder", name=None, factory=factory)
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+            ))
+            await _wait_for_lead_messages(broker, 1)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        # Scope: no warn that NAMES `memory` as a declared field.
+        # (Liveness-related warnings unrelated to memory may legitimately fire.)
+        assert not any(
+            "pack declares memory" in m for m in warn_msgs
+        ), f"expected no memory-pack-WARN; got {warn_msgs}"

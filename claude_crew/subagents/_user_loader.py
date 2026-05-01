@@ -21,6 +21,7 @@ intra-directory key-collision behavior.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -277,6 +278,111 @@ def _warn_unknown_skills(
             )
 
 
+def _load_user_mcp_server_names(home_dir: Path | None = None) -> set[str]:
+    """Return the set of MCP server names registered in ``~/.claude.json``.
+
+    Best-effort: missing file, malformed JSON, or absent ``mcpServers`` top-level
+    key all return the empty set (no exception). Callers use the result to
+    validate string-form pack ``mcpServers`` references — failures are
+    observability, not blocking, so silent degradation is correct here.
+
+    Feature #17 SC-7. Mirrors :func:`_discover_skill_names` shape (set of names,
+    not the configs themselves) — load-time validation only checks membership;
+    only the spawn-time path (``sdk_teammate._load_user_mcp_servers``) needs
+    the full configs.
+    """
+    home = home_dir if home_dir is not None else Path.home()
+    cfg_path = home / ".claude.json"
+    try:
+        text = cfg_path.read_text()
+    except (OSError, FileNotFoundError):
+        return set()
+    try:
+        cfg = json.loads(text)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(cfg, dict):
+        return set()
+    servers = cfg.get("mcpServers")
+    if not isinstance(servers, dict):
+        return set()
+    return set(servers.keys())
+
+
+def _warn_unknown_mcp_servers(
+    merged: dict[str, AgentDefinition],
+    home_dir: Path | None = None,
+) -> None:
+    """Emit a WARN for each string-form mcpServers entry not in ``~/.claude.json``.
+
+    Inline-dict entries are self-contained and not warned. Mirrors the
+    :func:`_warn_unknown_skills` pattern: load-time best-effort validation,
+    no failure on missing/malformed user config (Feature #17 SC-7).
+    """
+    user_servers = _load_user_mcp_server_names(home_dir)
+    for role, agent in merged.items():
+        entries = getattr(agent, "mcpServers", None) or []
+        unresolved = [
+            e for e in entries
+            if isinstance(e, str) and e not in user_servers
+        ]
+        if unresolved:
+            logger.warning(
+                "agent %r declares unknown mcpServers %s — not registered in "
+                "~/.claude.json; teammate will skip them at spawn",
+                role, unresolved,
+            )
+
+
+# Optional fields only. `tools` is required in PackFrontmatter (a higher-precedence
+# pack must declare it or pack-load fails); a "drop" cannot occur. `model` is also
+# required. `description` is required. Everything else is optional and may be
+# silently dropped via merge_packs whole-key replacement (Feature #17 SF-2, D-10).
+_OPTIONAL_AGENTDEF_FIELDS: tuple[str, ...] = (
+    "mcpServers", "memory", "skills", "disallowedTools", "permissionMode",
+    "maxTurns", "background", "initialPrompt", "effort",
+)
+
+
+def _check_drop(
+    layer: str, role: str, lower: AgentDefinition, higher: AgentDefinition
+) -> None:
+    """Emit a WARN per optional field set on ``lower`` but None on ``higher``."""
+    for field in _OPTIONAL_AGENTDEF_FIELDS:
+        lower_val = getattr(lower, field, None)
+        higher_val = getattr(higher, field, None)
+        if lower_val is not None and higher_val is None:
+            logger.warning(
+                "%s-level agent %r drops optional field %r set by lower-precedence "
+                "pack (value=%r); pack-merge is whole-replacement, not field-level",
+                layer, role, field, lower_val,
+            )
+
+
+def _warn_shadow_drop(
+    default: dict[str, AgentDefinition],
+    user: dict[str, AgentDefinition] | None,
+    project: dict[str, AgentDefinition] | None,
+) -> None:
+    """Emit a WARN when a higher-precedence pack drops an optional field a lower one set.
+
+    Pack-merge does whole-AgentDefinition replacement at the role-key level
+    (``__init__.merge_packs``). A project-level shadow that doesn't mention
+    ``mcpServers`` silently *clears* the bundled value. Pre-existing footgun
+    for skills/disallowedTools/permissionMode; Feature #17 closes it uniformly
+    across all 9 optional AgentDefinition fields (D-9, D-10).
+    """
+    user = user or {}
+    project = project or {}
+    for role in user.keys() & default.keys():
+        _check_drop("user", role, default[role], user[role])
+    for role in project.keys():
+        if role in user:
+            _check_drop("project", role, user[role], project[role])
+        elif role in default:
+            _check_drop("project", role, default[role], project[role])
+
+
 def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
@@ -321,4 +427,6 @@ def build_merged_pack(
     # and list-over-"all" trivially. No role_skills dict needed (D-6).
     merged = merge_packs(merge_packs(default, user), project)
     _warn_unknown_skills(merged, home_dir, project_root)
+    _warn_unknown_mcp_servers(merged, home_dir)
+    _warn_shadow_drop(default, user, project)
     return merged, role_ss, bodies
