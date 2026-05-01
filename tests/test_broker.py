@@ -1500,3 +1500,120 @@ class TestF19TombstoneCapture:
         # Last event is the killed one (appended last by _close_open_tools).
         assert info.tool_events_at_death[-1].outcome == "killed"
         assert info.tool_events_at_death[-1].tool_name == "Read"
+
+
+class TestF19SnapshotFlatten:
+    """T3: Broker.snapshot() flattens per-teammate completed-tool-events into a sorted tuple."""
+
+    async def test_snapshot_tool_events_default_empty_no_regression(self, broker: Broker) -> None:
+        """T3 regression guard — no events means () (matches existing assertion)."""
+        await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        snap = broker.snapshot()
+        assert snap.tool_events == ()
+
+    async def test_snapshot_flattens_live_teammate_events(self, broker: Broker) -> None:
+        """D-6: live teammates' deques flatten into snapshot.tool_events."""
+        from claude_crew.teammate import ToolEvent
+
+        a = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        b = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        for tid in (a, b):
+            tm = broker._teammates[tid]
+            for i in range(3):
+                tm._completed_tool_events.append(ToolEvent(
+                    teammate_id=tid, tool_name="Bash", tool_use_id=f"{tid}-{i}",
+                    started_at_wallclock=1.0 + i, finished_at_wallclock=1.5 + i,
+                    duration_seconds=0.5, outcome="ok",
+                    args_summary=None, error_summary=None, redaction_version="v1",
+                ))
+
+        snap = broker.snapshot()
+
+        assert len(snap.tool_events) == 6
+        assert all(isinstance(ev, ToolEvent) for ev in snap.tool_events)
+        teammate_ids = {ev.teammate_id for ev in snap.tool_events}
+        assert teammate_ids == {a, b}
+
+    async def test_snapshot_includes_tombstoned_at_death_events(self, broker: Broker) -> None:
+        """D-7: tombstoned teammates contribute via tool_events_at_death."""
+        from claude_crew.teammate import ToolEvent
+
+        # Alive teammate with 3 events.
+        alive = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        for i in range(3):
+            broker._teammates[alive]._completed_tool_events.append(ToolEvent(
+                teammate_id=alive, tool_name="Bash", tool_use_id=f"a-{i}",
+                started_at_wallclock=10.0 + i, finished_at_wallclock=10.5 + i,
+                duration_seconds=0.5, outcome="ok",
+                args_summary=None, error_summary=None, redaction_version="v1",
+            ))
+
+        # Dead teammate with 2 events (populated, then killed).
+        dead = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        for i in range(2):
+            broker._teammates[dead]._completed_tool_events.append(ToolEvent(
+                teammate_id=dead, tool_name="Read", tool_use_id=f"d-{i}",
+                started_at_wallclock=5.0 + i, finished_at_wallclock=5.5 + i,
+                duration_seconds=0.5, outcome="ok",
+                args_summary=None, error_summary=None, redaction_version="v1",
+            ))
+        await broker.kill_teammate(dead)
+        await asyncio.sleep(0.05)
+
+        snap = broker.snapshot()
+        assert len(snap.tool_events) == 5  # 3 alive + 2 dead
+
+    async def test_snapshot_tool_events_sorted_stable_by_timestamp(self, broker: Broker) -> None:
+        """D-6: stable sort by finished_at_wallclock asc."""
+        from claude_crew.teammate import ToolEvent
+
+        a = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        b = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        c = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        # Mixed timestamps across teammates; two events at exactly 2.0.
+        plan = [
+            (a, 1.0), (b, 3.0), (c, 2.0), (a, 2.0), (b, 1.5),
+        ]
+        for tid, t in plan:
+            broker._teammates[tid]._completed_tool_events.append(ToolEvent(
+                teammate_id=tid, tool_name="Bash", tool_use_id=f"{tid}-{t}",
+                started_at_wallclock=t - 0.1, finished_at_wallclock=t,
+                duration_seconds=0.1, outcome="ok",
+                args_summary=None, error_summary=None, redaction_version="v1",
+            ))
+
+        snap = broker.snapshot()
+        ts = [ev.finished_at_wallclock for ev in snap.tool_events]
+        assert ts == [1.0, 1.5, 2.0, 2.0, 3.0]
+
+    async def test_snapshot_construction_under_5ms_at_design_scale(self, broker: Broker) -> None:
+        """SC-10 microbenchmark: 5 teammates × 200 events each = 1000-event snapshot.
+
+        Bound: median <5ms, p95 <10ms across 10 calls.
+        """
+        from claude_crew.teammate import ToolEvent
+
+        for _ in range(5):
+            tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+            tm = broker._teammates[tid]
+            for i in range(200):
+                tm._completed_tool_events.append(ToolEvent(
+                    teammate_id=tid, tool_name="Bash", tool_use_id=f"{tid}-{i}",
+                    started_at_wallclock=float(i), finished_at_wallclock=float(i) + 0.1,
+                    duration_seconds=0.1, outcome="ok",
+                    args_summary=None, error_summary=None, redaction_version="v1",
+                ))
+
+        durations: list[float] = []
+        for _ in range(10):
+            t0 = time.perf_counter()
+            snap = broker.snapshot()
+            durations.append(time.perf_counter() - t0)
+            assert len(snap.tool_events) == 1000
+
+        durations.sort()
+        median = durations[5]
+        p95 = durations[-1]
+        # Generous bounds — gives headroom for slow CI without making the test useless.
+        assert median < 0.005, f"median snapshot construction {median*1000:.2f}ms > 5ms"
+        assert p95 < 0.010, f"p95 snapshot construction {p95*1000:.2f}ms > 10ms"

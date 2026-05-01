@@ -475,6 +475,21 @@ class TestF19CloseOpenToolsAppend:
         # _tool_uses cleared (existing F8 D9).
         assert len(teammate._tool_uses) == 0
 
+    def test_close_open_tools_turn_end_appends_abandoned(self) -> None:
+        """Sentinel DEFER-1: turn_end is a normal-frequency path (SDK quirk dropped Post),
+        not just death/kill — needs the same deque-append coverage."""
+        teammate = _make_teammate_with_mock_broker()
+        for i, name in enumerate(("Bash", "Grep")):
+            teammate._tool_uses[f"tu-{i}"] = _ToolUseEntry(
+                tool_name=name, tool_use_id=f"tu-{i}",
+                started_at_wallclock=time.time() - 0.1, args_summary=None,
+            )
+
+        teammate._close_open_tools(reason="turn_end")
+
+        assert len(teammate._completed_tool_events) == 2
+        assert all(ev.outcome == "abandoned" for ev in teammate._completed_tool_events)
+
     def test_close_open_tools_kill_appends_killed(self) -> None:
         """SC-4 / D-3: kill-time in-flight tools become outcome='killed' events."""
         teammate = _make_teammate_with_mock_broker()
