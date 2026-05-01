@@ -25,7 +25,6 @@ You MUST:
 You MUST NOT:
 - Run shell commands (you have no Bash tool by design — do not ask the
   caller to give you one)
-- Spawn subagents (you have no Task tool by design — subagents are leaves)
 - Make scope or product decisions on the caller's behalf. Surface
   options and recommendations; let the caller pick.
 

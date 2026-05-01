@@ -182,7 +182,7 @@ class TestSpawnChainParams:
 
         # Patch build_merged_pack to avoid loading real agents
         def mock_build_merged_pack():
-            return {}, {}
+            return {}, {}, {}
 
         monkeypatch.setattr(
             "claude_crew.subagents._user_loader.build_merged_pack",
@@ -294,7 +294,7 @@ class TestSettingSources:
         mock_agent_def = object()  # stand-in; not inspected
 
         def mock_build_merged_pack():
-            return {"explorer": mock_agent_def}, {"explorer": []}
+            return {"explorer": mock_agent_def}, {"explorer": []}, {}
 
         monkeypatch.setattr(
             "claude_crew.subagents._user_loader.build_merged_pack",
@@ -328,7 +328,7 @@ class TestSettingSources:
         mock_agent_def = object()
 
         def mock_build_merged_pack():
-            return {"explorer": mock_agent_def}, {"explorer": []}
+            return {"explorer": mock_agent_def}, {"explorer": []}, {}
 
         monkeypatch.setattr(
             "claude_crew.subagents._user_loader.build_merged_pack",

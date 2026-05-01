@@ -30,6 +30,7 @@ def sdk_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
     agents: "dict | None" = None,
+    pack_bodies: "dict | None" = None,
     cwd: str | None = None, permission_mode: str | None = None,
     setting_sources: list[str] | None = None,
 ) -> Teammate:
@@ -42,6 +43,8 @@ def sdk_factory(
         kwargs["effort"] = effort
     if agents is not None:
         kwargs["agents"] = agents
+    if pack_bodies is not None:
+        kwargs["pack_bodies"] = pack_bodies
     if cwd is not None:
         kwargs["cwd"] = cwd
     if permission_mode is not None:
@@ -70,7 +73,7 @@ def default_factory() -> TeammateFactory:
     if mode == "sdk":
         from claude_crew.subagents._user_loader import build_merged_pack
 
-        merged_pack, role_ss = build_merged_pack()
+        merged_pack, role_ss, merged_bodies = build_merged_pack()
 
         def factory(
             id: str, name: str, role: str,
@@ -79,6 +82,7 @@ def default_factory() -> TeammateFactory:
         ) -> Teammate:
             return sdk_factory(
                 id, name, role, model=model, effort=effort, agents=merged_pack,
+                pack_bodies=merged_bodies,
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),
             )

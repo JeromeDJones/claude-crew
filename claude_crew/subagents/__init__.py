@@ -41,30 +41,36 @@ _FILE_FOR_KEY = {
 }
 
 
-def load_default_pack() -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
+def load_default_pack() -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
     """Load the bundled pack from ``claude_crew/subagents/*.md``.
 
     No module cache: files are re-read on every call. Cost is three
     small-file reads per spawn — negligible. Edits to the .md files take
     effect on the next teammate spawn within the same process.
 
-    Returns a ``(pack, role_ss)`` tuple where ``role_ss`` maps role keys
-    to their ``settingSources`` list. Keys without ``settingSources`` are
-    absent from ``role_ss`` (not ``None``-valued entries).
+    Returns a ``(pack, role_ss, bodies)`` tuple where:
+
+    - ``pack`` maps role keys to ``AgentDefinition`` (prompt has ``_LEAF_SUFFIX``).
+    - ``role_ss`` maps role keys to their ``settingSources`` list. Keys
+      without ``settingSources`` are absent (not ``None``-valued entries).
+    - ``bodies`` maps role keys to the raw body text (no leaf suffix), for
+      use by the teammate spawn path to build teammate-context prompts.
     """
     pack: dict[str, AgentDefinition] = {}
     role_ss: dict[str, list[str] | None] = {}
+    bodies: dict[str, str] = {}
     for key in PACK_MEMBERS:
         path = _PACK_DIR / _FILE_FOR_KEY[key]
-        loaded_key, agent, fm = parse_pack_file(path)
+        loaded_key, agent, fm, body = parse_pack_file(path)
         if loaded_key != key:
             raise PackLoadError(
                 f"pack file {path} produced key '{loaded_key}', expected '{key}'"
             )
         pack[key] = agent
+        bodies[key] = body
         if fm.settingSources is not None:
             role_ss[key] = fm.settingSources
-    return pack, role_ss
+    return pack, role_ss, bodies
 
 
 def merge_packs(

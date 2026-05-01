@@ -48,6 +48,7 @@ from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
 from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate, _ToolUseEntry
+from claude_crew.teammate_prompt import build_teammate_prompt
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
@@ -295,6 +296,7 @@ class SdkTeammate(Teammate):
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
         agents: "dict[str, Any] | None" = None,
+        pack_bodies: "dict[str, str] | None" = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
     ) -> None:
@@ -303,15 +305,32 @@ class SdkTeammate(Teammate):
         self.role = role
         self._model = model
         self._effort = effort
-        self._system_prompt = system_prompt or _default_system_prompt(role)
-        self._setting_sources = (
-            setting_sources if setting_sources is not None else ["user", "project"]
-        )
         # `agents=None` → load the bundled default pack. `agents={}` → explicit
         # empty (this teammate cannot delegate). `agents={...}` → custom pack
         # (Feature #3b's seam ride-along). load_default_pack() returns a
-        # (pack, role_ss) tuple; only the pack dict is needed here.
-        self._agents = load_default_pack()[0] if agents is None else agents
+        # (pack, role_ss, bodies) tuple; we need both pack and bodies.
+        if agents is None:
+            _pack, _role_ss, _bodies = load_default_pack()
+            self._agents = _pack
+            # pack_bodies kwarg wins if provided; otherwise use bodies from default pack.
+            self._pack_bodies: dict[str, str] = pack_bodies if pack_bodies is not None else _bodies
+        else:
+            self._agents = agents
+            self._pack_bodies = pack_bodies if pack_bodies is not None else {}
+        # Assign _system_prompt AFTER _agents and _pack_bodies are populated so
+        # build_teammate_prompt has access to the full agents dict (A-3).
+        if system_prompt is not None:
+            self._system_prompt = system_prompt  # explicit override wins (edge case 2)
+        else:
+            _body = self._pack_bodies.get(role)
+            if _body is not None:
+                self._system_prompt = build_teammate_prompt(role, _body, self._agents)
+            else:
+                # Fallback: role not in any loaded pack (D-7 legacy path)
+                self._system_prompt = _default_system_prompt(role)
+        self._setting_sources = (
+            setting_sources if setting_sources is not None else ["user", "project"]
+        )
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._task: asyncio.Task[None] | None = None
