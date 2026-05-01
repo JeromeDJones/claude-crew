@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-01] Subagent dispatch telemetry gaps — F7 misses Agent dispatches, args_summary blind
+
+### F7 subagent tracking and redaction allowlist both miss the `Agent` tool
+- **What**: Two adjacent gaps in subagent observability surfaced during `/crew-showcase` re-run on 2026-05-01. (1) F7 subagent tracking did not fire when a teammate dispatched a subagent that F8 reported as the `Agent` tool. Transcript on `t-464ae0769323` recorded `tool_start`/`tool_end` for `Agent` (37.4 s, outcome=ok), but `last_subagent_completed` stayed null and no `subagent_start`/`subagent_end` records were written — `PreSubagentUse`/`PostSubagentUse` hooks aren't catching what `PreToolUse`/`PostToolUse` sees as `Agent`. (2) `Agent` is missing from the v1 redaction allowlist (`Bash`, `Task`, `WebFetch` per CLAUDE.md and `claude_crew/redaction.py`). Result: every Agent dispatch logs `args_summary: null`, so the dashboard cannot show *which* subagent role was invoked.
+- **Where**: F7 hook wiring in `claude_crew/sdk_teammate.py` (PreSubagentUse/PostSubagentUse handlers); F8 redaction allowlist in `claude_crew/redaction.py` and any redaction tests pinning the v1 allowlist set.
+- **Why it matters**: These gaps compound the just-logged fail-soft pathology above. When a dispatched subagent fabricates output, the operator's only signal is the prose itself — the dashboard cannot show "subagent X was dispatched with task Y" because (a) the subagent_completed slot is empty and (b) args_summary is null. The crew-showcase re-run hit this directly: explorer-2 dispatched some subagent (we still don't know which role) that fabricated its 3-file summary, and the telemetry surface offered no way to identify the responsible subagent. Naming likely cause: the SDK exposes the dispatch tool as `Agent`, while F7 hooks and the redaction allowlist were both written assuming the Claude Code name `Task`. One word, two surfaces, both miss.
+- **Suggested action**: Two-part. (1) Add `Agent` to the v1 redaction allowlist alongside `Task` (or unify on whichever name the Agent SDK actually emits) — bump to v2 if schema callers care. Capture `subagent_type` from the tool args so the dashboard can show the dispatched role. (2) Verify F7's PreSubagentUse/PostSubagentUse hooks fire on `Agent` dispatches — if the SDK uses a different hook event for this tool, wire it. Add a live SDK test that dispatches a subagent and asserts both `last_subagent_completed` is populated AND `last_tool_completed.args_summary` names the role. This is the natural next step after the fail-soft contract fix lands — refusing-loud doesn't help if the operator can't see which subagent did the refusing.
+
+---
+
 ## [2026-05-01] Pack subagents fail-soft when handed tasks outside their tool surface
 
 ### Subagents fabricate output instead of refusing when asked to do work their tools can't do
