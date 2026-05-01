@@ -8,6 +8,7 @@ dedup. All state mutations happen on the asyncio event loop; no threads.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import logging
 import time
@@ -57,6 +58,36 @@ class TeammateInfo:
     total_input_tokens_at_death: int | None = None
     total_output_tokens_at_death: int | None = None
     total_cost_usd_at_death: float | None = None
+
+
+@dataclass(frozen=True)
+class LiveTeammateInfo:
+    """Pairs a TeammateInfo with the alive-teammate-only fields the UI needs.
+
+    ``status`` is value-copied at snapshot build time (D-2: deepcopy) so callers
+    cannot reach back into teammate internals via the snapshot.
+    ``model`` is captured from ``teammate._model`` (D-3 — workaround until a future
+    feature promotes ``Teammate.model`` to a public attribute).
+    """
+
+    info: TeammateInfo
+    status: dict[str, Any]
+    model: str | None
+
+
+@dataclass(frozen=True)
+class BrokerSnapshot:
+    """Frozen, value-copied view of broker state for downstream consumers.
+
+    Produced by ``Broker.snapshot()``. UIServer is the canonical consumer (#18).
+    Synchronous to build (D-1) — no I/O, no awaits.
+    """
+
+    crew_id: str
+    teammates: tuple[TeammateInfo, ...]
+    live: tuple[LiveTeammateInfo, ...]
+    log: tuple[Envelope, ...]
+    tool_events: tuple[Any, ...] = ()  # #19 reservation; empty in #18 (D-10)
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -458,6 +489,45 @@ class Broker:
     def list_crew(self) -> list[TeammateInfo]:
         """Return all TeammateInfo entries, including tombstoned (alive=False) teammates."""
         return list(self._info.values())
+
+    def snapshot(self, log_limit: int | None = None) -> BrokerSnapshot:
+        """Return a frozen, value-copied view of broker state.
+
+        Synchronous and in-memory only (D-1). Status dicts deep-copied (D-2)
+        so callers can't reach back into live teammate state.
+
+        Args:
+            log_limit: If int, return the last N envelopes; if None (default),
+                return the full log.
+        """
+        teammates_tuple = tuple(self._info.values())
+
+        live_entries: list[LiveTeammateInfo] = []
+        for info in teammates_tuple:
+            if not info.alive:
+                continue
+            teammate = self._teammates.get(info.id)
+            status: dict[str, Any] = {}
+            if teammate is not None:
+                try:
+                    raw = teammate.status_snapshot()
+                except Exception:
+                    raw = {}
+                status = copy.deepcopy(raw)
+            model = getattr(teammate, "_model", None) if teammate is not None else None
+            live_entries.append(LiveTeammateInfo(info=info, status=status, model=model))
+
+        if log_limit is None:
+            log_tuple = tuple(self._log)
+        else:
+            log_tuple = tuple(self._log[-log_limit:])
+
+        return BrokerSnapshot(
+            crew_id=self.crew_id,
+            teammates=teammates_tuple,
+            live=tuple(live_entries),
+            log=log_tuple,
+        )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
         """Read-only status for alive or tombstoned teammates.
