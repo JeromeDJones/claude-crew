@@ -421,8 +421,8 @@ class TestBuildStateTokenCost:
                 scripted_responses=[
                     text_response_with_usage(
                         "hello",
-                        cumulative_input_tokens=200,
-                        cumulative_output_tokens=100,
+                        turn_input_tokens=200,
+                        turn_output_tokens=100,
                         cumulative_cost_usd=0.15,
                     )
                 ],
@@ -458,8 +458,8 @@ class TestBuildStateTokenCost:
                 scripted_responses=[
                     text_response_with_usage(
                         "a",
-                        cumulative_input_tokens=100,
-                        cumulative_output_tokens=50,
+                        turn_input_tokens=100,
+                        turn_output_tokens=50,
                         cumulative_cost_usd=0.30,
                     )
                 ],
@@ -477,8 +477,8 @@ class TestBuildStateTokenCost:
                 scripted_responses=[
                     text_response_with_usage(
                         "b",
-                        cumulative_input_tokens=200,
-                        cumulative_output_tokens=80,
+                        turn_input_tokens=200,
+                        turn_output_tokens=80,
                         cumulative_cost_usd=1.20,
                     )
                 ],
@@ -522,8 +522,8 @@ class TestBuildStateTokenCost:
                 scripted_responses=[
                     text_response_with_usage(
                         "first",
-                        cumulative_input_tokens=300,
-                        cumulative_output_tokens=100,
+                        turn_input_tokens=300,
+                        turn_output_tokens=100,
                         cumulative_cost_usd=1.20,
                     )
                 ],
@@ -543,8 +543,8 @@ class TestBuildStateTokenCost:
                 scripted_responses=[
                     text_response_with_usage(
                         "second",
-                        cumulative_input_tokens=50,
-                        cumulative_output_tokens=20,
+                        turn_input_tokens=50,
+                        turn_output_tokens=20,
                         cumulative_cost_usd=0.05,
                     )
                 ],

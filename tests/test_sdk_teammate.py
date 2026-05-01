@@ -2053,8 +2053,8 @@ class TestTokenCostTelemetry:
             scripted_responses=[
                 text_response_with_usage(
                     "hello",
-                    cumulative_input_tokens=500,
-                    cumulative_output_tokens=100,
+                    turn_input_tokens=500,
+                    turn_output_tokens=100,
                     cumulative_cost_usd=0.25,
                 )
             ]
@@ -2072,7 +2072,7 @@ class TestTokenCostTelemetry:
         await _wait_for_lead_messages(broker, 1)
 
         snap = broker._teammates[tid].status_snapshot()
-        # Values must match ResultMessage exactly.
+        # Per-turn values accumulated; cost from ResultMessage.
         assert snap["total_input_tokens"] == 500
         assert snap["total_output_tokens"] == 100
         assert snap["total_cost_usd"] == 0.25
@@ -2080,29 +2080,31 @@ class TestTokenCostTelemetry:
     async def test_three_turns_show_final_cumulative_not_sum(
         self, broker, monkeypatch
     ) -> None:
-        """D-2: overwrite semantics — ResultMessage carries session-cumulative totals.
+        """D-2: per-turn tokens accumulate; cost overwrites (session-cumulative from SDK).
 
-        Three turns with cumulative cost 0.10 → 0.30 → 0.60.
-        After all three, snap["total_cost_usd"] must be 0.60 (not 1.00).
+        Three turns with per-turn tokens (100/50) → (300/150) → (600/300),
+        but cost is cumulative: 0.10 → 0.30 → 0.60.
+        After all three, snap["total_cost_usd"] must be 0.60 (overwrite, not sum).
+        After all three, snap["total_input_tokens"] must be 100+300+600=1000 (accumulate).
         """
         fake = FakeSDKClient(
             scripted_responses=[
                 text_response_with_usage(
                     "turn1",
-                    cumulative_input_tokens=100,
-                    cumulative_output_tokens=50,
+                    turn_input_tokens=100,
+                    turn_output_tokens=50,
                     cumulative_cost_usd=0.10,
                 ),
                 text_response_with_usage(
                     "turn2",
-                    cumulative_input_tokens=300,
-                    cumulative_output_tokens=150,
+                    turn_input_tokens=300,
+                    turn_output_tokens=150,
                     cumulative_cost_usd=0.30,
                 ),
                 text_response_with_usage(
                     "turn3",
-                    cumulative_input_tokens=600,
-                    cumulative_output_tokens=300,
+                    turn_input_tokens=600,
+                    turn_output_tokens=300,
                     cumulative_cost_usd=0.60,
                 ),
             ]
@@ -2121,13 +2123,18 @@ class TestTokenCostTelemetry:
         await _wait_for_lead_messages(broker, 3)
 
         snap = broker._teammates[tid].status_snapshot()
-        # Overwrite semantics: final cumulative, not running sum.
+        # Cost: overwrite semantics — final cumulative value (0.60, not 0.10+0.30+0.60).
         assert snap["total_cost_usd"] == 0.60, (
             f"expected 0.60 (overwrite), got {snap['total_cost_usd']} "
             f"(if 1.00, that's accumulate-not-overwrite — D-2 violated)"
         )
-        assert snap["total_input_tokens"] == 600
-        assert snap["total_output_tokens"] == 300
+        # Tokens: accumulate per-turn deltas across turns.
+        assert snap["total_input_tokens"] == 1000, (
+            f"expected 1000 (100+300+600), got {snap['total_input_tokens']}"
+        )
+        assert snap["total_output_tokens"] == 500, (
+            f"expected 500 (50+150+300), got {snap['total_output_tokens']}"
+        )
 
     async def test_cache_tokens_summed_into_total_input(
         self, broker, monkeypatch
@@ -2141,10 +2148,10 @@ class TestTokenCostTelemetry:
             scripted_responses=[
                 text_response_with_usage(
                     "cached turn",
-                    cumulative_input_tokens=1100,  # net = 100 after cache subtraction
-                    cumulative_output_tokens=50,
+                    turn_input_tokens=100,  # per-turn net input tokens
+                    turn_output_tokens=50,
                     cumulative_cost_usd=0.05,
-                    cache_read_input_tokens=1000,
+                    cache_read_input_tokens=1000,  # cache tokens added in usage dict
                 )
             ]
         )
@@ -2162,9 +2169,79 @@ class TestTokenCostTelemetry:
 
         snap = broker._teammates[tid].status_snapshot()
         assert snap["total_input_tokens"] == 1100, (
-            f"expected 1100 (100 net + 1000 cache), got {snap['total_input_tokens']}"
+            f"expected 1100 (100 net + 1000 cache_read), got {snap['total_input_tokens']}"
         )
         assert snap["total_output_tokens"] == 50
+
+    async def test_token_totals_accumulate_across_turns_even_when_per_turn_decreases(
+        self, broker, monkeypatch
+    ) -> None:
+        """Regression: per-turn tokens accumulate monotonically even when per-turn value decreases.
+
+        This test would have FAILED under the old overwrite-semantics bug:
+          - Turn 1: 100 input → snap["total_input_tokens"] = 100
+          - Turn 2: 200 input → snap["total_input_tokens"] = 300 (accumulate)
+          - Turn 3: 50 input → snap["total_input_tokens"] = 350 (still accumulate, despite per-turn decrease)
+
+        Bug: under overwrite semantics, turn 3 would set it to 50 (wrong).
+
+        Cost uses cumulative values (overwrite):
+          - Turn 1: 0.0001 cumulative → snap["total_cost_usd"] = 0.0001
+          - Turn 2: 0.0002 cumulative → snap["total_cost_usd"] = 0.0002
+          - Turn 3: 0.0003 cumulative → snap["total_cost_usd"] = 0.0003 (overwrite)
+
+        Live evidence that triggered this fix: a teammate over 2 turns showed
+        input tokens 28,541 → 14,580 (decrease) with cost increasing monotonically,
+        proving tokens are per-turn while cost is cumulative.
+        """
+        fake = FakeSDKClient(
+            scripted_responses=[
+                text_response_with_usage(
+                    "turn1",
+                    turn_input_tokens=100,
+                    turn_output_tokens=50,
+                    cumulative_cost_usd=0.0001,
+                ),
+                text_response_with_usage(
+                    "turn2",
+                    turn_input_tokens=200,
+                    turn_output_tokens=80,
+                    cumulative_cost_usd=0.0002,
+                ),
+                text_response_with_usage(
+                    "turn3",
+                    turn_input_tokens=50,  # SMALLER than turn 2 — would have failed old overwrite
+                    turn_output_tokens=30,
+                    cumulative_cost_usd=0.0003,
+                ),
+            ]
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        for i in range(3):
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload=f"q{i}",
+            ))
+        await _wait_for_lead_messages(broker, 3)
+
+        snap = broker._teammates[tid].status_snapshot()
+        # Tokens accumulate: 100 + 200 + 50 = 350 (monotonic increase)
+        assert snap["total_input_tokens"] == 350, (
+            f"expected 350 (100+200+50 accumulate); got {snap['total_input_tokens']} "
+            f"(overwrite bug: would be 50)"
+        )
+        assert snap["total_output_tokens"] == 160, (
+            f"expected 160 (50+80+30 accumulate); got {snap['total_output_tokens']}"
+        )
+        # Cost overwrites: final cumulative is 0.0003 (not sum of 0.0001+0.0002+0.0003)
+        assert snap["total_cost_usd"] == 0.0003, (
+            f"expected 0.0003 (cumulative overwrite); got {snap['total_cost_usd']}"
+        )
 
     async def test_malformed_result_message_leaves_totals_unchanged(
         self, broker, monkeypatch, caplog
@@ -2199,8 +2276,8 @@ class TestTokenCostTelemetry:
             scripted_responses=[
                 text_response_with_usage(
                     "turn1",
-                    cumulative_input_tokens=200,
-                    cumulative_output_tokens=80,
+                    turn_input_tokens=200,
+                    turn_output_tokens=80,
                     cumulative_cost_usd=0.50,
                 ),
                 malformed_turn,
@@ -2262,15 +2339,15 @@ class TestTokenCostTelemetry:
             scripted_responses=[
                 text_response_with_usage(
                     "turn1",
-                    cumulative_input_tokens=100,
-                    cumulative_output_tokens=50,
+                    turn_input_tokens=100,
+                    turn_output_tokens=50,
                     cumulative_cost_usd=0.10,
                 ),
                 # turn 2 is scripted but response_hangs makes it block
                 text_response_with_usage(
                     "turn2",
-                    cumulative_input_tokens=300,
-                    cumulative_output_tokens=150,
+                    turn_input_tokens=200,  # per-turn: 300 total = 100 + 200
+                    turn_output_tokens=100,  # per-turn: 150 total = 50 + 100
                     cumulative_cost_usd=0.30,
                 ),
             ],
@@ -2328,8 +2405,8 @@ class TestTokenCostTelemetry:
             scripted_responses=[
                 text_response_with_usage(
                     "tiny cost",
-                    cumulative_input_tokens=10,
-                    cumulative_output_tokens=5,
+                    turn_input_tokens=10,
+                    turn_output_tokens=5,
                     cumulative_cost_usd=0.0001,
                 )
             ]

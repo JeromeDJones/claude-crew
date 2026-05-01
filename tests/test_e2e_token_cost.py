@@ -81,14 +81,14 @@ async def test_e2e_token_cost_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
             scripted_responses=[
                 text_response_with_usage(
                     "a-turn1",
-                    cumulative_input_tokens=100,
-                    cumulative_output_tokens=50,
+                    turn_input_tokens=100,
+                    turn_output_tokens=50,
                     cumulative_cost_usd=0.10,
                 ),
                 text_response_with_usage(
                     "a-turn2",
-                    cumulative_input_tokens=400,
-                    cumulative_output_tokens=200,
+                    turn_input_tokens=300,  # per-turn: 400 total = 100 + 300
+                    turn_output_tokens=150,  # per-turn: 200 total = 50 + 150
                     cumulative_cost_usd=0.40,
                 ),
             ]
@@ -105,20 +105,20 @@ async def test_e2e_token_cost_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
             scripted_responses=[
                 text_response_with_usage(
                     "b-turn1",
-                    cumulative_input_tokens=250,
-                    cumulative_output_tokens=125,
+                    turn_input_tokens=250,
+                    turn_output_tokens=125,
                     cumulative_cost_usd=0.25,
                 ),
                 text_response_with_usage(
                     "b-turn2",
-                    cumulative_input_tokens=500,
-                    cumulative_output_tokens=250,
+                    turn_input_tokens=250,  # per-turn: 500 total = 250 + 250
+                    turn_output_tokens=125,  # per-turn: 250 total = 125 + 125
                     cumulative_cost_usd=0.50,
                 ),
                 text_response_with_usage(
                     "b-turn3",
-                    cumulative_input_tokens=750,
-                    cumulative_output_tokens=375,
+                    turn_input_tokens=250,  # per-turn: 750 total = 500 + 250
+                    turn_output_tokens=125,  # per-turn: 375 total = 250 + 125
                     cumulative_cost_usd=0.75,
                 ),
             ]
@@ -143,10 +143,17 @@ async def test_e2e_token_cost_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 
         agent_by_id = {a["id"]: a for a in instance["agents"]}
         assert abs(agent_by_id[tid_a]["cost"] - 0.40) < 1e-9, (
-            f"A cost: expected 0.40, got {agent_by_id[tid_a]['cost']}"
+            f"A cost: expected 0.40 (cumulative), got {agent_by_id[tid_a]['cost']}"
         )
-        assert abs(agent_by_id[tid_b]["cost"] - 0.75) < 1e-9, (
-            f"B cost: expected 0.75, got {agent_by_id[tid_b]['cost']}"
+        # Token counts: A = 100+300=400, B = 250+250+250=750
+        assert agent_by_id[tid_a]["tokens"]["in"] == 400, (
+            f"A input tokens: expected 400 (100+300), got {agent_by_id[tid_a]['tokens'].get('in')}"
+        )
+        assert agent_by_id[tid_b]["cost"] == 0.75, (
+            f"B cost: expected 0.75 (cumulative), got {agent_by_id[tid_b]['cost']}"
+        )
+        assert agent_by_id[tid_b]["tokens"]["in"] == 750, (
+            f"B input tokens: expected 750 (250+250+250), got {agent_by_id[tid_b]['tokens'].get('in')}"
         )
 
         # ── Kill A, re-build state ───────────────────────────────────────────
@@ -216,15 +223,15 @@ async def test_e2e_malformed_midstream_does_not_corrupt_totals(
         scripted_responses=[
             text_response_with_usage(
                 "turn1",
-                cumulative_input_tokens=100,
-                cumulative_output_tokens=50,
+                turn_input_tokens=100,
+                turn_output_tokens=50,
                 cumulative_cost_usd=0.10,
             ),
             malformed_turn,
             text_response_with_usage(
                 "turn3",
-                cumulative_input_tokens=500,
-                cumulative_output_tokens=250,
+                turn_input_tokens=400,  # per-turn: 500 total = 100 + 400
+                turn_output_tokens=200,  # per-turn: 250 total = 50 + 200
                 cumulative_cost_usd=0.50,
             ),
         ]
@@ -240,15 +247,18 @@ async def test_e2e_malformed_midstream_does_not_corrupt_totals(
 
         snap = broker._teammates[tid].status_snapshot()
 
-        # Turn 3's cumulative values win (overwrite semantics, D-2).
+        # Cost: Turn 3's cumulative value (overwrite semantics, D-2).
         assert snap["total_cost_usd"] == 0.50, (
             f"expected turn-3 cumulative 0.50; got {snap['total_cost_usd']}"
         )
+        # Tokens: accumulate per-turn values (turn-2 malformed, so tokens unchanged from turn-1).
+        # Turn 1: 100/50, Turn 2: malformed (skipped), Turn 3: 400/200 (per-turn)
+        # Total: 100+400=500, 50+200=250
         assert snap["total_input_tokens"] == 500, (
-            f"expected turn-3 cumulative 500; got {snap['total_input_tokens']}"
+            f"expected accumulated 500 (100+400); got {snap['total_input_tokens']}"
         )
         assert snap["total_output_tokens"] == 250, (
-            f"expected turn-3 cumulative 250; got {snap['total_output_tokens']}"
+            f"expected accumulated 250 (50+200); got {snap['total_output_tokens']}"
         )
 
         # WARNING must have been logged for the malformed turn-2 usage.
@@ -293,15 +303,15 @@ async def test_e2e_kill_mid_turn_preserves_last_cumulative(
         scripted_responses=[
             text_response_with_usage(
                 "turn1",
-                cumulative_input_tokens=100,
-                cumulative_output_tokens=50,
+                turn_input_tokens=100,
+                turn_output_tokens=50,
                 cumulative_cost_usd=0.10,
             ),
             # turn 2 scripted but will never deliver (response_hangs=True)
             text_response_with_usage(
                 "turn2",
-                cumulative_input_tokens=300,
-                cumulative_output_tokens=150,
+                turn_input_tokens=200,  # per-turn; would be 300 total if completed
+                turn_output_tokens=100,
                 cumulative_cost_usd=0.30,
             ),
         ],
