@@ -162,7 +162,11 @@ class TestBuildStateWithTeammates:
         ui = UIServer(broker, port=0)
         state = await ui._build_state()
         agent = state["instances"][0]["agents"][0]
-        for field in ("id", "role", "model", "status", "uptime", "lastMsg", "cost", "tokens", "tools", "current_tool"):
+        for field in (
+            "id", "role", "model", "status", "uptime", "lastMsg",
+            "cost", "tokens", "tools", "current_tool",
+            "oldest_in_flight", "in_flight_count", "last_tool_completed",  # F22 D-3, D-7
+        ):
             assert field in agent, f"missing field: {field}"
 
     async def test_status_active_when_agents_present(self, broker_with_teammates):
@@ -814,6 +818,7 @@ class TestUIServerBrokerDecoupling:
         required_instance_keys = {
             "id", "is_local", "label", "cwd", "branch",
             "uptime", "status", "cost", "tokens", "agents",
+            "now_wallclock",  # F22 D-4
         }
         assert required_instance_keys <= set(instance.keys()), (
             f"Missing instance keys: {required_instance_keys - set(instance.keys())}"
@@ -1339,8 +1344,10 @@ class TestF22TombstoneRace:
             instance = state_post["instances"][0]
             agent_ids = [a["id"] for a in instance["agents"]]
             assert tid not in agent_ids, "tombstoned agent must not appear in agents[]"
-            for a in instance["agents"]:
-                assert a.get("oldest_in_flight") is None or a["id"] != tid
+            # Stronger invariant: no agent ANYWHERE in the response has the killed
+            # teammate's id with a ghost oldest_in_flight (defends against future
+            # path that might surface a dead teammate via a different code branch).
+            assert all(a["id"] != tid for a in instance["agents"])
         finally:
             await broker.shutdown_all()
 
