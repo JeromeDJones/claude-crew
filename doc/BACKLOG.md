@@ -316,6 +316,24 @@ Plugin hooks and "always-include" hooks split across two different mechanisms:
 
 <!-- Add new entries above. Keep this file ordered newest-first. -->
 
+## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15)
+- **What**: `_warn_shadow_drop` enhancement (Q-9 deferred). When a user-level pack's `name:` value collides with a project-level pack's stem (or vice versa) and the underlying file stems differ, the WARN message could name BOTH stems alongside the canonical name to give operators visibility into the "I named the file `runner.md` but it shadowed `senior-runner` because both had `name: runner`" failure mode.
+- **Where**: `claude_crew/subagents/_user_loader.py:_warn_shadow_drop` (lines ~362-431) and the upstream dict-shape — needs path data plumbed through.
+- **Why it matters**: Post-#15 shadow detection works correctly via canonical-name dict-key comparison, but the WARN message names the canonical name only. Cross-stem mismatches are silent at the message level. Operator has to trace through file stems manually to debug "why did my project pack shadow the wrong user pack?"
+- **Suggested action**: Plumb a path-by-canonical-name mapping through `discover_dir → load_user_agents → load_project_agents → build_merged_pack` so `_warn_shadow_drop` can name both stems. ~30-line follow-up.
+
+## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15)
+- **What**: `_split_frontmatter` rejects Windows `\r\n` line endings in YAML frontmatter delimiters. Pre-existing limitation, not introduced by #15. Affects operators authoring agent files on Windows.
+- **Where**: `claude_crew/subagents/_loader.py:_split_frontmatter`. Hard-codes `"---\n"` as the delimiter; `\r\n` files raise `PackLoadError("does not start with YAML frontmatter delimiter '---'")`.
+- **Why it matters**: claude-crew's agent format-compatibility promise is "consume operator's existing files." A Windows-authored agent file will fail to load even if content is valid Claude Code format. #15 spec A-4 noted explicitly out of scope.
+- **Suggested action**: Normalize `\r\n` → `\n` at the top of `_split_frontmatter` before delimiter checks. Three-line fix.
+
+## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15) — process
+- **What**: Lockstep site inventories for rename refactors should be auto-generated, not hand-curated.
+- **Where**: SDD workflow Phase 2 spec authoring (`~/.claude/skills/sdd-workflow/SKILL.md` or `TEMPLATE.md`).
+- **Why it matters**: #15's SC-12 spec said 13 lockstep sites for the `_LEAF_SUFFIX` rename; pre-T4 sentinel sweep found 21 (8 missed including the load-bearing usage site). Hand-curated lists undercount by ~40%. Mid-build sentinel caught it but it's brittle — the next refactor task without a sentinel pass would ship broken.
+- **Suggested action**: Add to TEMPLATE.md / SDD Phase 2 guidance: "for any rename or refactor task, the SC's lockstep inventory must be the verbatim output of `grep -rn <symbol>` from repo root." Two-minute step at spec time, eliminates an entire class of mid-build sentinel finds.
+
 ## [2026-05-01] Feature: current-tool-badge-prominence (#22)
 - **What**: T5 sad-path scenario `test_unreachable_remote_no_now_wallclock_leakage` verifies the `_unreachable_instance` helper output and JSON round-trip in isolation, but does NOT exercise the actual `_build_state` aggregation path under multi-instance setup.
 - **Where**: `tests/test_e2e_badge_pipeline.py:174` (current test) and `tests/test_e2e_multi_instance.py` (where the gap should be closed).

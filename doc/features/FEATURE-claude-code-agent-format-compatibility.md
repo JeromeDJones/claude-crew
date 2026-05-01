@@ -883,4 +883,70 @@ Scenario: sad path — name validation cascade
 
 ## Phase 5: Completion
 
-*Stub.*
+### Phase 4 summary
+
+5 implementation tasks shipped on `feature/claude-code-agent-format-compat`:
+
+| Commit | Task | Pillar | Tests added | Suite count |
+|---|---|---|---|---|
+| `8a7641b` | T1 | E (coercion + latent-bug fix) | 15 | 715 |
+| `b3635c8` | T2 | C (optional model/tools + shadow-drop) | 14 | 728 |
+| `b5756e8` | T3 | A+D (canonical name + name/color fields) | 14 | 742 |
+| `e462180` | T4 | B (prompt composition refactor) | 5 + 6 inverted | 747 |
+| `aafacb4` | T5 | E2E pipeline + parity smoke | 8 (1 live-gated) | 754 |
+
+Plus `6da2e16` for the Phase 1-3 spec. Six commits total.
+
+### Verification
+
+- ✅ Full suite: **754 passed, 13 skipped** (12 pre-existing live-gated + new SC-10b).
+- ✅ E2E suite: 7 passed, 1 skipped (live-gated).
+- ✅ Live dogfood: `CLAUDE_CREW_LIVE_TESTS=1` against `~/.claude/agents/runner.md` — zero unsupported-key WARNs, role loads cleanly. Pre-#15 produced 5+ WARNs at startup.
+- ✅ `grep -r _LEAF_SUFFIX` returns no matches.
+- ✅ All 14 SCs (SC-1..SC-14) traced to BDD scenarios in T1..T5.
+- ✅ PRODUCT-VISION.md updated: row #15 marked **done**; "Next up" pointer moved to #24.
+
+### Retrospective
+
+#### What went well
+
+- **Phase 1 three-pushback warmup is now load-bearing.** The co-architect's pillar reframe (A+D merger, E as new pillar with latent-bug callout, B carve-out for teammate path) named the design space before Phase 2 SCs were drafted. Phase 2 became synthesis, not discovery. T1 — the smallest, sharpest task — was the latent character-iteration bug at `_loader.py:315` that the warmup surfaced by reading the validator code line-by-line. **Without that pass, the bug would have shipped uncorrected because no failing test pointed at it.**
+- **Sentinel-as-pseudocode-reader at Phase 2 caught two real bugs in the spec.** H-1 (`name: 42` regex hole — `str(42)` matches `^[a-z0-9][a-z0-9-]*$`) and H-2 (`tools` shadow-drop dead code — `tools=[]` is not `None`, so adding `"tools"` to `_OPTIONAL_AGENTDEF_FIELDS` provides zero coverage). Both surfaced at spec time with zero implementation cost. The two-stage type-check + regex pattern that resolved H-1 became a generalizable validation idiom for any `Optional[str]` frontmatter field.
+- **Mid-build sentinel at T3-T4 boundary caught the SC-12 lockstep undercount.** Phase 2 spec said 13 sites; pre-T4 sentinel sweep found 21 (the 8 missed sites included `_loader.py:212` — the actual usage call site, plus 3 `startswith(body)` hermeticity assertions that would have broken under SC-7's composition reversal). Without the checkpoint, T4 would have shipped with broken CI. **Mid-build sentinel pass on rename-heavy tasks is now mandatory.**
+- **BDD-first cadence held through all 5 tasks.** Every task wrote tests first, ran them red, implemented, verified green. The T1 red output (`('B', 'a', 's', 'h')` from `disallowedTools: Bash`) was diagnostic-perfect — the latent bug presented itself in the test output before the fix landed.
+- **Live dogfood validated end-to-end.** `~/.claude/agents/runner.md` loaded under the new code with zero WARNs, closing the #17 BACKLOG M-2 noisy-startup-log regression. The substrate consumes its own contract (bundled packs declare `name:`).
+- **Discovered+resolved a design conflict with prior work.** #17's existing `test_explicit_empty_in_higher_does_NOT_warn` asserted `disallowedTools=[]` is operator intent (NOT a drop). My initial T2 collection-shrinkage applied the WARN to both `tools` and `disallowedTools` uniformly. The test failure forced the asymmetric design (only `tools=[]` warns; `disallowedTools=[]` is operator intent removing a restriction) which is the **correct security posture**. The asymmetry is now explicit in the code and documented in the spec.
+
+#### What was friction
+
+- **Co-architect via claude-crew rate-limited at the Phase 2 gate.** 5-hour budget hit; overage rejected. Lost the dogfood signal on that gate. Local sentinel reviews carried it cleanly, but the substrate-validates-itself pattern broke. **Pattern**: when the dogfood spawn fails (rate limit, unreachable model, etc.), fall through to local subagents and log it for retro — don't block the gate.
+- **Phase 1 SC-5 contained an invalid YAML example.** `tools: "Read", "Write"` (unbracketed quoted list) is not valid YAML grammar — `yaml.safe_load` rejected it. Caught only at T1 implementation when the test failed for the wrong reason. **Fix**: any YAML examples in SC text should be syntactically validated (run through `yaml.safe_load`) before SCs are signed off.
+- **SC-12 lockstep site count was wrong** (13 listed, 21 actual). The undercount looked safe at planning time — Phase 2 only enumerated import sites and one usage. Mid-build sentinel found the 8 missed sites including the load-bearing call site. **Fix**: for any rename refactor, the spec's site inventory should be auto-generated from a `grep -r <symbol>` sweep, not hand-listed.
+- **Pre-existing test collision discovered at implementation, not at design.** #17's `test_explicit_empty_in_higher_does_NOT_warn` would have collided with my naive T2 design. The test failure surfaced the conflict; resolution was clean (asymmetric design) but should have been spotted at Phase 2. **Fix**: Phase 2 sentinel should add an explicit lens: "are existing tests in adjacent areas going to collide with this design?" — not just "what could break at runtime."
+
+#### Improvements
+
+- **Add `yaml.safe_load` smoke check for SC examples.** Phase 1 sentinel review should run any YAML example in the SC text through `yaml.safe_load` before signoff. Catches grammar errors cheaply.
+- **Mandate auto-generated rename inventories.** For SC-12-class refactors (constant rename, helper extraction), the spec's lockstep site list must be auto-generated via `grep -rn <symbol>` and pasted verbatim. Hand-curated lists undercounted by ~40% in this feature.
+- **Phase 2 sentinel prompt expansion.** Add explicit lens: "find pre-existing tests in adjacent files that encode contracts this design changes — would those tests pass post-implementation, or do they need lockstep updates?"
+- **Co-architect dogfood fallback policy.** When `mcp__claude-crew__spawn_teammate` returns a rate_limited error envelope, fall back to local subagent immediately — don't retry, don't kill the gate. Log for retro.
+- **Mid-build sentinel pass is now standard for refactor tasks.** Add to TEMPLATE.md: "if Phase 3 includes a rename or refactor task touching ≥10 sites, mandate a sentinel mid-build review at the boundary before that task starts."
+
+### Backlog observations
+
+`doc/BACKLOG.md` — 2 entries from this feature:
+
+- **(2026-05-02 #15) Q-9 cross-layer mixed-resolution diagnostic enhancement** — `_warn_shadow_drop` could name both stems alongside the canonical name when stems diverge. Requires plumbing path data through; deferred as small-cost follow-up.
+- **(2026-05-02 #15) `_split_frontmatter` rejects Windows `\r\n` line endings.** Pre-existing limitation; not introduced by this feature. Affects operators authoring agent files on Windows. Spec A-4 noted explicitly out of scope.
+
+### Phase 5 gate
+
+- ✅ Feature works end-to-end against all Phase 1 SCs (verified via T1-T5 BDD scenarios).
+- ✅ No regressions — 754 passed.
+- ✅ E2E tests pass — 7 passed, 1 skipped (live-gated).
+- ✅ Live dogfood passes locally.
+- ✅ FEATURE.md updated (this section).
+- ✅ PRODUCT-VISION.md updated — row #15 → done.
+- ✅ BACKLOG observations logged.
+- ⏳ Hand to Jerome for manual testing.
+- ⏳ Merge to master after approval.
