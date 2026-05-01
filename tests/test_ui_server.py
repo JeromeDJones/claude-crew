@@ -1286,3 +1286,60 @@ class TestF22BadgePayload:
         from claude_crew.ui_server import _unreachable_instance
         unreachable = _unreachable_instance("crew-xyz")
         assert "now_wallclock" not in unreachable
+
+
+# ── F22 T2: Tombstone-race invariant (D-9) ───────────────────────────────────
+
+class TestF22TombstoneRace:
+    """T2 / D-9: oldest_in_flight cannot ghost-surface for a tombstoned agent.
+
+    The invariant is structural: _build_local_instance reads info.alive and
+    snap["current_tools"] from the SAME BrokerSnapshot, and tombstoned
+    teammates are excluded from agents[] before any badge field is computed.
+    Broker enforces _close_open_tools runs in _tombstone_teammate before
+    info.alive becomes False (broker.py:288).
+
+    This test uses a real broker + kill_teammate path (not synthetic snapshot
+    data) because the alive→tombstoned transition is a broker state machine.
+    """
+
+    async def test_oldest_in_flight_none_for_tombstoned_teammate(self):
+        from claude_crew.teammate import _ToolUseEntry, StubTeammate
+        import time as _time
+
+        broker = Broker()
+        try:
+            await broker.spawn_teammate(
+                role="builder", name="builder", factory=_stub_factory,
+            )
+            # Get the live teammate and plant an in-flight tool directly.
+            alive_ids = [info.id for info in broker._info.values() if info.alive]
+            assert len(alive_ids) == 1
+            tid = alive_ids[0]
+            teammate: StubTeammate = broker._teammates[tid]
+            teammate._tool_uses["tu-planted"] = _ToolUseEntry(
+                tool_name="Bash",
+                tool_use_id="tu-planted",
+                started_at_wallclock=_time.time(),
+                args_summary=None,
+            )
+
+            # Pre-kill: oldest_in_flight should reflect the planted tool
+            ui = UIServer(broker, port=0)
+            state_pre = await ui._build_state()
+            agents_pre = state_pre["instances"][0]["agents"]
+            assert len(agents_pre) == 1
+            assert agents_pre[0]["oldest_in_flight"]["tool_name"] == "Bash"
+
+            # Kill the teammate — broker tombstones, _close_open_tools clears _tool_uses
+            await broker.kill_teammate(tid)
+
+            # Post-kill: agent absent from agents[]; no ghost oldest_in_flight anywhere
+            state_post = await ui._build_state()
+            instance = state_post["instances"][0]
+            agent_ids = [a["id"] for a in instance["agents"]]
+            assert tid not in agent_ids, "tombstoned agent must not appear in agents[]"
+            for a in instance["agents"]:
+                assert a.get("oldest_in_flight") is None or a["id"] != tid
+        finally:
+            await broker.shutdown_all()
