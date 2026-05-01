@@ -1,7 +1,8 @@
 # Feature: Broker Snapshot API + Dashboard Polish (#18)
 
-**Status**: In Progress (Phase 1)
+**Status**: ✅ Shipped (merged to master 2026-04-30)
 **Created**: 2026-04-30
+**Merged**: 2026-04-30 (commit `2a93977`)
 
 ---
 
@@ -554,23 +555,37 @@ Scenario: _unreachable_instance shape preserved (multi-instance compat)
 ## Phase 5: Completion
 
 ### Verification
-- [ ] Feature works against Phase 1 success criteria
-- [ ] No regressions — full test suite passes
-- [ ] Spec updated to match implementation
-- [ ] Docs updated if user-facing behavior changed
+- [x] Feature works against Phase 1 success criteria — final sentinel review traced all 13 SCs to passing tests
+- [x] No regressions — 530 passed, 10 skipped (was 511 + 9 pre-feature)
+- [x] Spec updated to match implementation — D-2 deepcopy resolution recorded; A-2 wording corrected mid-feature
+- [x] Docs updated — PRODUCT-VISION feature pipeline status, journal entry; BACKLOG entries for two adjacent gaps surfaced during the session
+- [x] Manual test passed — operator-confirmed (dashboard works, branch detection live, no regressions)
 
 ### Retrospective
 
 **What went well**:
 
+- **Two parallel-eligible tasks identified up-front.** T4 (redaction inline cleanup) shared no files with T1-T3 and ran concurrent with T1 from kickoff. Saved a serial step at zero coordination cost. Pattern worth reusing: at Phase 3, mark each task with shares-files-with so parallel-eligibility is an explicit field, not an inferred one.
+- **Co-architect hot-restart with onboarding delegation guidance.** Mid-feature, the persistent Opus co-architect was burning ~$0.30/turn from cumulative context (1.3M input tokens across 6 turns). Killed and respawned with a one-line operating-style instruction in the spawn prompt ("delegate raw file reads to explorer subagents"). Per-review token use dropped 83%, cost halved. Process improvement worth carrying forward.
+- **Sentinel chain caught two real issues mid-feature.** Phase 2 review caught the D-2 inner-dict reference leak (test as written would have passed even with `dict(status)`); post-T2 sentinel had nothing to flag because the Phase 2 fix held. Correct gates landed at the correct boundaries.
+- **Forward-compat field reservation worked.** SC-13 / D-10 reserved `tool_events: tuple = ()` for #19. Trivial in #18; means #19 doesn't need a snapshot v2.
+
 **What was friction**:
 
+- **Hidden read site found in Phase 2, not Phase 1 recon.** The Haiku explorer's recon listed 4 production reads in `ui_server.py`. Phase 2 synthesis surfaced a fifth: `teammate._model` at line 122. Lesson: Phase 1 recon should be told to grep for `(broker|teammate)\._\w+` patterns explicitly, not just "private attr reads on the broker." The same pattern would have caught it.
+- **Pack-file teammate vs subagent prompt asymmetry surfaced as a side discovery.** Investigating why the co-architect wasn't delegating revealed that teammate system prompts are a generic 8-word default — pack file content is never used for top-level teammates. This is a structural gap (now Feature #21) that #18 didn't cause, but #18's session is what surfaced it. The "operate, observe gaps, log them" loop continues to find architectural friction nobody planned to look for.
+- **Cumulative session cost on persistent crew teammates.** Even with prompt caching, persistent Opus teammates handling many turns get expensive. F14 telemetry made this visible and quantifiable; #18 forced a process change. Operational guidance, not a bug.
+
 **Improvements**:
-1. [Specific, actionable change to workflow]
+
+1. **Pre-Phase-3 grep prompt**: when commissioning Phase 1 recon for a refactor that targets "private API leakage," ask for `(<class_or_object>)\._\w+` matches explicitly, not just "reads of private attrs on X." Catches sibling-class leaks (like `teammate._model` slipping through a "broker private attrs" recon).
+2. **Phase 3 task field for parallel-eligibility**: add a `shares-files-with: [task-id, ...]` row to each task. Tasks with empty shares-files-with can be dispatched in parallel from Phase 4 kickoff. Removes the "is this safe to parallelize?" judgment call at execution time.
+3. **Co-architect onboarding template**: the "delegate raw file reads to explorer" guidance is general and should be in any persistent-teammate spawn prompt by default. Bake into a reusable prompt template until Feature #21 lands the structural fix.
 
 **Workflow updates made**:
-- [ ] TEMPLATE.md or SKILL.md updated
-- [ ] Project knowledge base updated (`.claude/rules/`)
-- [ ] MEMORY.md updated (if cross-project insight)
+- [x] BACKLOG.md updated — three #18 follow-up entries (teammate/subagent prompt parity, persistent-teammate session cost, pack-model spawn asymmetry was already there from earlier)
+- [x] PRODUCT-VISION.md updated — pipeline #18 marked done, #21 (teammate prompt parity) added as new feature
+- [ ] `.claude/rules/` — no new project rule needed
+- [ ] MEMORY.md — no cross-project insight; #18's lessons are claude-crew-specific
 
-**Gate**: Feature verified, retrospective captured, workflow improved.
+**Gate**: ✅ Feature verified end-to-end, manual test passed, retrospective captured, three actionable workflow improvements logged.
