@@ -4,8 +4,17 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
+import subprocess
+
 from claude_crew.broker import Broker
-from claude_crew.ui_server import UIServer, _derive_status, _normalize_model, _ts
+from claude_crew.ui_server import (
+    UIServer,
+    _BRANCH_TTL_SECONDS,
+    _derive_status,
+    _normalize_model,
+    _ts,
+    _unreachable_instance,
+)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -809,3 +818,78 @@ class TestUIServerBrokerDecoupling:
         assert required_instance_keys <= set(instance.keys()), (
             f"Missing instance keys: {required_instance_keys - set(instance.keys())}"
         )
+
+
+# ── T3: git branch detection ─────────────────────────────────────────────────
+
+class TestBranchDetection:
+    def test_branch_detection_succeeds_in_real_git_repo(self, tmp_path):
+        """_get_branch returns the actual branch name when cwd is a git repo."""
+        # Init a repo and create a commit so --show-current works reliably
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+        # Create a commit so the branch name is stable
+        (tmp_path / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-b", "feat-foo"],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0, cwd=str(tmp_path))
+        assert ui._get_branch() == "feat-foo"
+
+    def test_branch_detection_falls_back_to_main_in_non_git_dir(self, tmp_path):
+        """_get_branch returns 'main' and does not raise when cwd is not a git repo."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0, cwd=str(tmp_path))
+        result = ui._get_branch()
+        assert result == "main"
+
+    def test_branch_cache_ttl_honors_window(self, monkeypatch):
+        """Cached branch is returned within TTL; refreshed after expiry."""
+        calls = ["alpha", "beta"]
+
+        def fake_detect(cwd: str):
+            return calls.pop(0) if calls else "gamma"
+
+        monkeypatch.setattr("claude_crew.ui_server._detect_branch", fake_detect)
+
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0, cwd="/fake")
+        assert ui._get_branch() == "alpha"
+        assert ui._get_branch() == "alpha"  # still cached
+
+        # Expire the cache
+        cache_value, cache_expiry = ui._branch_cache
+        ui._branch_cache = (cache_value, cache_expiry - _BRANCH_TTL_SECONDS - 1)
+        assert ui._get_branch() == "beta"
+
+    def test_branch_subprocess_timeout_falls_back_to_main(self, monkeypatch):
+        """TimeoutExpired from subprocess.run is caught by _detect_branch → returns None → 'main'."""
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=2.0)
+
+        monkeypatch.setattr("claude_crew.ui_server.subprocess.run", fake_run)
+
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0, cwd="/fake")
+        result = ui._get_branch()
+        assert result == "main"
+
+    def test_unreachable_instance_branch_unchanged(self):
+        """_unreachable_instance always returns branch='main' (SC-12)."""
+        result = _unreachable_instance("crew-x")
+        assert result["branch"] == "main"

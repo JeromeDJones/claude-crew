@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +31,8 @@ _logger = logging.getLogger(__name__)
 
 _DASHBOARD_PATH = Path(__file__).parent / "ui" / "dashboard.html"
 _POLL_INTERVAL = 1.5
+_BRANCH_TTL_SECONDS = 30
+_BRANCH_DETECT_TIMEOUT = 2.0
 
 
 def _normalize_model(model_id: str | None) -> str:
@@ -58,6 +62,28 @@ def _ts(wallclock: float | None) -> str:
     )
 
 
+def _detect_branch(cwd: str) -> str | None:
+    """Detect the current git branch in `cwd` via `git branch --show-current`.
+
+    Returns the branch name on success, or None on any failure (not a git
+    repo, git missing, subprocess error, timeout, detached HEAD producing
+    empty output). Callers should fall back to "main" on None.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=_BRANCH_DETECT_TIMEOUT,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None  # empty = detached HEAD → fail
+
+
 def _unreachable_instance(crew_id: str) -> dict[str, Any]:
     return {
         "id": crew_id,
@@ -80,11 +106,14 @@ class UIServer:
         port: int = 7821,
         registry: InstanceRegistry | None = None,
         sock: "Any | None" = None,
+        cwd: str | None = None,
     ) -> None:
         self._broker = broker
         self._port = port
         self._registry = registry
         self._sock = sock  # pre-bound socket; closed in serve() finally block
+        self._cwd = cwd if cwd is not None else os.getcwd()
+        self._branch_cache: tuple[str, float] = ("main", 0.0)
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
@@ -99,6 +128,19 @@ class UIServer:
                 f"<p>Expected: {_DASHBOARD_PATH}</p>"
                 "</body></html>"
             )
+
+    def _get_branch(self) -> str:
+        """Return the cached git branch name; refresh every _BRANCH_TTL_SECONDS.
+
+        Falls back to "main" on any detection failure. Never raises.
+        """
+        now = time.time()
+        if now < self._branch_cache[1]:
+            return self._branch_cache[0]
+        detected = _detect_branch(self._cwd)
+        branch = detected if detected is not None else "main"
+        self._branch_cache = (branch, now + _BRANCH_TTL_SECONDS)
+        return branch
 
     def _build_local_instance(
         self, snapshot: BrokerSnapshot
@@ -185,7 +227,7 @@ class UIServer:
             "is_local": True,
             "label": f"crew-{snapshot.crew_id}",
             "cwd": "~",
-            "branch": "main",
+            "branch": self._get_branch(),
             "uptime": crew_uptime,
             "status": "active" if agents else "idle",
             "cost": total_cost,
