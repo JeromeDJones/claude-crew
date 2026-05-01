@@ -212,14 +212,14 @@ class TestBuildStateTranscript:
         bodies = [m["body"] for m in messages]
         assert not any("teammate_dead" in b for b in bodies)
 
-    async def test_long_body_capped_at_500(self):
+    async def test_long_body_capped_at_10000(self):
         from claude_crew.broker import LEAD_ID
         from claude_crew.envelope import Envelope, new_message_id
         import time
 
         broker = Broker()
         ui = UIServer(broker, port=0)
-        long_payload = "x" * 1000
+        long_payload = "x" * 50000  # well above the 10000 cap
         env = Envelope(
             id=new_message_id(), seq=1, sender="lead",
             recipient="t-abc", timestamp=time.time(),
@@ -230,7 +230,7 @@ class TestBuildStateTranscript:
         state = await ui._build_state()
         messages = state["transcripts"][broker.crew_id]
         assert len(messages) == 1
-        assert len(messages[0]["body"]) <= 2000
+        assert len(messages[0]["body"]) == 10000
 
     async def test_dict_payload_text_extracted(self):
         """SDK agent responses with {"text": ..., "from": ...} render as plain text."""

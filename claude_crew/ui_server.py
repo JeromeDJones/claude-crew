@@ -216,7 +216,7 @@ class UIServer:
                 "from": env.sender,
                 "to": env.recipient,
                 "kind": "msg",
-                "body": str(body)[:2000],
+                "body": str(body)[:10000],
             })
 
         spawn_times = [info.spawned_at for info in snapshot.teammates]
