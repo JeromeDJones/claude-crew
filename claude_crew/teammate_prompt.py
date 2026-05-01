@@ -123,6 +123,10 @@ def _build_peer_list(self_role: str, agents: dict[str, Any]) -> str:
     - Excludes self_role (R-2: a teammate cannot delegate to itself).
     - Defensive on missing / non-string description (R-3: user packs may be
       malformed; fall back to name-only, never raise).
+    - Lists each peer's available tools as an indented sub-bullet so the
+      teammate can route work correctly (BACKLOG 2026-05-01: parents were
+      mis-routing shell tasks to subagents that lack Bash because the peer
+      list didn't surface tool surfaces). Defensive on missing tools field.
     """
     lines = [SENTINEL_PEERS, ""]
     for name in sorted(agents.keys()):
@@ -134,6 +138,10 @@ def _build_peer_list(self_role: str, agents: dict[str, Any]) -> str:
             lines.append(f"- **{name}** — {desc.strip()}")
         else:
             lines.append(f"- **{name}**")
+        tools = getattr(defn, "tools", None)
+        if isinstance(tools, (list, tuple)) and tools:
+            tool_str = ", ".join(str(t) for t in tools)
+            lines.append(f"  - tools: {tool_str}")
     return "\n".join(lines)
 
 
