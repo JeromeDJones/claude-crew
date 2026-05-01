@@ -52,15 +52,30 @@ _OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background",
 _VALID_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
 )
+
+# Appended to AgentDefinition.prompt for every subagent (leaf context).
+# The raw body (without this suffix) is returned as the 4th element of
+# parse_pack_text so the teammate spawn path can use it without the
+# leaf-specific constraints.
+_LEAF_SUFFIX = """
+## Leaf context
+
+You are a leaf subagent. You have no Task tool by design — subagents are leaves
+and cannot spawn further subagents. Stop and report when your task is complete.
+"""
 _VALID_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 
-def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter]:
+def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
     """Parse one markdown file with YAML frontmatter into an AgentDefinition.
 
-    Returns (key, agent_definition, frontmatter) where the key is the file
-    stem with underscores converted to hyphens (e.g., ``general_purpose.md``
-    → ``"general-purpose"``).
+    Returns ``(key, agent_definition, frontmatter, raw_body)`` where:
+
+    - ``key`` is the file stem with underscores converted to hyphens
+      (e.g., ``general_purpose.md`` → ``"general-purpose"``).
+    - ``agent_definition.prompt`` is ``raw_body.rstrip() + _LEAF_SUFFIX``
+      (subagent / Task context).
+    - ``raw_body`` is the body without the leaf suffix (teammate context).
 
     Raises:
         PackLoadError: if the file is missing, lacks frontmatter, omits a
@@ -73,8 +88,8 @@ def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter]:
     return parse_pack_text(text, path)
 
 
-def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFrontmatter]:
-    """Parse already-read pack text into ``(key, AgentDefinition, PackFrontmatter)``.
+def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
+    """Parse already-read pack text into ``(key, AgentDefinition, PackFrontmatter, raw_body)``.
 
     Lets callers that already have the file contents (e.g., the user-
     loader's ``strict_parse``, which inspects frontmatter before
@@ -82,6 +97,12 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     and for error messages. The ``PackFrontmatter`` is returned as the
     third element so callers can access fields (e.g., ``settingSources``)
     that do not map onto ``AgentDefinition``.
+
+    The fourth element ``raw_body`` is the body text without the appended
+    ``_LEAF_SUFFIX``. The teammate spawn path uses this to build a
+    teammate-context system prompt via ``teammate_prompt.build_teammate_prompt``.
+    ``AgentDefinition.prompt`` always has the leaf suffix appended — it is
+    the source of truth for subagent (Task) invocations.
     """
     fm_dict, body = _split_frontmatter(text, path)
     fm = _validate_frontmatter(fm_dict, path)
@@ -92,7 +113,7 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     key = path.stem.replace("_", "-")
     agent_kwargs: dict[str, Any] = {
         "description": fm.description,
-        "prompt": body,
+        "prompt": body.rstrip() + _LEAF_SUFFIX,
         "tools": list(fm.tools),
         "model": fm.model,
         "effort": fm.effort,
@@ -108,7 +129,7 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         agent_kwargs["disallowedTools"] = list(fm.disallowedTools)
 
     agent = AgentDefinition(**agent_kwargs)
-    return key, agent, fm
+    return key, agent, fm, body
 
 
 def _split_frontmatter(text: str, path: Path) -> tuple[dict[str, Any], str]:

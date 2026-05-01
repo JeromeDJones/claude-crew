@@ -48,6 +48,7 @@ from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
 from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate, _ToolUseEntry
+from claude_crew.teammate_prompt import build_teammate_prompt
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
@@ -124,20 +125,23 @@ class TurnDrainResult:
         {"failed","stopped"} observed this turn, in arrival order. Used by
         SC-8(a) to synthesize an envelope when the parent didn't narrate
         over the failure. Empty list means no failures observed.
-    cumulative_input_tokens: session-cumulative input tokens from terminal
-        ResultMessage (includes cache tokens per D-3). None if no valid
-        ResultMessage was observed (interrupted, malformed, etc.).
-    cumulative_output_tokens: session-cumulative output tokens from terminal
-        ResultMessage. None under same conditions as cumulative_input_tokens.
+    turn_input_tokens: per-turn input tokens from ResultMessage.usage
+        (includes cache tokens per D-3). Accumulate this across turns to get
+        session total. None if no valid ResultMessage was observed
+        (interrupted, malformed, etc.).
+    turn_output_tokens: per-turn output tokens from ResultMessage.usage.
+        Accumulate this across turns to get session total. None under same
+        conditions as turn_input_tokens.
     cumulative_cost_usd: session-cumulative cost from ResultMessage.total_cost_usd.
+        Overwrite (not accumulate) — the SDK already maintains the running total.
         None if ResultMessage was absent or total_cost_usd was None/malformed.
     """
 
     text: str
     failed_task_notifs: list[TaskNotificationMessage]
     # D-8: None = no valid ResultMessage observed; caller skips assignment.
-    cumulative_input_tokens: int | None = None
-    cumulative_output_tokens: int | None = None
+    turn_input_tokens: int | None = None
+    turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
 
 
@@ -165,10 +169,12 @@ async def _collect_response_text(
     def _extract_token_cost_from_rm(
         rm: ResultMessage,
     ) -> tuple[int | None, int | None, float | None]:
-        """Extract (total_input, total_output, cost_usd) from a ResultMessage.
+        """Extract (per_turn_input, per_turn_output, cumulative_cost_usd) from a ResultMessage.
 
         D-1: ResultMessage is the single source; AssistantMessage.usage is never read.
-        D-3: total_input includes cache_read_input_tokens + cache_creation_input_tokens.
+        D-3: per_turn_input includes cache_read_input_tokens + cache_creation_input_tokens
+             (all billed context). Accumulate per-turn values across turns to get session total.
+        D-2: cumulative_cost_usd is session-total; overwrite (not accumulate) this value per turn.
         D-8: returns (None, None, None) on malformed/absent data; logs WARNING
              with the offending dict's KEYS (not values) to avoid leaking content.
         """
@@ -179,8 +185,8 @@ async def _collect_response_text(
         if usage is None and cost is None:
             return (None, None, None)
 
-        total_input: int | None = None
-        total_output: int | None = None
+        per_turn_input: int | None = None
+        per_turn_output: int | None = None
         cost_usd: float | None = None
 
         if usage is not None:
@@ -193,20 +199,20 @@ async def _collect_response_text(
                 # cost may still be valid — fall through
             else:
                 try:
-                    total_input = int(
+                    per_turn_input = int(
                         usage.get("input_tokens", 0)
                         + usage.get("cache_read_input_tokens", 0)
                         + usage.get("cache_creation_input_tokens", 0)
                     )
-                    total_output = int(usage.get("output_tokens", 0))
+                    per_turn_output = int(usage.get("output_tokens", 0))
                 except (TypeError, ValueError):
                     logger.warning(
                         "_collect_response_text: malformed ResultMessage.usage values "
                         "(keys=%s); leaving token totals unchanged",
                         list(usage.keys()),
                     )
-                    total_input = None
-                    total_output = None
+                    per_turn_input = None
+                    per_turn_output = None
 
         if cost is not None:
             try:
@@ -218,12 +224,12 @@ async def _collect_response_text(
                     type(cost).__name__,
                 )
 
-        return (total_input, total_output, cost_usd)
+        return (per_turn_input, per_turn_output, cost_usd)
 
     text_parts: list[str] = []
     failed_task_notifs: list[TaskNotificationMessage] = []
-    cumulative_input_tokens: int | None = None
-    cumulative_output_tokens: int | None = None
+    turn_input_tokens: int | None = None
+    turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
@@ -242,12 +248,13 @@ async def _collect_response_text(
             continue
         if isinstance(msg, ResultMessage):
             # D-1: single source for cost AND tokens — read from ResultMessage only.
-            # D-2/D-6: multiple ResultMessages → last wins (overwrite semantics).
+            # D-2: per-turn tokens accumulate; cumulative cost overwrites (SDK-maintained total).
+            # D-6: multiple ResultMessages → last wins (overwrite semantics for cost only).
             ri, ro, rc = _extract_token_cost_from_rm(msg)
             if ri is not None:
-                cumulative_input_tokens = ri
+                turn_input_tokens = ri
             if ro is not None:
-                cumulative_output_tokens = ro
+                turn_output_tokens = ro
             if rc is not None:
                 cumulative_cost_usd = rc
             continue
@@ -271,8 +278,8 @@ async def _collect_response_text(
     return TurnDrainResult(
         text="".join(text_parts),
         failed_task_notifs=failed_task_notifs,
-        cumulative_input_tokens=cumulative_input_tokens,
-        cumulative_output_tokens=cumulative_output_tokens,
+        turn_input_tokens=turn_input_tokens,
+        turn_output_tokens=turn_output_tokens,
         cumulative_cost_usd=cumulative_cost_usd,
     )
 
@@ -295,6 +302,7 @@ class SdkTeammate(Teammate):
         system_prompt: str | None = None,
         setting_sources: list[str] | None = None,
         agents: "dict[str, Any] | None" = None,
+        pack_bodies: "dict[str, str] | None" = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
     ) -> None:
@@ -303,15 +311,32 @@ class SdkTeammate(Teammate):
         self.role = role
         self._model = model
         self._effort = effort
-        self._system_prompt = system_prompt or _default_system_prompt(role)
-        self._setting_sources = (
-            setting_sources if setting_sources is not None else ["user", "project"]
-        )
         # `agents=None` → load the bundled default pack. `agents={}` → explicit
         # empty (this teammate cannot delegate). `agents={...}` → custom pack
         # (Feature #3b's seam ride-along). load_default_pack() returns a
-        # (pack, role_ss) tuple; only the pack dict is needed here.
-        self._agents = load_default_pack()[0] if agents is None else agents
+        # (pack, role_ss, bodies) tuple; we need both pack and bodies.
+        if agents is None:
+            _pack, _role_ss, _bodies = load_default_pack()
+            self._agents = _pack
+            # pack_bodies kwarg wins if provided; otherwise use bodies from default pack.
+            self._pack_bodies: dict[str, str] = pack_bodies if pack_bodies is not None else _bodies
+        else:
+            self._agents = agents
+            self._pack_bodies = pack_bodies if pack_bodies is not None else {}
+        # Assign _system_prompt AFTER _agents and _pack_bodies are populated so
+        # build_teammate_prompt has access to the full agents dict (A-3).
+        if system_prompt is not None:
+            self._system_prompt = system_prompt  # explicit override wins (edge case 2)
+        else:
+            _body = self._pack_bodies.get(role)
+            if _body is not None:
+                self._system_prompt = build_teammate_prompt(role, _body, self._agents)
+            else:
+                # Fallback: role not in any loaded pack (D-7 legacy path)
+                self._system_prompt = _default_system_prompt(role)
+        self._setting_sources = (
+            setting_sources if setting_sources is not None else ["user", "project"]
+        )
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._task: asyncio.Task[None] | None = None
@@ -967,17 +992,18 @@ class SdkTeammate(Teammate):
                     to=env.sender, code=_classify_error(exc), message=str(exc),
                 )
                 return
-            # F14: apply token/cost overwrite from this turn's ResultMessage.
+            # F14: apply token/cost logic from this turn's ResultMessage.
             # D-4: atomic co-assignment under single-threaded _run() — no awaits
             #      between these three statements; readers cannot see a torn state.
-            # D-2: overwrite semantics — ResultMessage values are session-cumulative.
+            # D-2: per-turn tokens ACCUMULATE (+=) across turns; cumulative cost OVERWRITES
+            #      (=) because it's already a running total from the SDK.
             # D-8: only assign when not None (malformed/missing → unchanged).
-            if result.cumulative_input_tokens is not None:
-                self._total_input_tokens = result.cumulative_input_tokens
-            if result.cumulative_output_tokens is not None:
-                self._total_output_tokens = result.cumulative_output_tokens
+            if result.turn_input_tokens is not None:
+                self._total_input_tokens += result.turn_input_tokens  # accumulate
+            if result.turn_output_tokens is not None:
+                self._total_output_tokens += result.turn_output_tokens  # accumulate
             if result.cumulative_cost_usd is not None:
-                self._total_cost_usd = result.cumulative_cost_usd
+                self._total_cost_usd = result.cumulative_cost_usd  # overwrite (cumulative)
             # Success path: text/no-text/SC-8(a) subagent failure synthesis.
             text = result.text
             if not text:

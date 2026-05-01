@@ -106,10 +106,11 @@ from claude_agent_sdk.types import (
 class TurnDrainResult:
     text: str
     failed_task_notifs: list[TaskNotificationMessage]
-    # NEW — overwrite values from terminal ResultMessage; None if no
-    # ResultMessage was observed during this drain (interrupted, etc.)
-    cumulative_input_tokens: int | None = None
-    cumulative_output_tokens: int | None = None
+    # NEW (D-2 bug fix) — per-turn values from ResultMessage.usage; accumulate across turns.
+    # cumulative_cost_usd is session-total from ResultMessage.total_cost_usd; overwrite.
+    # None if no valid ResultMessage was observed during this drain (interrupted, etc.)
+    turn_input_tokens: int | None = None
+    turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
 
 # SdkTeammate — new instance fields (initialized in __init__, alongside _tool_uses)
@@ -188,23 +189,26 @@ The agents array remains alive-only (matches existing UI contract). Tombstones c
 def text_response_with_usage(
     text: str,
     *,
-    cumulative_input_tokens: int,
-    cumulative_output_tokens: int,
+    turn_input_tokens: int,
+    turn_output_tokens: int,
     cumulative_cost_usd: float,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
 ) -> list[Any]:
-    """text_response variant that scripts ResultMessage with cumulative usage/cost.
+    """text_response variant that scripts ResultMessage with per-turn usage/cumulative cost.
 
-    Tokens passed are the cumulative session totals as ResultMessage would
-    carry them. Cache tokens are added INTO ResultMessage.usage, not separately
-    summed by the caller — the SdkTeammate's extraction logic decides whether
-    to include them in total_input_tokens (per SC-1: yes, billed context is
-    billed context).
+    turn_input_tokens: per-turn input token count (usage.input_tokens).
+    turn_output_tokens: per-turn output token count (usage.output_tokens).
+    cumulative_cost_usd: session-cumulative cost (ResultMessage.total_cost_usd).
+    cache_read/creation_input_tokens: cache tokens (added to usage dict).
+
+    The helper builds ResultMessage.usage with per-turn values plus cache splits,
+    which SdkTeammate accumulates across turns (D-3, D-2: tokens accumulate,
+    cost overwrites session total from SDK).
     """
     usage = {
-        "input_tokens": cumulative_input_tokens - cache_read_input_tokens - cache_creation_input_tokens,
-        "output_tokens": cumulative_output_tokens,
+        "input_tokens": turn_input_tokens,
+        "output_tokens": turn_output_tokens,
     }
     if cache_read_input_tokens:
         usage["cache_read_input_tokens"] = cache_read_input_tokens
@@ -224,7 +228,7 @@ def text_response_with_usage(
 
 - **D-1: ResultMessage is the single source for cost AND tokens.** — *Rationale:* OQ-3 spike confirmed ResultMessage carries cumulative `total_cost_usd` and `usage` per-turn-drain. Using one source eliminates cross-source skew (e.g., AssistantMessage usage diverging from ResultMessage usage). Also dodges OQ-1's multi-AssistantMessage overcounting risk entirely. — *Carried into:* `_collect_response_text` only branches on `ResultMessage` for token/cost extraction; never on `AssistantMessage.usage`. Test: `test_token_cost_overwrite_from_result_message_only`.
 
-- **D-2: Overwrite, not accumulate.** — *Rationale:* ResultMessage values are session-cumulative. Accumulating would double-count exponentially across turns. — *Carried into:* `_handle_one_turn` uses `=` not `+=` when applying TurnDrainResult values. Test: `test_three_turns_show_final_cumulative_not_sum`.
+- **D-2: Per-turn tokens ACCUMULATE (`+=`); cumulative cost OVERWRITES (`=`).** — *Rationale (bug fix 2026-05-01):* Live evidence showed tokens are PER-TURN (input decreased turn-over-turn while cost rose), while cost is SESSION-CUMULATIVE. `ResultMessage.usage` (input_tokens/output_tokens) contains per-turn values from the SDK response. `ResultMessage.total_cost_usd` contains the session total. Thus: accumulate per-turn tokens with `+=` to build session totals; overwrite cost with `=` since SDK already maintains the running sum. This was originally misunderstood as cumulative tokens (impossible once per-turn data was observed). — *Carried into:* `_handle_one_turn` uses `+=` for tokens, `=` for cost. Test: `test_three_turns_show_final_cumulative_not_sum` (tokens should sum 1000, cost should be 0.60); `test_token_totals_accumulate_across_turns_even_when_per_turn_decreases` (regression — even when per-turn decreases, accumulation continues).
 
 - **D-3: Cache tokens included in `total_input_tokens`.** — *Rationale:* SC-1 — billed context is billed context; users care about "what did I pay for," not "what did the cache miss." Excluding cache tokens makes the input count look artificially low for cached sessions. — *Carried into:* `_collect_response_text` extraction sums `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` from `ResultMessage.usage`. Test: `test_cache_tokens_summed_into_total_input`.
 

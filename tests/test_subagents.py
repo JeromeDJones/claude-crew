@@ -48,12 +48,12 @@ class TestPackContents:
     """SC-3, SC-4, SC-7 — the bundled pack matches its declared contract."""
 
     def test_keys_are_exactly_the_three_pack_members(self) -> None:
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         assert set(pack.keys()) == {"explorer", "planner", "general-purpose"}
         assert PACK_MEMBERS == ("explorer", "planner", "general-purpose")
 
     def test_explorer_contract(self) -> None:
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         explorer = pack["explorer"]
         assert isinstance(explorer, AgentDefinition)
         assert explorer.model == "haiku"
@@ -62,7 +62,7 @@ class TestPackContents:
         assert explorer.maxTurns == 10
 
     def test_planner_contract(self) -> None:
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         planner = pack["planner"]
         assert planner.model == "sonnet"
         assert planner.tools == ["Read", "Grep", "Glob", "Write"]
@@ -73,7 +73,7 @@ class TestPackContents:
         assert "acceptance criteria" in planner.initialPrompt.lower()
 
     def test_general_purpose_contract(self) -> None:
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         gp = pack["general-purpose"]
         assert gp.model == "sonnet"
         assert gp.effort == "medium"
@@ -86,7 +86,7 @@ class TestPackContents:
 
     def test_no_pack_member_has_task_tool(self) -> None:
         """Subagents are leaves. None of them get Task — locked by Phase 1."""
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         for name, agent in pack.items():
             assert "Task" not in (agent.tools or []), (
                 f"{name} must not have Task — subagents are leaves"
@@ -99,7 +99,7 @@ class TestPackContents:
         of scope. Without an explicit assertion, the loader could ship
         background=None (SDK default) and silently break the contract.
         """
-        pack, _role_ss = load_default_pack()
+        pack, _role_ss, _bodies = load_default_pack()
         for name, agent in pack.items():
             assert agent.background is False, (
                 f"{name}.background must be False — async subagents are OOS"
@@ -107,28 +107,58 @@ class TestPackContents:
 
     def test_load_default_pack_is_deterministic(self) -> None:
         """SC-7 — two calls produce identical pack."""
-        a = load_default_pack()
-        b = load_default_pack()
-        assert a == b
+        a_pack, a_ss, a_bodies = load_default_pack()
+        b_pack, b_ss, b_bodies = load_default_pack()
+        assert a_pack == b_pack
+        assert a_ss == b_ss
+        assert a_bodies == b_bodies
 
 
 class TestPackHermeticity:
-    """SC-5 — pack content is in-repo, prompt body is the literal file body."""
+    """SC-5 — pack content is in-repo, prompt starts with the file body + leaf suffix appended."""
 
-    def test_explorer_prompt_matches_file_body(self) -> None:
-        pack, _role_ss = load_default_pack()
+    def test_explorer_prompt_starts_with_file_body(self) -> None:
+        pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "explorer.md")
-        assert pack["explorer"].prompt == body
+        assert pack["explorer"].prompt.startswith(body.rstrip())
 
-    def test_planner_prompt_matches_file_body(self) -> None:
-        pack, _role_ss = load_default_pack()
+    def test_explorer_prompt_has_leaf_suffix(self) -> None:
+        from claude_crew.subagents._loader import _LEAF_SUFFIX
+        pack, _role_ss, _bodies = load_default_pack()
+        assert pack["explorer"].prompt.endswith(_LEAF_SUFFIX)
+
+    def test_planner_prompt_starts_with_file_body(self) -> None:
+        pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "planner.md")
-        assert pack["planner"].prompt == body
+        assert pack["planner"].prompt.startswith(body.rstrip())
 
-    def test_general_purpose_prompt_matches_file_body(self) -> None:
-        pack, _role_ss = load_default_pack()
+    def test_planner_prompt_has_leaf_suffix(self) -> None:
+        from claude_crew.subagents._loader import _LEAF_SUFFIX
+        pack, _role_ss, _bodies = load_default_pack()
+        assert pack["planner"].prompt.endswith(_LEAF_SUFFIX)
+
+    def test_general_purpose_prompt_starts_with_file_body(self) -> None:
+        pack, _role_ss, _bodies = load_default_pack()
         body = _read_body(PACK_DIR / "general_purpose.md")
-        assert pack["general-purpose"].prompt == body
+        assert pack["general-purpose"].prompt.startswith(body.rstrip())
+
+    def test_general_purpose_prompt_has_leaf_suffix(self) -> None:
+        from claude_crew.subagents._loader import _LEAF_SUFFIX
+        pack, _role_ss, _bodies = load_default_pack()
+        assert pack["general-purpose"].prompt.endswith(_LEAF_SUFFIX)
+
+    def test_bodies_dict_matches_raw_file_body(self) -> None:
+        """The bodies dict returned by load_default_pack contains the raw body (no leaf suffix)."""
+        from claude_crew.subagents._loader import _LEAF_SUFFIX
+        _pack, _role_ss, bodies = load_default_pack()
+        for key, fname in [
+            ("explorer", "explorer.md"),
+            ("planner", "planner.md"),
+            ("general-purpose", "general_purpose.md"),
+        ]:
+            raw = _read_body(PACK_DIR / fname)
+            assert bodies[key] == raw
+            assert _LEAF_SUFFIX not in bodies[key]
 
 
 class TestParsePackFile:
@@ -149,7 +179,7 @@ class TestParsePackFile:
             # Role
             You are an explorer.
             """))
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "explorer"
         assert agent.model == "haiku"
         assert agent.tools == ["Read", "Grep", "Glob"]
@@ -169,7 +199,7 @@ class TestParsePackFile:
 
             body
             """))
-        key, _, _fm = parse_pack_file(f)
+        key, _, _fm, _ = parse_pack_file(f)
         assert key == "general-purpose"
 
     def test_missing_required_field_raises(self, tmp_path: Path) -> None:
@@ -220,7 +250,7 @@ class TestParsePackFile:
 
             body here
             """))
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "fwd"
         assert agent.model == "haiku"
 
@@ -648,7 +678,7 @@ class TestPackFrontmatterExtension:
             "skilled.md",
             extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n",
         )
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "skilled"
         assert agent.skills == ["sdd-workflow", "deep-build"]
 
@@ -659,7 +689,7 @@ class TestPackFrontmatterExtension:
             "permissive.md",
             extra_frontmatter="permissionMode: bypassPermissions\n",
         )
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "permissive"
         assert agent.permissionMode == "bypassPermissions"
 
@@ -682,14 +712,14 @@ class TestPackFrontmatterExtension:
             "restricted.md",
             extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n",
         )
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "restricted"
         assert agent.disallowedTools == ["Bash", "WebFetch"]
 
     def test_all_new_fields_absent_parses_cleanly(self, tmp_path: Path) -> None:
         """No new fields → parses fine, all three are None/absent on agent_def."""
         f = _write_agent(tmp_path, "minimal.md")
-        key, agent, _ = parse_pack_file(f)
+        key, agent, _, _ = parse_pack_file(f)
         assert key == "minimal"
         # Fields should be None (or absent if not set in AgentDefinition constructor)
         assert agent.skills is None or agent.skills == []
@@ -716,7 +746,7 @@ class TestPackFrontmatterExtension:
         # Import strict_parse and verify no warning
         from claude_crew.subagents._user_loader import strict_parse
 
-        key, agent, _ss = strict_parse(f)
+        key, agent, _ss, _body = strict_parse(f)
         assert key == "allfields"
         assert agent.skills == ["workflow"]
         assert agent.permissionMode == "plan"
@@ -758,7 +788,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "skilled.md",
             extra_frontmatter="skills:\n  - sdd-workflow\n  - deep-build\n"
         )
-        key, agent_def, _ = parse_pack_file(f)
+        key, agent_def, _, _ = parse_pack_file(f)
         assert key == "skilled"
         assert agent_def.skills == ["sdd-workflow", "deep-build"]
 
@@ -784,7 +814,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "permissive.md",
             extra_frontmatter="permissionMode: bypassPermissions\n"
         )
-        key, agent_def, _ = parse_pack_file(f)
+        key, agent_def, _, _ = parse_pack_file(f)
         assert agent_def.permissionMode == "bypassPermissions"
 
         await _drive_one_noop_turn(
@@ -805,7 +835,7 @@ class TestFullLoaderToOptionsChain:
             tmp_path, "restricted.md",
             extra_frontmatter="disallowedTools:\n  - Bash\n  - WebFetch\n"
         )
-        key, agent_def, _ = parse_pack_file(f)
+        key, agent_def, _, _ = parse_pack_file(f)
         assert agent_def.disallowedTools == ["Bash", "WebFetch"]
 
         await _drive_one_noop_turn(
@@ -830,7 +860,7 @@ class TestFullLoaderToOptionsChain:
                 "disallowedTools:\n  - Bash\n"
             )
         )
-        key, agent_def, _ = parse_pack_file(f)
+        key, agent_def, _, _ = parse_pack_file(f)
         assert agent_def.skills == ["workflow"]
         assert agent_def.permissionMode == "plan"
         assert agent_def.disallowedTools == ["Bash"]

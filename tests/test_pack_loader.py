@@ -41,8 +41,8 @@ def _pack_text(extra_frontmatter: str = "", body: str = "You are a test agent.")
     return "\n".join(lines)
 
 
-def _parse(extra_frontmatter: str = "") -> tuple[str, object, PackFrontmatter]:
-    """Parse a minimal pack with optional extra frontmatter; return 3-tuple."""
+def _parse(extra_frontmatter: str = "") -> tuple[str, object, PackFrontmatter, str]:
+    """Parse a minimal pack with optional extra frontmatter; return 4-tuple."""
     text = _pack_text(extra_frontmatter)
     path = Path("test_agent.md")
     return parse_pack_text(text, path)
@@ -58,19 +58,19 @@ class TestSettingSourcesEmpty:
 
     def test_frontmatter_setting_sources_is_empty_list(self) -> None:
         """PackFrontmatter.settingSources == [] when frontmatter declares settingSources: []."""
-        _, _, fm = _parse("settingSources: []")
+        _, _, fm, _ = _parse("settingSources: []")
         assert fm.settingSources == []
 
     def test_agent_definition_unchanged(self) -> None:
         """AgentDefinition must not gain a settingSources attribute."""
-        _, agent, _ = _parse("settingSources: []")
+        _, agent, _, _ = _parse("settingSources: []")
         assert not hasattr(agent, "settingSources"), (
             "settingSources must not be forwarded into AgentDefinition"
         )
 
     def test_agent_model_unchanged(self) -> None:
         """Other AgentDefinition fields are not affected."""
-        _, agent, _ = _parse("settingSources: []")
+        _, agent, _, _ = _parse("settingSources: []")
         assert agent.model == "haiku"
         assert agent.tools == ["Read"]
 
@@ -85,18 +85,18 @@ class TestSettingSourcesSingleItem:
 
     def test_frontmatter_setting_sources_is_project(self) -> None:
         """PackFrontmatter.settingSources == ["project"]."""
-        _, _, fm = _parse("settingSources: [project]")
+        _, _, fm, _ = _parse("settingSources: [project]")
         assert fm.settingSources == ["project"]
 
     def test_all_valid_items_accepted(self) -> None:
         """All three valid values are accepted individually."""
         for source in ("user", "project", "local"):
-            _, _, fm = _parse(f"settingSources: [{source}]")
+            _, _, fm, _ = _parse(f"settingSources: [{source}]")
             assert fm.settingSources == [source]
 
     def test_all_valid_items_together(self) -> None:
         """A list of all three valid sources parses without error."""
-        _, _, fm = _parse("settingSources: [user, project, local]")
+        _, _, fm, _ = _parse("settingSources: [user, project, local]")
         assert fm.settingSources == ["user", "project", "local"]
 
 
@@ -110,12 +110,12 @@ class TestSettingSourcesAbsent:
 
     def test_frontmatter_setting_sources_is_none(self) -> None:
         """PackFrontmatter.settingSources is None when field is omitted."""
-        _, _, fm = _parse()
+        _, _, fm, _ = _parse()
         assert fm.settingSources is None
 
     def test_key_and_agent_still_returned(self) -> None:
         """The 3-tuple is fully populated even when settingSources is absent."""
-        key, agent, fm = _parse()
+        key, agent, fm, _ = _parse()
         assert key == "test-agent"
         assert agent.model == "haiku"
         assert isinstance(fm, PackFrontmatter)

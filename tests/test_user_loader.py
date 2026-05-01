@@ -70,18 +70,20 @@ class TestMissingDirectoriesAreSilent:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level(logging.DEBUG, logger=LOGGER)
-        pack, role_ss = load_user_agents(tmp_path)  # no .claude/agents/
+        pack, role_ss, bodies = load_user_agents(tmp_path)  # no .claude/agents/
         assert pack == {}
         assert role_ss == {}
+        assert bodies == {}
         assert caplog.records == []
 
     def test_load_project_agents_with_no_project_root(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level(logging.DEBUG, logger=LOGGER)
-        pack, role_ss = load_project_agents(tmp_path)
+        pack, role_ss, bodies = load_project_agents(tmp_path)
         assert pack == {}
         assert role_ss == {}
+        assert bodies == {}
         assert caplog.records == []
 
 
@@ -98,7 +100,7 @@ class TestDiscovery:
         _write_agent(agents_dir, "scout.md", description="Scout the codebase.")
         _write_agent(agents_dir, "builder.md", description="Build things.")
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert set(result.keys()) == {"scout", "builder"}
         assert isinstance(result["scout"], AgentDefinition)
@@ -107,13 +109,13 @@ class TestDiscovery:
     def test_discovers_project_agents(self, tmp_path: Path) -> None:
         agents_dir = tmp_path / ".claude" / "agents"
         _write_agent(agents_dir, "reviewer.md", description="Review PRs.")
-        result, _role_ss = load_project_agents(tmp_path)
+        result, _role_ss, _bodies = load_project_agents(tmp_path)
         assert set(result.keys()) == {"reviewer"}
 
     def test_underscores_become_hyphens(self, tmp_path: Path) -> None:
         agents_dir = tmp_path / ".claude" / "agents"
         _write_agent(agents_dir, "general_purpose.md")
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
         assert "general-purpose" in result
 
     def test_readme_md_is_excluded(self, tmp_path: Path) -> None:
@@ -122,7 +124,7 @@ class TestDiscovery:
         # README.md is not a valid agent file at all — just text. Must not
         # be parsed (which would error) or returned.
         (agents_dir / "README.md").write_text("# Agents in this directory\n")
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
         assert set(result.keys()) == {"scout"}
 
     def test_non_md_files_ignored(self, tmp_path: Path) -> None:
@@ -130,7 +132,7 @@ class TestDiscovery:
         _write_agent(agents_dir, "scout.md")
         (agents_dir / "notes.txt").write_text("ignored")
         (agents_dir / "scout.md.bak").write_text("ignored")
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
         assert set(result.keys()) == {"scout"}
 
     def test_uppercase_md_extension_ignored(self, tmp_path: Path) -> None:
@@ -140,7 +142,7 @@ class TestDiscovery:
         # We can't use _write_agent for .MD because file systems differ.
         # Just verify a deliberately-uppercase file is not pulled in.
         (agents_dir / "BUILDER.MD").write_text("---\ndescription: x\nmodel: haiku\ntools: [Read]\n---\n\nbody\n")
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
         assert "scout" in result
         # On case-insensitive FS this could be flaky; just assert scout loads.
 
@@ -149,7 +151,7 @@ class TestDiscovery:
         _write_agent(agents_dir, "scout.md")
         nested = agents_dir / "nested"
         _write_agent(nested, "hidden.md")
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
         assert set(result.keys()) == {"scout"}
 
 
@@ -170,7 +172,7 @@ class TestMalformedFilesIsolated:
         (agents_dir / "broken.md").write_text("---\n: [bad yaml\n---\nbody\n")
         _write_agent(agents_dir, "good.md", description="I work.")
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert "broken" not in result
         assert "good" in result
@@ -190,7 +192,7 @@ class TestMalformedFilesIsolated:
         )
         _write_agent(agents_dir, "ok.md")
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert "incomplete" not in result
         assert "ok" in result
@@ -218,7 +220,7 @@ class TestUnsupportedFrontmatter:
             extra_frontmatter='setting_sources: ["user", "project"]\n',
         )
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert "scout" in result
         assert result["scout"].description == "Test agent."
@@ -248,7 +250,7 @@ class TestUnsupportedFrontmatter:
             "scout.md",
             extra_frontmatter='setting_sources: ["user"]\n',
         )
-        key, agent, _ss = strict_parse(path)
+        key, agent, _ss, _body = strict_parse(path)
         assert key == "scout"
         assert isinstance(agent, AgentDefinition)
         # AgentDefinition is a TypedDict-like in the SDK; it doesn't carry
@@ -278,7 +280,7 @@ class TestResourceLimits:
         )
         assert big_path.stat().st_size > _MAX_FILE_BYTES
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert "big" not in result
         assert "ok" in result
@@ -295,7 +297,7 @@ class TestResourceLimits:
         for i in range(_MAX_FILES_PER_DIR + 5):
             _write_agent(agents_dir, f"agent-{i:03d}.md")
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         assert len(result) == _MAX_FILES_PER_DIR
         # The "first 100 sorted" means agent-000..agent-099 survive.
@@ -331,7 +333,7 @@ class TestIntraDirCollision:
             description="From hyphen file.",
         )
 
-        result, _role_ss = load_user_agents(tmp_path)
+        result, _role_ss, _bodies = load_user_agents(tmp_path)
 
         # Sorted: "general-purpose.md" < "general_purpose.md" (hyphen 0x2D
         # < underscore 0x5F). Later in alpha order = underscore file wins.
@@ -398,7 +400,7 @@ class TestShadowingObservability:
             description="Project's explorer.",
         )
 
-        merged, _role_ss = build_merged_pack(home_dir=empty_user, project_root=project_root)
+        merged, _role_ss, _bodies = build_merged_pack(home_dir=empty_user, project_root=project_root)
 
         assert merged["explorer"].description == "Project's explorer."
         info_msgs = [
@@ -458,9 +460,9 @@ class TestPrecedence:
             description="User's scout.",
         )
 
-        default, _dss = load_default_pack()
-        user, _uss = load_user_agents(user_root)
-        project, _pss = load_project_agents(project_root)
+        default, _dss, _dbs = load_default_pack()
+        user, _uss, _ubs = load_user_agents(user_root)
+        project, _pss, _pbs = load_project_agents(project_root)
         merged = merge_packs(merge_packs(default, user), project)
 
         assert merged["explorer"].description == "Project's explorer."
@@ -500,7 +502,7 @@ class TestSettingSourcesCascade:
         empty_project = tmp_path / "project"
         empty_project.mkdir()
 
-        _merged, role_ss = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
+        _merged, role_ss, _bodies = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
 
         assert role_ss["myagent"] == []
 
@@ -519,7 +521,7 @@ class TestSettingSourcesCascade:
         empty_project = tmp_path / "project"
         empty_project.mkdir()
 
-        _merged, role_ss = build_merged_pack(home_dir=empty_user, project_root=empty_project)
+        _merged, role_ss, _bodies = build_merged_pack(home_dir=empty_user, project_root=empty_project)
 
         assert role_ss.get("explorer") == [], "explorer.md must declare settingSources: []"
         assert role_ss.get("general-purpose") == [], "general_purpose.md must declare settingSources: []"
@@ -540,7 +542,7 @@ class TestSettingSourcesCascade:
         empty_project = tmp_path / "project"
         empty_project.mkdir()
 
-        _merged, role_ss = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
+        _merged, role_ss, _bodies = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
 
         assert "custom" in role_ss
         assert role_ss["custom"] == []
@@ -565,7 +567,7 @@ class TestSettingSourcesCascade:
             extra_frontmatter="settingSources: [project]",
         )
 
-        _merged, role_ss = build_merged_pack(home_dir=user_root, project_root=project_root)
+        _merged, role_ss, _bodies = build_merged_pack(home_dir=user_root, project_root=project_root)
 
         assert role_ss["custom"] == ["project"]
 
@@ -580,7 +582,7 @@ class TestSettingSourcesCascade:
         empty_project = tmp_path / "project"
         empty_project.mkdir()
 
-        _merged, role_ss = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
+        _merged, role_ss, _bodies = build_merged_pack(home_dir=tmp_path, project_root=empty_project)
 
         assert role_ss.get("nosources") is None
 
@@ -593,7 +595,7 @@ class TestSettingSourcesCascade:
             "agent.md",
             extra_frontmatter="settingSources: [project]",
         )
-        key, _agent, ss = strict_parse(path)
+        key, _agent, ss, _body = strict_parse(path)
         assert key == "agent"
         assert ss == ["project"]
 
@@ -605,7 +607,7 @@ class TestSettingSourcesCascade:
         _write_agent(agents_dir, "with-ss.md", extra_frontmatter="settingSources: [user]")
         _write_agent(agents_dir, "without-ss.md")  # no settingSources
 
-        pack, role_ss = discover_dir(agents_dir)
+        pack, role_ss, _bodies = discover_dir(agents_dir)
 
         assert "with-ss" in pack
         assert "without-ss" in pack
@@ -619,7 +621,7 @@ class TestSettingSourcesCascade:
         agents_dir = tmp_path / "agents"
         _write_agent(agents_dir, "empty-ss.md", extra_frontmatter="settingSources: []")
 
-        _pack, role_ss = discover_dir(agents_dir)
+        _pack, role_ss, _bodies = discover_dir(agents_dir)
 
         assert "empty-ss" in role_ss
         assert role_ss["empty-ss"] == []  # not None

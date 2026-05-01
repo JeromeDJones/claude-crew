@@ -1145,20 +1145,20 @@ class TestTokenCostBrokerIntegration:
             scripted_responses=[
                 text_response_with_usage(
                     "turn1",
-                    cumulative_input_tokens=100,
-                    cumulative_output_tokens=50,
+                    turn_input_tokens=100,
+                    turn_output_tokens=50,
                     cumulative_cost_usd=0.10,
                 ),
                 text_response_with_usage(
                     "turn2",
-                    cumulative_input_tokens=300,
-                    cumulative_output_tokens=150,
+                    turn_input_tokens=200,  # per-turn: 300 total = 100 + 200
+                    turn_output_tokens=100,  # per-turn: 150 total = 50 + 100
                     cumulative_cost_usd=0.30,
                 ),
                 text_response_with_usage(
                     "turn3",
-                    cumulative_input_tokens=600,
-                    cumulative_output_tokens=300,
+                    turn_input_tokens=300,  # per-turn: 600 total = 300 + 300
+                    turn_output_tokens=150,  # per-turn: 300 total = 150 + 150
                     cumulative_cost_usd=0.60,
                 ),
             ]
@@ -1180,10 +1180,14 @@ class TestTokenCostBrokerIntegration:
         info = broker._info[tid]
         assert info.alive is False
         assert info.total_cost_usd_at_death == 0.60, (
-            f"expected 0.60 at death, got {info.total_cost_usd_at_death}"
+            f"expected 0.60 at death (cumulative overwrite), got {info.total_cost_usd_at_death}"
         )
-        assert info.total_input_tokens_at_death == 600
-        assert info.total_output_tokens_at_death == 300
+        assert info.total_input_tokens_at_death == 600, (
+            f"expected 600 at death (100+200+300 accumulate), got {info.total_input_tokens_at_death}"
+        )
+        assert info.total_output_tokens_at_death == 300, (
+            f"expected 300 at death (50+100+150 accumulate), got {info.total_output_tokens_at_death}"
+        )
 
         # get_teammate_status dead branch must forward the values
         status = broker.get_teammate_status(tid)
@@ -1235,8 +1239,8 @@ class TestTokenCostBrokerIntegration:
             scripted_responses=[
                 text_response_with_usage(
                     "hi",
-                    cumulative_input_tokens=200,
-                    cumulative_output_tokens=100,
+                    turn_input_tokens=200,
+                    turn_output_tokens=100,
                     cumulative_cost_usd=0.25,
                 ),
             ]
@@ -1254,8 +1258,12 @@ class TestTokenCostBrokerIntegration:
         # Teammate is still alive — read from live snap
         status = broker.get_teammate_status(tid)
         assert status["alive"] is True
-        assert status["total_input_tokens"] == 200
-        assert status["total_output_tokens"] == 100
+        assert status["total_input_tokens"] == 200, (
+            f"expected 200 (per-turn accumulated), got {status['total_input_tokens']}"
+        )
+        assert status["total_output_tokens"] == 100, (
+            f"expected 100 (per-turn accumulated), got {status['total_output_tokens']}"
+        )
         assert status["total_cost_usd"] == 0.25
 
     async def test_tombstone_when_teammate_already_removed_does_not_crash(

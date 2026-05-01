@@ -56,7 +56,7 @@ _README = "README.md"
 _ACCEPTED_FRONTMATTER_KEYS = frozenset(PackFrontmatter.__dataclass_fields__)
 
 
-def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None]:
+def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, str]:
     """Parse a user/project agent file, warning on unsupported frontmatter keys.
 
     Wraps ``parse_pack_text``. Diffs the frontmatter dict against
@@ -65,8 +65,12 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None]:
     the ``claude_crew.subagents.loader`` logger. The agent still loads
     using the supported fields.
 
-    Returns ``(key, agent, setting_sources)`` where ``setting_sources`` is
-    ``None`` if the frontmatter does not declare ``settingSources``.
+    Returns ``(key, agent, setting_sources, raw_body)`` where:
+
+    - ``setting_sources`` is ``None`` if the frontmatter does not declare
+      ``settingSources``.
+    - ``raw_body`` is the body text without the leaf suffix, for use by
+      the teammate spawn path.
 
     Raises:
         PackLoadError: if the file is missing required fields, has
@@ -85,17 +89,17 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None]:
             path,
             extras,
         )
-    key, agent, fm = parse_pack_text(text, path)
-    return key, agent, fm.settingSources
+    key, agent, fm, body = parse_pack_text(text, path)
+    return key, agent, fm.settingSources, body
 
 
 def discover_dir(
     directory: Path,
-) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
     """Walk a single directory and return its agents as a dict.
 
     Behavior:
-    - Missing directory → ``({}, {})`` silently. (User without
+    - Missing directory → ``({}, {}, {})`` silently. (User without
       ``~/.claude/agents/`` sees nothing.)
     - Non-recursive ``*.md`` glob, lowercase extension only,
       ``README.md`` excluded.
@@ -111,12 +115,15 @@ def discover_dir(
       dir): warn naming both files and which one wins (alphabetically
       later).
 
-    Returns ``(pack, role_ss)`` where ``role_ss`` maps role keys to their
-    ``settingSources`` list. Keys without ``settingSources`` are absent
-    from ``role_ss``.
+    Returns ``(pack, role_ss, bodies)`` where:
+
+    - ``role_ss`` maps role keys to their ``settingSources`` list.
+      Keys without ``settingSources`` are absent from ``role_ss``.
+    - ``bodies`` maps role keys to the raw body text (no leaf suffix),
+      for use by the teammate spawn path.
     """
     if not directory.is_dir():
-        return {}, {}
+        return {}, {}, {}
 
     candidates = sorted(p for p in directory.glob("*.md") if p.name != _README)
     if len(candidates) > _MAX_FILES_PER_DIR:
@@ -130,6 +137,7 @@ def discover_dir(
 
     pack: dict[str, AgentDefinition] = {}
     role_ss: dict[str, list[str] | None] = {}
+    bodies: dict[str, str] = {}
     seen_path_for_key: dict[str, Path] = {}
 
     for path in candidates:
@@ -148,7 +156,7 @@ def discover_dir(
             continue
 
         try:
-            key, agent, ss = strict_parse(path)
+            key, agent, ss, body = strict_parse(path)
         except PackLoadError as exc:
             logger.warning("agent file %s could not be loaded: %s; skipping", path, exc)
             continue
@@ -171,6 +179,7 @@ def discover_dir(
                 path,
             )
         pack[key] = agent
+        bodies[key] = body
         # Keep role_ss in sync with pack — if the winning file has no settingSources,
         # clear any stale entry from a previously-seen file for the same key.
         if ss is not None:
@@ -179,19 +188,19 @@ def discover_dir(
             role_ss.pop(key, None)
         seen_path_for_key[key] = path
 
-    return pack, role_ss
+    return pack, role_ss, bodies
 
 
 def load_user_agents(
     home_dir: Path | None = None,
-) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
     """Load agents from ``<home_dir>/.claude/agents/``.
 
     ``home_dir`` defaults to the user's home directory. Made injectable
     for tests (SC-9) so fixtures can plant agents in a tempdir without
     touching the real ``~/.claude/agents/``.
 
-    Returns ``(pack, role_ss)`` — see ``discover_dir`` for details.
+    Returns ``(pack, role_ss, bodies)`` — see ``discover_dir`` for details.
     """
     home = home_dir if home_dir is not None else Path.home()
     return discover_dir(home / ".claude" / "agents")
@@ -199,7 +208,7 @@ def load_user_agents(
 
 def load_project_agents(
     project_root: Path | None = None,
-) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
     """Load agents from ``<project_root>/.claude/agents/``.
 
     ``project_root`` defaults to the current working directory at the
@@ -207,7 +216,7 @@ def load_project_agents(
     freezes it for the process lifetime; per-spawn resolution is a
     footgun (a teammate's pack would silently change with ``cwd``).
 
-    Returns ``(pack, role_ss)`` — see ``discover_dir`` for details.
+    Returns ``(pack, role_ss, bodies)`` — see ``discover_dir`` for details.
     """
     root = project_root if project_root is not None else Path.cwd()
     return discover_dir(root / ".claude" / "agents")
@@ -216,7 +225,7 @@ def load_project_agents(
 def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
-) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None]]:
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
     """Compose default + user + project agents in precedence order.
 
     Effective pack = ``merge_packs(merge_packs(default, user), project)``.
@@ -229,13 +238,16 @@ def build_merged_pack(
     ``Path.cwd()``. The MCP server resolves these once at startup and
     freezes them; tests may inject tempdirs.
 
-    Returns ``(merged_agents, role_ss)`` where ``role_ss`` is a parallel
-    dict mapping role keys to their ``settingSources`` list. Precedence
-    mirrors the agents dict: project > user > default.
+    Returns ``(merged_agents, role_ss, bodies)`` where:
+
+    - ``role_ss`` maps role keys to their ``settingSources`` list.
+      Precedence mirrors the agents dict: project > user > default.
+    - ``bodies`` maps role keys to raw body text (no leaf suffix).
+      Precedence mirrors the agents dict: project > user > default.
     """
-    default, default_ss = load_default_pack()
-    user, user_ss = load_user_agents(home_dir)
-    project, project_ss = load_project_agents(project_root)
+    default, default_ss, default_bodies = load_default_pack()
+    user, user_ss, user_bodies = load_user_agents(home_dir)
+    project, project_ss, project_bodies = load_project_agents(project_root)
 
     for key in user:
         if key in default:
@@ -247,4 +259,5 @@ def build_merged_pack(
             logger.info("agent %r from project-level shadows default pack", key)
 
     role_ss = {**default_ss, **user_ss, **project_ss}
-    return merge_packs(merge_packs(default, user), project), role_ss
+    bodies = {**default_bodies, **user_bodies, **project_bodies}
+    return merge_packs(merge_packs(default, user), project), role_ss, bodies
