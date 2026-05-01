@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-30] Pack-declared model not applied at top-level teammate spawn
+
+### `pack.model` flows to subagents but not to top-level teammates
+- **What**: `claude_crew/subagents/explorer.md` declares `model: haiku`. When a teammate's Task tool spawns an explorer subagent, that field is honored. But when the lead calls `spawn_teammate(role="explorer")`, `SdkTeammate` falls back to its built-in Sonnet default — the pack's `model` field is silently ignored at the teammate level. Same asymmetry likely applies to `effort`, `maxTurns`, etc.
+- **Where**: `claude_crew/factories.py` (teammate factory) vs. the agent-definition loader path used by Task subagents.
+- **Why it matters**: Pack files are the right place to declare role-level config. Today the same `role` produces different model behavior depending on whether it's spawned as a teammate or as a subagent — a footgun. Caught live 2026-04-30: spawned an explorer expecting Haiku-shaped recon work; got Sonnet because the lead didn't pass `model=` explicitly.
+- **Suggested action**: Fold into Feature #17 (agent definition parity) scope. The factory should consult `pack.model` (and `pack.effort`, `pack.maxTurns`) as defaults when spawn-time overrides are absent. Spawn-time `model=...` still wins; pack provides the role-level baseline.
+
+---
+
 ## [2026-04-30] Feature: token-cost-telemetry (#14) follow-ups
 
 ### SC-9 scientific-notation guard is fragile at sub-cent costs below ~1e-5
