@@ -2221,12 +2221,19 @@ class TestTokenCostTelemetry:
 
         snap = broker._teammates[tid].status_snapshot()
         # Token totals unchanged (malformed usage) but cost DID update (cost itself valid).
-        # Per D-8: usage extraction failure leaves token totals unchanged.
+        # Per D-8: malformed-per-field, not transactional. usage extraction failed
+        # (tokens stay at turn-1 values) BUT total_cost_usd was structurally valid
+        # on the same ResultMessage so cost DID update to 0.99.
         assert snap["total_input_tokens"] == 200, (
             f"token totals should be unchanged from turn 1 (malformed usage); "
             f"got {snap['total_input_tokens']}"
         )
         assert snap["total_output_tokens"] == 80
+        assert snap["total_cost_usd"] == 0.99, (
+            f"cost should have updated from valid total_cost_usd field on the "
+            f"malformed ResultMessage (D-8 per-field independence); "
+            f"got {snap['total_cost_usd']}"
+        )
 
         # A WARNING must have been logged about the malformed usage.
         warning_records = [
