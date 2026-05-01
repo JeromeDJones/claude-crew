@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.redaction import REDACTION_VERSION
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
@@ -46,20 +47,6 @@ class _ToolUseEntry:
     args_summary: str | None
     """Redacted+capped summary; null unless tool is on the v1 allowlist (SC-15)."""
 
-
-def _get_redaction_version() -> str:
-    """Return the active redaction version string.
-
-    Tries to import from ``claude_crew.redaction`` (added by T1).  Falls back
-    to the hard-coded ``"v1"`` while T1 is landing in parallel.
-
-    TODO: remove the fallback once T1 is merged and ``redaction.py`` is stable.
-    """
-    try:
-        from claude_crew.redaction import REDACTION_VERSION  # type: ignore[import]
-        return REDACTION_VERSION
-    except ImportError:
-        return "v1"
 
 
 class Teammate(ABC):
@@ -151,7 +138,7 @@ class Teammate(ABC):
                             "duration_seconds": duration_seconds,
                             "outcome": outcome,
                             "error_summary": error_summary,
-                            "redaction_version": _get_redaction_version(),
+                            "redaction_version": REDACTION_VERSION,
                         })
                 except Exception as exc:
                     log.warning(
@@ -202,7 +189,7 @@ class Teammate(ABC):
             "current_tool": current_tools[-1]["tool_name"] if current_tools else None,
             "current_tool_count": len(current_tools),
             "last_tool_completed": self._last_tool_completed,
-            "redaction_version": _get_redaction_version(),
+            "redaction_version": REDACTION_VERSION,
             # F14 token/cost telemetry (SC-7 — zero baseline; SdkTeammate overrides).
             "total_input_tokens": 0,
             "total_output_tokens": 0,
