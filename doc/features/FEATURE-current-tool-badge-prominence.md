@@ -463,4 +463,45 @@ Scenario: last_tool_completed exposure — settle-frame data path
 
 ## Phase 5: Completion
 
-*To be filled.*
+### Verification
+
+- [x] Feature works end-to-end against Phase 1 success criteria. SC-1/2/3/4/7/8 visual (per A-1, manual). SC-5/6/9/10/11 covered by 25 new tests (TestF22BadgePayload×11 + TestF22TombstoneRace×1 + TestF22DashboardHtml×7 + TestE2EBadgePipeline×6).
+- [x] No regressions — full suite 610 passing, 11 skipped (live tests gated by `CLAUDE_CREW_LIVE_TESTS=1`), 0 new warnings.
+- [x] FEATURE.md spec matches implementation — D-1 through D-11 all enforced; carried-into pointers cite specific code+test locations.
+- [x] PRODUCT-VISION.md updated — #22 marked done with journal entry.
+- [x] CHANGELOG / docs: no user-facing surface change beyond the dashboard itself; docs unchanged.
+- [x] BACKLOG.md updated — 2026-05-01 entry for the `_build_state` unreachable-instance multi-instance test gap (sentinel M-2).
+- [x] Sentinel final pass: MERGE-WITH-NOTE (sentinel M-1 fixed in branch by tightening `test_uses_performance_now_for_elapsed`; M-2 logged to BACKLOG).
+- [x] Co-architect final pass: MERGE-WITH-CONFIDENCE.
+
+### Retrospective
+
+#### What went well
+
+- **Three-pushback warmup at Phase 1, second time it pays off.** Co-architect named all three soft spots (single-slot vs. parallel, clock-source, layout-vs-hierarchy) BEFORE Phase 1 SCs were drafted. Result: SC-5 + SC-6 baked the parallelism and clock-pairing answers into Phase 1, which made Phase 2 a synthesis exercise (not discovery), and Phase 4 became near-mechanical execution. Same multiplier as #19. Now a TEMPLATE pattern, not a one-off.
+- **Sentinel-as-pseudocode-reader at Phase 2 caught MF-1 (args_summary leak).** D-3's prose said "without args_summary" but the carried-into pointer was a description, not pseudocode. Sentinel flagged it; D-3 was rewritten to spell out the explicit-key allowlist. Caught at Phase 2 cost — zero implementation cost for a real data-exposure regression vector.
+- **Sentinel mid-build checkpoint at T3-T4 boundary caught two regression-guard holes.** `test_dashboard_payload_shape_unchanged_post_refactor.required_instance_keys` was missing `now_wallclock`; `test_agent_has_required_fields` was missing the three new agent fields. Both pre-existing tests that LOOK like they'd catch a future drop, but had stale lists. Updated in the same commit as T5. The "tests cover feature behavior, not just pre-existing" lens at sentinel review keeps paying off.
+- **Reusing the existing `pulse` keyframe (D-6) instead of inventing a new shimmer.** Visual vocabulary stayed minimal. The accent bar and chip-elapsed-counter pulse synchronously with the existing status-dot pulse, so the column reads as "one organism breathing" rather than two unsynchronized signals. Co-architect's framing on D-1; landed cheap.
+- **Always-reserved 22px chip row (D-2/D-10) prevents layout strobe by construction.** SC-8's "no jump on rapid Pre/Post pairs" is satisfied without any state machine — the slot exists whether or not the chip does. This was a Phase 2 design call (over the alternatives "stay in status row" / "promote to header"); paid off as zero implementation complexity.
+- **Sub-second tools (Read/Edit) flick past invisibly — and that's correct.** Edge case enumerated at Phase 2 ("Pre→Post happens between two server snapshots → may never appear"). Acceptable per SC-3 reasoning (we don't WANT every Read pulsing the dashboard). Phase 2 named it as accepted; no surprise at implementation time.
+
+#### What was friction
+
+- **Agent persistence trap.** Spawned co-architect-22 and sentinel-22 with `name:` thinking they'd be addressable across turns. They weren't — they completed their first turn and became unreachable. Cost: ~30s of dead-letter SendMessage. Workaround: spawn a fresh agent each phase gate with an explicit re-load of FEATURE.md. Both gates worked fine that way, but I'd planned on a more conversational pattern.
+- **Vacuous loop in tombstone-race test.** Initial `test_oldest_in_flight_none_for_tombstoned_teammate` had a loop guard that was always-true after the prior assertion. Sentinel mid-build review caught it; tightened to an unconditional structural check. The lesson: a test with two assertions where the second is implied by the first looks like rigorous coverage but isn't. Worth a TEMPLATE addition to sentinel's prompt: "Are any assertions inside loops vacuously true under preceding assertions?"
+- **`Date.now()` negative assertion was too permissive initially.** First version of `test_uses_performance_now_for_elapsed` only asserted positive presence of `performance.now()`. Sentinel flagged that the negative claim ("must NOT use Date.now() for elapsed") wasn't actually tested. Tightened to scope the negative assertion to the `computeElapsedSeconds` function body specifically (since `fmtAgo` legitimately uses `Date.now()` for relative-time-ago display). Pattern: when you assert "X is used," also assert "Y is not used" — but scope the negative to where Y would be wrong, not the whole file.
+
+#### Improvements
+
+1. **TEMPLATE update — sentinel pseudocode-reader prompt.** Add to the standard Phase 2 sentinel prompt: "Are any assertions inside test loops vacuously true given preceding assertions in the same test?" Catches the tombstone-race-loop class of bug cheaply.
+2. **TEMPLATE update — negative test assertions.** When a design decision says "must not use X," the test must scope the assertNotIn to where X would be wrong (function body, code path), not the whole file (which often has legitimate uses of X elsewhere). Add to the standard sentinel mid-build review.
+3. **Workflow update — agent persistence in SDD.** Spawned-with-name agents in main session are NOT cross-turn addressable today. Rather than fighting this, accept "persistent" agents = "fresh agent + FEATURE.md re-load each phase gate." Cheap and works. Document in TEMPLATE under "Phase gates."
+4. **Confirmed pattern — Phase 1 three-pushback warmup.** Two consecutive features (#19 + #22) where this loaded all design pillars before Phase 2 began. Promote to TEMPLATE-required step at Phase 1, not a per-feature judgment call.
+
+#### Workflow updates made
+
+- [x] BACKLOG.md updated — sentinel M-2 entry for unreachable-instance multi-instance test gap.
+- [x] PRODUCT-VISION.md updated — #22 status flipped to done with journal entry; capability #4 status note revised; reference to "co-architect three-pushback warmup" promoted in cross-feature retro lessons.
+- [ ] TEMPLATE.md updates listed in Improvements 1-4 — to land in a separate workflow-improvement pass (not in this feature branch).
+- [x] No `.claude/rules/` updates needed — patterns reused, no new architectural decisions.
+- [x] Cross-project MEMORY.md update: not warranted for this feature (claude-crew-internal pattern, already documented in PRODUCT-VISION journal).

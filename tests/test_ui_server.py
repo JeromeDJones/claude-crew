@@ -1380,9 +1380,22 @@ class TestF22DashboardHtml:
 
     def test_uses_performance_now_for_elapsed(self, html):
         """D-5: the elapsed-display code path MUST use performance.now() (monotonic)
-        and NOT Date.now() (wall-clock)."""
+        and NOT Date.now() (wall-clock).
+
+        Scoped negative assertion: Date.now() must not appear inside the
+        computeElapsedSeconds function body. (fmtAgo at line 241 area is a
+        legitimate Date.now() use for relative "last message" display — that
+        surface is wall-clock-correct and out of scope for this assertion.)
+        """
         assert "performance.now()" in html
         assert "computeElapsedSeconds" in html
+        # Locate the function body and assert Date.now() is absent within it.
+        i = html.index("function computeElapsedSeconds")
+        # Function body bounded by the next "function " or end of file
+        j = html.find("function ", i + 1)
+        body = html[i:j] if j != -1 else html[i:]
+        assert "Date.now()" not in body, \
+            "computeElapsedSeconds must not use Date.now() (D-5); use performance.now()"
 
     def test_setinterval_not_requestanimationframe(self, html):
         """D-5: the 1Hz tick driver MUST be setInterval, not requestAnimationFrame."""
