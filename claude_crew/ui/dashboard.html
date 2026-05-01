@@ -77,6 +77,78 @@
       50%       { opacity: 0.35; }
     }
 
+    /* F22 D-1: column-top accent bar for cross-column scan signal (SC-1).
+       3px high, full width. Tool-color tinted when in-flight. <5s: muted
+       (active class, opacity 0.5). >=5s: full opacity + pulse (stuck class,
+       reuses the existing pulse keyframe so column reads as one organism). */
+    .agent-column-accent {
+      height: 3px;
+      flex-shrink: 0;
+      background: transparent;
+      transition: background 0.2s ease, opacity 0.2s ease;
+    }
+    .agent-column-accent.active {
+      background: var(--st-tool);
+      opacity: 0.5;
+    }
+    .agent-column-accent.stuck {
+      background: var(--st-tool);
+      opacity: 1;
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+
+    /* F22 D-2/D-10: dedicated tool-chip row (always reserved 22px regardless
+       of in-flight state — prevents layout strobing on rapid Pre/Post pairs). */
+    .tool-chip-row {
+      height: 22px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--bg-0);
+      overflow: hidden;
+    }
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 18px;
+      padding: 0 8px;
+      border-radius: 4px;
+      background: var(--bg-2);
+      border: 1px solid var(--line);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--fg-1);
+      max-width: 100%;
+      min-width: 0;
+    }
+    .tool-chip .tool-name {
+      color: var(--st-tool);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .tool-chip .tool-elapsed {
+      color: var(--fg-2);
+      flex-shrink: 0;
+    }
+    .tool-chip .tool-count {
+      color: var(--fg-3);
+      flex-shrink: 0;
+    }
+    /* F22 D-6: pulse threshold at displayed elapsed >=5s. Reuses pulse keyframe. */
+    .tool-chip.stuck .tool-elapsed {
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    .tool-chip.settled {
+      background: var(--bg-1);
+      opacity: 0.85;
+    }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
@@ -93,6 +165,11 @@
     // --- WebSocket live state hook ---
     function useLiveState() {
       const [state, setState] = useState(null);
+      // F22 D-5: capture performance.now() at message arrival as the monotonic
+      // anchor for the elapsed-counter tick. Paired with each instance's
+      // server-stamped now_wallclock to compute elapsed seconds independent
+      // of NTP corrections and tab-suspend wall-clock jumps.
+      const [perfAtArrival, setPerfAtArrival] = useState(0);
       const [connected, setConnected] = useState(false);
       useEffect(() => {
         let ws, timer;
@@ -101,7 +178,10 @@
           ws.onopen = () => setConnected(true);
           ws.onmessage = e => {
             const msg = JSON.parse(e.data);
-            if (msg.type === 'state') setState(msg.data);
+            if (msg.type === 'state') {
+              setState(msg.data);
+              setPerfAtArrival(performance.now());
+            }
           };
           ws.onclose = () => { setConnected(false); timer = setTimeout(connect, 3000); };
           ws.onerror = () => ws.close();
@@ -109,7 +189,44 @@
         connect();
         return () => { clearTimeout(timer); if (ws) ws.close(); };
       }, []);
-      return { state, connected };
+      return { state, connected, perfAtArrival };
+    }
+
+    // --- F22 elapsed-counter helpers ---
+    // D-5 enforces: performance.now() (monotonic, NOT Date.now()), and
+    // setInterval (NOT requestAnimationFrame) so the counter keeps advancing
+    // in backgrounded tabs.
+    function useTick1s() {
+      const [, setT] = useState(0);
+      useEffect(() => {
+        const id = setInterval(() => setT(t => (t + 1) % 1000000), 1000);
+        return () => clearInterval(id);
+      }, []);
+    }
+    function computeElapsedSeconds(serverNow, perfAtArrival, startedAt) {
+      if (serverNow == null || startedAt == null) return null;
+      const baseElapsed = serverNow - startedAt;
+      const drift = (performance.now() - perfAtArrival) / 1000;
+      return Math.max(0, Math.floor(baseElapsed + drift));
+    }
+    // D-7: settle-frame state. When oldest_in_flight transitions non-null →
+    // null, render last_tool_completed for ~500ms before clearing. Cleanup
+    // returned from useEffect prevents timer leaks if the column unmounts
+    // (tombstone, instance removed) during the 500ms window.
+    function useSettleFrame(oldestInFlight, lastToolCompleted) {
+      const [settle, setSettle] = useState(null);
+      const prevRef = useRef(oldestInFlight);
+      useEffect(() => {
+        const wasInFlight = prevRef.current != null;
+        const nowIdle = oldestInFlight == null;
+        prevRef.current = oldestInFlight;
+        if (wasInFlight && nowIdle && lastToolCompleted) {
+          setSettle(lastToolCompleted);
+          const t = setTimeout(() => setSettle(null), 500);
+          return () => clearTimeout(t);
+        }
+      }, [oldestInFlight, lastToolCompleted]);
+      return settle;
     }
 
     // --- Format helpers ---
@@ -446,7 +563,7 @@
     }
 
     // --- AgentStreamColumn ---
-    function AgentStreamColumn({ agent, msgs, agentMap }) {
+    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival }) {
       const scrollRef = useRef(null);
       const isPinnedRef = useRef(true);
 
@@ -462,8 +579,44 @@
         if (el && isPinnedRef.current) el.scrollTop = el.scrollHeight;
       }, [msgs.length]);
 
+      // F22: elapsed counter, accent bar, tool chip, settle frame.
+      useTick1s();  // 1Hz re-render so the elapsed counter advances between server polls
+      const inFlight = agent.oldest_in_flight || null;
+      const elapsed = computeElapsedSeconds(
+        serverNow,
+        perfAtArrival,
+        inFlight && inFlight.started_at_wallclock,
+      );
+      const isStuck = elapsed != null && elapsed >= 5;
+      const settle = useSettleFrame(inFlight, agent.last_tool_completed);
+
+      const accentClass = inFlight
+        ? (isStuck ? "agent-column-accent stuck" : "agent-column-accent active")
+        : "agent-column-accent";
+
+      let chipNode = null;
+      if (inFlight) {
+        const extraCount = (agent.in_flight_count || 1) - 1;
+        chipNode = (
+          <span className={isStuck ? "tool-chip stuck" : "tool-chip"}>
+            <span className="tool-name">{inFlight.tool_name}</span>
+            <span className="tool-elapsed">· {elapsed != null ? elapsed : 0}s</span>
+            {extraCount > 0 && <span className="tool-count">+{extraCount}</span>}
+          </span>
+        );
+      } else if (settle) {
+        chipNode = (
+          <span className="tool-chip settled">
+            <span className="tool-name">{settle.tool_name}</span>
+            <span className="tool-elapsed">· {Number(settle.duration_seconds).toFixed(1)}s</span>
+            <span className="tool-count">✓</span>
+          </span>
+        );
+      }
+
       return (
         <div style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
+          <div className={accentClass}/>
           <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <AgentAvatar id={agent.id} role={agent.role} size={22}/>
@@ -499,13 +652,13 @@
           }}>
             <span className={`dot ${agent.status}`}/>
             <span style={{ textTransform: "lowercase" }}>{agent.status}</span>
-            {agent.current_tool && (
-              <span className="mono" style={{ fontSize: 10, color: "var(--st-tool)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {agent.current_tool}
-              </span>
-            )}
             <span style={{ marginLeft: "auto", flexShrink: 0 }}>{fmtAgo(agent.lastMsg)}</span>
           </div>
+
+          {/* F22 D-2/D-10: dedicated tool-chip row, always reserved height (22px).
+              Empty when no in-flight tool and no settle frame, so layout stays
+              stable across rapid Pre/Post pairs (SC-8). */}
+          <div className="tool-chip-row">{chipNode}</div>
 
           <div
             ref={scrollRef}
@@ -525,7 +678,7 @@
     }
 
     // --- StreamColumns ---
-    function StreamColumns({ cli, agents, msgs, agentMap }) {
+    function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival }) {
       const byAgent = useMemo(() => {
         const out = {};
         agents.forEach(a => { out[a.id] = []; });
@@ -567,14 +720,21 @@
           minWidth: 0, overflow: "hidden",
         }}>
           {agents.map(a => (
-            <AgentStreamColumn key={a.id} agent={a} msgs={byAgent[a.id] || []} agentMap={agentMap}/>
+            <AgentStreamColumn
+              key={a.id}
+              agent={a}
+              msgs={byAgent[a.id] || []}
+              agentMap={agentMap}
+              serverNow={cli.now_wallclock}
+              perfAtArrival={perfAtArrival}
+            />
           ))}
         </div>
       );
     }
 
     // --- MissionControlLayout ---
-    function MissionControlLayout({ data, connected }) {
+    function MissionControlLayout({ data, connected, perfAtArrival }) {
       const { instances, transcripts } = data;
       const [activeId, setActiveId] = useState(instances[0].id);
 
@@ -591,7 +751,7 @@
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId}/>
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: 0 }}>
             <MiniGraph cli={cli} agents={cli.agents}/>
-            <StreamColumns cli={cli} agents={cli.agents} msgs={msgs} agentMap={agentMap}/>
+            <StreamColumns cli={cli} agents={cli.agents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival}/>
           </div>
         </div>
       );
@@ -599,7 +759,7 @@
 
     // --- App ---
     function App() {
-      const { state, connected } = useLiveState();
+      const { state, connected, perfAtArrival } = useLiveState();
       if (!state) {
         return (
           <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-0)", color: "var(--fg-3)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
@@ -607,7 +767,7 @@
           </div>
         );
       }
-      return <MissionControlLayout data={state} connected={connected}/>;
+      return <MissionControlLayout data={state} connected={connected} perfAtArrival={perfAtArrival}/>;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App/>);

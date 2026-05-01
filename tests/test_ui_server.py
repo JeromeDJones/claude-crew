@@ -162,7 +162,11 @@ class TestBuildStateWithTeammates:
         ui = UIServer(broker, port=0)
         state = await ui._build_state()
         agent = state["instances"][0]["agents"][0]
-        for field in ("id", "role", "model", "status", "uptime", "lastMsg", "cost", "tokens", "tools", "current_tool"):
+        for field in (
+            "id", "role", "model", "status", "uptime", "lastMsg",
+            "cost", "tokens", "tools", "current_tool",
+            "oldest_in_flight", "in_flight_count", "last_tool_completed",  # F22 D-3, D-7
+        ):
             assert field in agent, f"missing field: {field}"
 
     async def test_status_active_when_agents_present(self, broker_with_teammates):
@@ -814,6 +818,7 @@ class TestUIServerBrokerDecoupling:
         required_instance_keys = {
             "id", "is_local", "label", "cwd", "branch",
             "uptime", "status", "cost", "tokens", "agents",
+            "now_wallclock",  # F22 D-4
         }
         assert required_instance_keys <= set(instance.keys()), (
             f"Missing instance keys: {required_instance_keys - set(instance.keys())}"
@@ -1054,3 +1059,349 @@ class TestF19FormatToolEventBody:
         ))
         # {:.2f} always shows 2 decimal places, so 12.3 → "12.30"
         assert body == "WebFetch (failed, 12.30s) [http 503]"
+
+
+# ── F22 Badge Payload (T1 tests) ─────────────────────────────────────────────
+
+class TestF22BadgePayload:
+    """T1: now_wallclock + oldest_in_flight + in_flight_count + last_tool_completed
+    additive payload fields for the current_tool badge prominence feature.
+
+    SC-5 (oldest semantic), SC-6 (clock pairing), SC-9 (back-compat).
+    """
+
+    def _make_snapshot_with_status(self, status_overrides: dict, *, alive: bool = True):
+        """Build a synthetic BrokerSnapshot with one teammate whose status snapshot
+        merges the provided overrides on top of an empty/idle baseline."""
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, LiveTeammateInfo, TeammateInfo
+
+        now = _time.time()
+        info = TeammateInfo(
+            id="t-1", name="alice", role="builder",
+            spawned_at=now - 100, alive=alive,
+        )
+        baseline_status = {
+            "current_tool_count": 0,
+            "current_turn_started_at_wallclock": None,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cost_usd": 0.0,
+            "current_tools": [],
+            "current_tool": None,
+            "last_activity_at_wallclock": None,
+            "last_tool_completed": None,
+        }
+        baseline_status.update(status_overrides)
+        live_entry = LiveTeammateInfo(
+            info=info,
+            status=baseline_status,
+            model="claude-sonnet-4-6",
+        )
+        return BrokerSnapshot(
+            crew_id="crew-test",
+            teammates=(info,),
+            live=(live_entry,) if alive else (),
+            log=(),
+        )
+
+    def test_now_wallclock_present_on_instance(self):
+        """D-4: every instance dict has now_wallclock as a float (seconds since epoch)."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({})
+        instance, _ = ui._build_local_instance(snap)
+        assert "now_wallclock" in instance
+        assert isinstance(instance["now_wallclock"], float)
+        # sanity: within the last 10 seconds of "now"
+        import time as _time
+        assert abs(instance["now_wallclock"] - _time.time()) < 10.0
+
+    def test_oldest_in_flight_is_index_zero_of_current_tools(self):
+        """D-3: oldest_in_flight mirrors current_tools[0] (the list is sorted ascending)."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1",
+                 "started_at_wallclock": 100.0, "args_summary": "command=ls"},
+            ],
+            "current_tool_count": 1,
+            "current_tool": "Bash",
+        })
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        assert agent["oldest_in_flight"] is not None
+        assert agent["oldest_in_flight"]["tool_name"] == "Bash"
+        assert agent["oldest_in_flight"]["tool_use_id"] == "tu-1"
+        assert agent["oldest_in_flight"]["started_at_wallclock"] == 100.0
+
+    def test_oldest_in_flight_is_none_when_idle(self):
+        """D-3: idle teammate (empty current_tools) → oldest_in_flight is None."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({})
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        assert agent["oldest_in_flight"] is None
+        assert agent["in_flight_count"] == 0
+
+    def test_oldest_in_flight_omits_args_summary(self):
+        """D-3 / MF-1: args_summary MUST be absent from oldest_in_flight wire payload.
+
+        Explicit allowlist on the keys we copy; defends against future redactor
+        regression leaking redacted-but-not-blank args.
+        """
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1",
+                 "started_at_wallclock": 100.0,
+                 "args_summary": "command=cat /etc/passwd"},  # would be exposed under naive copy
+            ],
+            "current_tool_count": 1,
+            "current_tool": "Bash",
+        })
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        assert "args_summary" not in agent["oldest_in_flight"]
+        # And the badge field has exactly 3 keys: tool_name, tool_use_id, started_at_wallclock
+        assert set(agent["oldest_in_flight"].keys()) == {"tool_name", "tool_use_id", "started_at_wallclock"}
+
+    def test_oldest_in_flight_for_parallel_tools_picks_oldest(self):
+        """SC-5: under parallel dispatch, the badge surfaces the OLDEST tool
+        (current_tools[0]), not the last-started one (current_tool)."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1",
+                 "started_at_wallclock": 100.0, "args_summary": None},
+                {"tool_name": "Read", "tool_use_id": "tu-2",
+                 "started_at_wallclock": 105.0, "args_summary": None},
+                {"tool_name": "WebFetch", "tool_use_id": "tu-3",
+                 "started_at_wallclock": 110.0, "args_summary": None},
+            ],
+            "current_tool_count": 3,
+            "current_tool": "WebFetch",  # last-started (legacy semantic)
+        })
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        # Badge field: oldest
+        assert agent["oldest_in_flight"]["tool_name"] == "Bash"
+        # Legacy scalar: last-started preserved (SC-9)
+        assert agent["current_tool"] == "WebFetch"
+        # Count
+        assert agent["in_flight_count"] == 3
+
+    def test_in_flight_count_matches_current_tools_length(self):
+        """D-3: in_flight_count == len(current_tools), always."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        for n in (0, 1, 2, 5):
+            tools = [
+                {"tool_name": f"Tool{i}", "tool_use_id": f"tu-{i}",
+                 "started_at_wallclock": float(i), "args_summary": None}
+                for i in range(n)
+            ]
+            snap = self._make_snapshot_with_status({
+                "current_tools": tools,
+                "current_tool_count": n,
+                "current_tool": tools[-1]["tool_name"] if tools else None,
+            })
+            instance, _ = ui._build_local_instance(snap)
+            agent = instance["agents"][0]
+            assert agent["in_flight_count"] == n, f"n={n}"
+
+    def test_last_tool_completed_present_on_agent_payload(self):
+        """D-7: last_tool_completed is mirrored verbatim to the agent dict for
+        client-side settle-frame rendering."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        ltc = {
+            "tool_name": "WebFetch",
+            "outcome": "ok",
+            "finished_at_wallclock": 99.0,
+            "duration_seconds": 1.234,
+            "error_summary": None,
+        }
+        snap = self._make_snapshot_with_status({"last_tool_completed": ltc})
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        assert agent["last_tool_completed"] == ltc
+
+    def test_last_tool_completed_none_when_never_run(self):
+        """D-7: idle teammate that has never run a tool → last_tool_completed is None."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({})
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        assert agent["last_tool_completed"] is None
+
+    def test_now_wallclock_pairs_with_started_at_wallclock_for_consistent_elapsed(self):
+        """D-4: now_wallclock and started_at_wallclock both come from time.time()
+        on the same producer (not mismatched clocks like time.monotonic()).
+
+        Plant a tool with started_at_wallclock = time.time() immediately before
+        calling _build_local_instance; assert the difference is small (<100ms).
+        """
+        import time as _time
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        plant_t = _time.time()
+        snap = self._make_snapshot_with_status({
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1",
+                 "started_at_wallclock": plant_t, "args_summary": None},
+            ],
+            "current_tool_count": 1,
+            "current_tool": "Bash",
+        })
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        delta = instance["now_wallclock"] - agent["oldest_in_flight"]["started_at_wallclock"]
+        assert 0.0 <= delta < 0.1, f"clock pair drift: delta={delta}"
+
+    def test_pre_existing_fields_preserved_sc9(self):
+        """SC-9: legacy fields (current_tool, tools[]) keep their semantics."""
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with_status({
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1",
+                 "started_at_wallclock": 100.0, "args_summary": None},
+                {"tool_name": "Read", "tool_use_id": "tu-2",
+                 "started_at_wallclock": 105.0, "args_summary": None},
+            ],
+            "current_tool_count": 2,
+            "current_tool": "Read",  # last-started
+        })
+        instance, _ = ui._build_local_instance(snap)
+        agent = instance["agents"][0]
+        # current_tool: last-started (SC-9 legacy)
+        assert agent["current_tool"] == "Read"
+        # tools[]: full set of names
+        assert agent["tools"] == ["Bash", "Read"]
+
+    def test_unreachable_instance_has_no_now_wallclock(self):
+        """SC-C: _unreachable_instance dict does not include now_wallclock; the
+        client's defensive check (if instance.now_wallclock) handles absence."""
+        from claude_crew.ui_server import _unreachable_instance
+        unreachable = _unreachable_instance("crew-xyz")
+        assert "now_wallclock" not in unreachable
+
+
+# ── F22 T2: Tombstone-race invariant (D-9) ───────────────────────────────────
+
+class TestF22TombstoneRace:
+    """T2 / D-9: oldest_in_flight cannot ghost-surface for a tombstoned agent.
+
+    The invariant is structural: _build_local_instance reads info.alive and
+    snap["current_tools"] from the SAME BrokerSnapshot, and tombstoned
+    teammates are excluded from agents[] before any badge field is computed.
+    Broker enforces _close_open_tools runs in _tombstone_teammate before
+    info.alive becomes False (broker.py:288).
+
+    This test uses a real broker + kill_teammate path (not synthetic snapshot
+    data) because the alive→tombstoned transition is a broker state machine.
+    """
+
+    async def test_oldest_in_flight_none_for_tombstoned_teammate(self):
+        from claude_crew.teammate import _ToolUseEntry, StubTeammate
+        import time as _time
+
+        broker = Broker()
+        try:
+            await broker.spawn_teammate(
+                role="builder", name="builder", factory=_stub_factory,
+            )
+            # Get the live teammate and plant an in-flight tool directly.
+            alive_ids = [info.id for info in broker._info.values() if info.alive]
+            assert len(alive_ids) == 1
+            tid = alive_ids[0]
+            teammate: StubTeammate = broker._teammates[tid]
+            teammate._tool_uses["tu-planted"] = _ToolUseEntry(
+                tool_name="Bash",
+                tool_use_id="tu-planted",
+                started_at_wallclock=_time.time(),
+                args_summary=None,
+            )
+
+            # Pre-kill: oldest_in_flight should reflect the planted tool
+            ui = UIServer(broker, port=0)
+            state_pre = await ui._build_state()
+            agents_pre = state_pre["instances"][0]["agents"]
+            assert len(agents_pre) == 1
+            assert agents_pre[0]["oldest_in_flight"]["tool_name"] == "Bash"
+
+            # Kill the teammate — broker tombstones, _close_open_tools clears _tool_uses
+            await broker.kill_teammate(tid)
+
+            # Post-kill: agent absent from agents[]; no ghost oldest_in_flight anywhere
+            state_post = await ui._build_state()
+            instance = state_post["instances"][0]
+            agent_ids = [a["id"] for a in instance["agents"]]
+            assert tid not in agent_ids, "tombstoned agent must not appear in agents[]"
+            # Stronger invariant: no agent ANYWHERE in the response has the killed
+            # teammate's id with a ghost oldest_in_flight (defends against future
+            # path that might surface a dead teammate via a different code branch).
+            assert all(a["id"] != tid for a in instance["agents"])
+        finally:
+            await broker.shutdown_all()
+
+
+# ── F22 T3: Dashboard HTML sanity ────────────────────────────────────────────
+
+class TestF22DashboardHtml:
+    """T3: assert the rendering elements (CSS classes, JS hooks) are present in
+    the served dashboard HTML. JSON-shape tests do not exercise the browser; this
+    test prevents accidental deletion of the badge classes during future edits.
+    Per A-1, full visual verification is manual."""
+
+    @pytest.fixture
+    def html(self):
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        return ui._get_html()
+
+    def test_accent_bar_class_present(self, html):
+        assert "agent-column-accent" in html
+
+    def test_tool_chip_class_present(self, html):
+        assert "tool-chip" in html
+
+    def test_tool_chip_row_class_present(self, html):
+        assert "tool-chip-row" in html
+
+    def test_settle_frame_class_present(self, html):
+        assert "settled" in html
+
+    def test_uses_performance_now_for_elapsed(self, html):
+        """D-5: the elapsed-display code path MUST use performance.now() (monotonic)
+        and NOT Date.now() (wall-clock).
+
+        Scoped negative assertion: Date.now() must not appear inside the
+        computeElapsedSeconds function body. (fmtAgo at line 241 area is a
+        legitimate Date.now() use for relative "last message" display — that
+        surface is wall-clock-correct and out of scope for this assertion.)
+        """
+        assert "performance.now()" in html
+        assert "computeElapsedSeconds" in html
+        # Locate the function body and assert Date.now() is absent within it.
+        i = html.index("function computeElapsedSeconds")
+        # Function body bounded by the next "function " or end of file
+        j = html.find("function ", i + 1)
+        body = html[i:j] if j != -1 else html[i:]
+        assert "Date.now()" not in body, \
+            "computeElapsedSeconds must not use Date.now() (D-5); use performance.now()"
+
+    def test_setinterval_not_requestanimationframe(self, html):
+        """D-5: the 1Hz tick driver MUST be setInterval, not requestAnimationFrame."""
+        assert "useTick1s" in html
+        assert "setInterval" in html
+
+    def test_pulse_keyframe_still_present(self, html):
+        """SC-10: do not break existing #19/#8 pulse-animation usage."""
+        assert "@keyframes pulse" in html

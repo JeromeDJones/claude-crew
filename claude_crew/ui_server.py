@@ -190,10 +190,27 @@ class UIServer:
                 current_tools = snap.get("current_tools", [])
                 current_tool_names = [t["tool_name"] for t in current_tools]
 
+                # F22 D-3: oldest_in_flight is the badge field. Explicit key allowlist
+                # (NOT a copy or pop on the source dict) — args_summary MUST NOT ship
+                # on the wire even if a future redactor regression leaves it non-blank.
+                if current_tools:
+                    t0 = current_tools[0]
+                    oldest_in_flight = {
+                        "tool_name": t0["tool_name"],
+                        "tool_use_id": t0["tool_use_id"],
+                        "started_at_wallclock": t0["started_at_wallclock"],
+                    }
+                else:
+                    oldest_in_flight = None
+
                 agent_cost = float(snap.get("total_cost_usd", 0.0))
                 agent_in = int(snap.get("total_input_tokens", 0))
                 agent_out = int(snap.get("total_output_tokens", 0))
 
+                # F22 D-8: API surface freeze. tools[] = full set of names (frozen
+                # as-of-#22, no new consumers). current_tool = last-started scalar
+                # (legacy, retained for SC-9). current_tools[] = canonical structured
+                # list. oldest_in_flight = badge field; pair with instance.now_wallclock.
                 agents.append({
                     "id": info.id,
                     "role": info.role,
@@ -206,6 +223,9 @@ class UIServer:
                     "tokens": {"in": agent_in, "out": agent_out},
                     "tools": current_tool_names,
                     "current_tool": snap.get("current_tool"),
+                    "oldest_in_flight": oldest_in_flight,
+                    "in_flight_count": len(current_tools),
+                    "last_tool_completed": snap.get("last_tool_completed"),
                 })
 
                 total_cost += agent_cost
@@ -270,6 +290,12 @@ class UIServer:
             "status": "active" if agents else "idle",
             "cost": total_cost,
             "tokens": {"in": total_in, "out": total_out},
+            # F22 D-4: server-stamped wall-clock for clock-skew-safe elapsed display.
+            # Single time.time() per _build_local_instance call (the `now` local
+            # above), paired with each agent's oldest_in_flight.started_at_wallclock
+            # — both produced on the same producer's clock. Per-instance, not
+            # per-agent: _build_state runs synchronously, one stamp covers all.
+            "now_wallclock": now,
             "agents": agents,
         }
         return instance, messages

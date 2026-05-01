@@ -264,6 +264,12 @@ Plugin hooks and "always-include" hooks split across two different mechanisms:
 
 <!-- Add new entries above. Keep this file ordered newest-first. -->
 
+## [2026-05-01] Feature: current-tool-badge-prominence (#22)
+- **What**: T5 sad-path scenario `test_unreachable_remote_no_now_wallclock_leakage` verifies the `_unreachable_instance` helper output and JSON round-trip in isolation, but does NOT exercise the actual `_build_state` aggregation path under multi-instance setup.
+- **Where**: `tests/test_e2e_badge_pipeline.py:174` (current test) and `tests/test_e2e_multi_instance.py` (where the gap should be closed).
+- **Why it matters**: A future refactor of `_unreachable_instance` that adds `now_wallclock` to its output would pass the current test. The full HTTP-aggregation path under a real unreachable remote is not covered by the F22 contract test. Production risk is low because `_unreachable_instance` is the single source for unreachable-instance dicts, but the regression-guard guarantee is weaker than implied.
+- **Suggested action**: Add an assertion to one of the multi-instance E2E tests in `test_e2e_multi_instance.py` that, when the aggregation path receives an unreachable instance, the resulting JSON has no `now_wallclock` field on that instance. ~10 line follow-up; same fixture as existing test.
+
 ## [2026-04-29] Feature: agent-config-extension (#10)
 - **What**: `spawn_teammate` MCP tool accepts `permission_mode: str | None` but does not validate it against `_VALID_PERMISSION_MODES` at the server/broker layer. Pack-declared values are validated at parse time; spawn-time override is not.
 - **Where**: `claude_crew/server.py` → `broker.spawn_teammate` → factory chain
