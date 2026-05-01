@@ -40,6 +40,8 @@ __all__ = [
     "load_project_agents",
     "load_user_agents",
     "strict_parse",
+    "_discover_skill_names",
+    "_warn_unknown_skills",
 ]
 
 
@@ -222,6 +224,61 @@ def load_project_agents(
     return discover_dir(root / ".claude" / "agents")
 
 
+def _discover_skill_names(
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> set[str]:
+    """Walk user + project skill dirs, return the set of skill names found.
+
+    A skill is identified by an immediate subdirectory under
+    ``<base>/.claude/skills/`` containing a ``SKILL.md`` file. The directory
+    name is the skill name. Best-effort: missing dirs are treated as empty
+    (A-7 cwd trap and A-8 PermissionError are documented assumptions —
+    misconfigured launches surface as spurious WARNs from
+    :func:`_warn_unknown_skills`).
+    """
+    home = home_dir if home_dir is not None else Path.home()
+    project = project_root if project_root is not None else Path.cwd()
+    names: set[str] = set()
+    for base in (home / ".claude" / "skills", project / ".claude" / "skills"):
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            if child.is_dir() and (child / "SKILL.md").is_file():
+                names.add(child.name)
+    return names
+
+
+def _warn_unknown_skills(
+    merged: dict[str, AgentDefinition],
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> None:
+    """Emit a WARN for each declared skill that is not on disk at startup.
+
+    Walks each role's ``AgentDefinition.skills`` list; skips ``None`` and the
+    ``"all"`` literal (no name list to validate). Compares the listed names
+    against :func:`_discover_skill_names`; any unknown name produces a single
+    WARN naming the role and the unknown skill names. Does not raise — the
+    operator may add the SKILL.md later, or the skill may live in a search
+    path we don't traverse (D-4, SC-4).
+    """
+    discovered = _discover_skill_names(home_dir, project_root)
+    for role, agent in merged.items():
+        skills = getattr(agent, "skills", None)
+        if skills is None or skills == "all":
+            continue
+        unknown = [s for s in skills if s not in discovered]
+        if unknown:
+            logger.warning(
+                "agent %r declares unknown skills %s — not found in user or "
+                "project skill dirs at startup; teammate will fail to invoke "
+                "them at runtime",
+                role,
+                unknown,
+            )
+
+
 def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
@@ -260,4 +317,10 @@ def build_merged_pack(
 
     role_ss = {**default_ss, **user_ss, **project_ss}
     bodies = {**default_bodies, **user_bodies, **project_bodies}
-    return merge_packs(merge_packs(default, user), project), role_ss, bodies
+    # Skills cascade via AgentDefinition (unlike settingSources which uses
+    # role_ss side-channel — see discover_dir). merge_packs whole-key
+    # replacement of AgentDefinition handles list-over-list, "all"-over-list,
+    # and list-over-"all" trivially. No role_skills dict needed (D-6).
+    merged = merge_packs(merge_packs(default, user), project)
+    _warn_unknown_skills(merged, home_dir, project_root)
+    return merged, role_ss, bodies

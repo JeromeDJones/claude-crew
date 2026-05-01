@@ -19,6 +19,9 @@ from claude_crew.subagents import load_default_pack, merge_packs
 from claude_crew.subagents._user_loader import (
     _MAX_FILE_BYTES,
     _MAX_FILES_PER_DIR,
+    _discover_skill_names,
+    _warn_unknown_skills,
+    build_merged_pack,
     discover_dir,
     load_project_agents,
     load_user_agents,
@@ -625,3 +628,135 @@ class TestSettingSourcesCascade:
 
         assert "empty-ss" in role_ss
         assert role_ss["empty-ss"] == []  # not None
+
+
+# -----------------------------------------------------------------------------
+# Feature #23: skill discovery + WARN at pack-load (T2)
+# -----------------------------------------------------------------------------
+
+
+def _write_skill(skills_root: Path, name: str, body: str = "Test skill body.") -> Path:
+    """Plant a skill at <skills_root>/<name>/SKILL.md. Returns the SKILL.md path."""
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {body}\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+    return skill_md
+
+
+class TestDiscoverSkillNames:
+    """Scenario: _discover_skill_names walks user + project skill dirs."""
+
+    def test_user_and_project_dirs_both_walked(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_skill(home / ".claude" / "skills", "user-skill")
+        _write_skill(proj / ".claude" / "skills", "proj-skill")
+
+        names = _discover_skill_names(home, proj)
+
+        assert names == {"user-skill", "proj-skill"}
+
+    def test_subdir_without_skillmd_is_not_a_skill(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        skills_dir = home / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "no-skill-md").mkdir()  # subdir, no SKILL.md inside
+
+        names = _discover_skill_names(home, tmp_path / "nonexistent")
+
+        assert "no-skill-md" not in names
+
+    def test_missing_dirs_return_empty(self, tmp_path: Path) -> None:
+        names = _discover_skill_names(tmp_path / "no-home", tmp_path / "no-proj")
+        assert names == set()
+
+
+class TestWarnUnknownSkills:
+    """Scenario: declared skills not on disk produce WARN at pack-load."""
+
+    def test_unknown_skill_warns_with_role_and_skill_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_skill(home / ".claude" / "skills", "foo")  # only foo exists
+
+        # User agent declares skills: [foo, bar] — bar is unknown.
+        _write_agent(
+            home / ".claude" / "agents",
+            "myrole.md",
+            extra_frontmatter="skills: [foo, bar]",
+        )
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("myrole" in m and "bar" in m for m in warn_msgs), (
+            f"expected WARN naming role and 'bar', got {warn_msgs}"
+        )
+        # foo is known, must not appear in any WARN
+        assert not any("'foo'" in m for m in warn_msgs)
+
+    def test_skills_all_skips_unknown_check(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Vacuity defense: skills: all has no name list to check, so no WARN."""
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        # No skill dirs at all.
+        _write_agent(
+            home / ".claude" / "agents",
+            "myrole.md",
+            extra_frontmatter="skills: all",
+        )
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        # No WARN about unknown skills (might have other WARNs, but not skill-related)
+        assert not any("declares unknown skills" in m for m in warn_msgs)
+
+    def test_known_skill_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_skill(home / ".claude" / "skills", "foo")
+        _write_agent(
+            home / ".claude" / "agents",
+            "myrole.md",
+            extra_frontmatter="skills: [foo]",
+        )
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("declares unknown skills" in m for m in warn_msgs)
+
+    def test_warn_message_contains_grep_target(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-9 doc grep target — the literal phrase operators will look for."""
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_agent(
+            home / ".claude" / "agents",
+            "rev.md",
+            extra_frontmatter="skills: [missing-skill]",
+        )
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("declares unknown skills" in m for m in warn_msgs)
