@@ -106,38 +106,53 @@ class UIServer:
         now = time.time()
 
         agents: list[dict[str, Any]] = []
+        total_cost = 0.0
+        total_in = 0
+        total_out = 0
         for info in broker._info.values():
-            if not info.alive:
-                continue
+            if info.alive:
+                teammate = broker._teammates.get(info.id)
+                snap: dict[str, Any] = {}
+                if teammate is not None:
+                    try:
+                        snap = teammate.status_snapshot()
+                    except Exception:
+                        pass
 
-            teammate = broker._teammates.get(info.id)
-            snap: dict[str, Any] = {}
-            if teammate is not None:
-                try:
-                    snap = teammate.status_snapshot()
-                except Exception:
-                    pass
+                model_raw = getattr(teammate, "_model", None) if teammate else None
+                status = _derive_status(snap)
+                last_activity = snap.get("last_activity_at_wallclock")
 
-            model_raw = getattr(teammate, "_model", None) if teammate else None
-            status = _derive_status(snap)
-            last_activity = snap.get("last_activity_at_wallclock")
+                current_tools = snap.get("current_tools", [])
+                current_tool_names = [t["tool_name"] for t in current_tools]
 
-            current_tools = snap.get("current_tools", [])
-            current_tool_names = [t["tool_name"] for t in current_tools]
+                agent_cost = float(snap.get("total_cost_usd", 0.0))
+                agent_in = int(snap.get("total_input_tokens", 0))
+                agent_out = int(snap.get("total_output_tokens", 0))
 
-            agents.append({
-                "id": info.id,
-                "role": info.role,
-                "name": info.name,
-                "model": _normalize_model(model_raw),
-                "status": status,
-                "uptime": int(now - info.spawned_at),
-                "lastMsg": _ts(last_activity),
-                "cost": 0.0,
-                "tokens": {"in": 0, "out": 0},
-                "tools": current_tool_names,
-                "current_tool": snap.get("current_tool"),
-            })
+                agents.append({
+                    "id": info.id,
+                    "role": info.role,
+                    "name": info.name,
+                    "model": _normalize_model(model_raw),
+                    "status": status,
+                    "uptime": int(now - info.spawned_at),
+                    "lastMsg": _ts(last_activity),
+                    "cost": agent_cost,
+                    "tokens": {"in": agent_in, "out": agent_out},
+                    "tools": current_tool_names,
+                    "current_tool": snap.get("current_tool"),
+                })
+
+                total_cost += agent_cost
+                total_in += agent_in
+                total_out += agent_out
+            else:
+                # Dead teammates: excluded from agents (D-10) but contribute
+                # to the instance-level aggregate (D-6).
+                total_cost += float(info.total_cost_usd_at_death or 0.0)
+                total_in += int(info.total_input_tokens_at_death or 0)
+                total_out += int(info.total_output_tokens_at_death or 0)
 
         messages: list[dict[str, Any]] = []
         for env in broker._log[-200:]:
@@ -169,8 +184,8 @@ class UIServer:
             "branch": "main",
             "uptime": crew_uptime,
             "status": "active" if agents else "idle",
-            "cost": 0.0,
-            "tokens": {"in": 0, "out": 0},
+            "cost": total_cost,
+            "tokens": {"in": total_in, "out": total_out},
             "agents": agents,
         }
         return instance, messages
