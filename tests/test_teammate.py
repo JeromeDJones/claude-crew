@@ -371,3 +371,141 @@ class TestRedactionVersionCleanup:
         snap = teammate.status_snapshot()
 
         assert snap["redaction_version"] == "v1"
+
+
+# ---------------------------------------------------------------------------
+# Feature #19 T1: ToolEvent dataclass + _completed_tool_events deque
+# ---------------------------------------------------------------------------
+
+
+class TestToolEventDataclass:
+    def test_tool_event_field_parity(self) -> None:
+        """T1 / D-1: ToolEvent fields mirror #8's tool_end JSONL shape exactly."""
+        from dataclasses import FrozenInstanceError, fields
+
+        from claude_crew.teammate import ToolEvent
+
+        ev = ToolEvent(
+            teammate_id="t-x",
+            tool_name="Bash",
+            tool_use_id="toolu_x",
+            started_at_wallclock=1.0,
+            finished_at_wallclock=1.5,
+            duration_seconds=0.5,
+            outcome="ok",
+            args_summary="command=ls",
+            error_summary=None,
+            redaction_version="v1",
+        )
+        # All declared fields present and named exactly.
+        names = {f.name for f in fields(ev)}
+        assert names == {
+            "teammate_id", "tool_name", "tool_use_id",
+            "started_at_wallclock", "finished_at_wallclock", "duration_seconds",
+            "outcome", "args_summary", "error_summary", "redaction_version",
+        }
+        # Frozen.
+        with pytest.raises(FrozenInstanceError):
+            ev.outcome = "failed"  # type: ignore[misc]
+
+    def test_completed_tool_events_init_stub(self) -> None:
+        """T1 / sentinel F2: StubTeammate initializes the deque so snapshot reads don't AttributeError."""
+        teammate = StubTeammate(id="t-x", name="x", role="r")
+
+        assert isinstance(teammate._completed_tool_events, collections.deque)
+        assert len(teammate._completed_tool_events) == 0
+        assert teammate._completed_tool_events.maxlen == 200
+
+    def test_completed_tool_events_init_sdk(self) -> None:
+        """T1: SdkTeammate initializes the deque with the same default maxlen."""
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        teammate = SdkTeammate(id="t-y", name="y", role="r")
+
+        assert isinstance(teammate._completed_tool_events, collections.deque)
+        assert len(teammate._completed_tool_events) == 0
+        assert teammate._completed_tool_events.maxlen == 200
+
+    def test_tool_events_per_teammate_env_var_sets_maxlen(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T1 / sentinel D3: CLAUDE_CREW_TOOL_EVENTS_PER_TEAMMATE controls deque maxlen."""
+        from claude_crew.teammate import ToolEvent
+
+        monkeypatch.setenv("CLAUDE_CREW_TOOL_EVENTS_PER_TEAMMATE", "5")
+        teammate = StubTeammate(id="t-z", name="z", role="r")
+
+        assert teammate._completed_tool_events.maxlen == 5
+
+        # Append 6 events; oldest evicted by deque rollover.
+        for i in range(6):
+            ev = ToolEvent(
+                teammate_id="t-z", tool_name="Bash", tool_use_id=f"id-{i}",
+                started_at_wallclock=float(i), finished_at_wallclock=float(i) + 0.1,
+                duration_seconds=0.1, outcome="ok",
+                args_summary=None, error_summary=None, redaction_version="v1",
+            )
+            teammate._completed_tool_events.append(ev)
+
+        assert len(teammate._completed_tool_events) == 5
+        # First event (id-0) was evicted; oldest now is id-1.
+        assert teammate._completed_tool_events[0].tool_use_id == "id-1"
+        assert teammate._completed_tool_events[-1].tool_use_id == "id-5"
+
+
+class TestF19CloseOpenToolsAppend:
+    """T2: _close_open_tools appends ToolEvent(outcome=abandoned/killed) for in-flight tools."""
+
+    def test_close_open_tools_death_appends_abandoned(self) -> None:
+        """SC-4 / D-3: in-flight tools at death-time become outcome='abandoned' events."""
+        teammate = _make_teammate_with_mock_broker()
+        # Two in-flight tools.
+        for i, name in enumerate(("Bash", "Read")):
+            teammate._tool_uses[f"tu-{i}"] = _ToolUseEntry(
+                tool_name=name,
+                tool_use_id=f"tu-{i}",
+                started_at_wallclock=time.time() - 0.5,
+                args_summary=None,
+            )
+
+        teammate._close_open_tools(reason="death")
+
+        assert len(teammate._completed_tool_events) == 2
+        assert all(ev.outcome == "abandoned" for ev in teammate._completed_tool_events)
+        # _tool_uses cleared (existing F8 D9).
+        assert len(teammate._tool_uses) == 0
+
+    def test_close_open_tools_turn_end_appends_abandoned(self) -> None:
+        """Sentinel DEFER-1: turn_end is a normal-frequency path (SDK quirk dropped Post),
+        not just death/kill — needs the same deque-append coverage."""
+        teammate = _make_teammate_with_mock_broker()
+        for i, name in enumerate(("Bash", "Grep")):
+            teammate._tool_uses[f"tu-{i}"] = _ToolUseEntry(
+                tool_name=name, tool_use_id=f"tu-{i}",
+                started_at_wallclock=time.time() - 0.1, args_summary=None,
+            )
+
+        teammate._close_open_tools(reason="turn_end")
+
+        assert len(teammate._completed_tool_events) == 2
+        assert all(ev.outcome == "abandoned" for ev in teammate._completed_tool_events)
+
+    def test_close_open_tools_kill_appends_killed(self) -> None:
+        """SC-4 / D-3: kill-time in-flight tools become outcome='killed' events."""
+        teammate = _make_teammate_with_mock_broker()
+        teammate._tool_uses["tu-x"] = _ToolUseEntry(
+            tool_name="Bash",
+            tool_use_id="tu-x",
+            started_at_wallclock=time.time() - 0.2,
+            args_summary="command=long_build",
+        )
+
+        teammate._close_open_tools(reason="kill")
+
+        assert len(teammate._completed_tool_events) == 1
+        ev = teammate._completed_tool_events[0]
+        assert ev.outcome == "killed"
+        assert ev.tool_name == "Bash"
+        assert ev.error_summary is not None and "kill" in ev.error_summary
+        # args_summary preserved from the in-flight entry.
+        assert ev.args_summary == "command=long_build"

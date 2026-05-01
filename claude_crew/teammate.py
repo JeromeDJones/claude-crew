@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -24,6 +25,44 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _MAX_CONCURRENT_TOOLS = 64
+
+_TOOL_EVENTS_PER_TEAMMATE_DEFAULT = 200
+
+
+def _tool_events_maxlen() -> int:
+    """Read the per-teammate tool-event deque size from env (Feature #19 D-2)."""
+    return int(
+        os.environ.get(
+            "CLAUDE_CREW_TOOL_EVENTS_PER_TEAMMATE",
+            str(_TOOL_EVENTS_PER_TEAMMATE_DEFAULT),
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ToolEvent:
+    """Immutable record of one fully-completed tool boundary (Pre+Post pair).
+
+    Mirrors the field shape of #8's ``tool_end`` JSONL record (D-1) so the
+    in-memory representation and the on-disk transcript stay synchronized.
+    Lives in ``Teammate._completed_tool_events`` (bounded deque per D-2);
+    aggregated into ``BrokerSnapshot.tool_events`` at snapshot time (D-6).
+
+    Outcome values: "ok" | "failed" | "interrupted" | "abandoned" | "killed".
+    The "orphan_post" diagnostic (#8 D11) is filtered at the append site (D-3)
+    and never reaches this dataclass.
+    """
+
+    teammate_id: str
+    tool_name: str
+    tool_use_id: str
+    started_at_wallclock: float
+    finished_at_wallclock: float
+    duration_seconds: float
+    outcome: str
+    args_summary: str | None
+    error_summary: str | None
+    redaction_version: str
 
 
 @dataclass(frozen=True)
@@ -65,6 +104,9 @@ class Teammate(ABC):
     # F8: last fully-bracketed tool result (Pre→Post pair). Populated by T3
     # Post/PostFailure hooks; never updated by _close_open_tools (D9 / SC-14).
     _last_tool_completed: dict[str, Any] | None
+    # F19: bounded deque of completed ToolEvents for the dashboard stream (D-2).
+    # Populated by Post hooks and _close_open_tools (D-3); read by Broker.snapshot.
+    _completed_tool_events: collections.deque[ToolEvent]
 
     @abstractmethod
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
@@ -127,6 +169,23 @@ class Teammate(ABC):
                 finished_at_wallclock = time.time()
                 duration_seconds = finished_at_wallclock - entry.started_at_wallclock
                 error_summary = f"tool was in flight when {reason} closed it"
+                # F19 D-3 / D-4: append to in-memory deque BEFORE transcript write
+                # so SC-4 in-flight-at-tombstone events reach the dashboard even if
+                # the JSONL sink raises.
+                self._completed_tool_events.append(
+                    ToolEvent(
+                        teammate_id=self.id,
+                        tool_name=entry.tool_name,
+                        tool_use_id=tool_use_id,
+                        started_at_wallclock=entry.started_at_wallclock,
+                        finished_at_wallclock=finished_at_wallclock,
+                        duration_seconds=duration_seconds,
+                        outcome=outcome,
+                        args_summary=entry.args_summary,
+                        error_summary=error_summary,
+                        redaction_version=REDACTION_VERSION,
+                    )
+                )
                 try:
                     broker = self._broker
                     if broker is not None:
@@ -226,6 +285,11 @@ class StubTeammate(Teammate):
         self._tool_uses: dict[str, _ToolUseEntry] = {}
         self._recently_closed_tool_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_tool_completed: dict[str, Any] | None = None
+        # F19: completed tool-event deque (D-2). Stays empty for stub; exists so
+        # Broker.snapshot can read it without branching on teammate type (sentinel F2).
+        self._completed_tool_events: collections.deque[ToolEvent] = collections.deque(
+            maxlen=_tool_events_maxlen()
+        )
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker

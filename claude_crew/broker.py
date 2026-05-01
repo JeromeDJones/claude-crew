@@ -17,7 +17,7 @@ from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.teammate import Teammate
+from claude_crew.teammate import Teammate, ToolEvent
 from claude_crew.transcript import TranscriptSink
 
 LEAD_ID = "lead"
@@ -58,6 +58,13 @@ class TeammateInfo:
     total_input_tokens_at_death: int | None = None
     total_output_tokens_at_death: int | None = None
     total_cost_usd_at_death: float | None = None
+    # F19 D-7: per-teammate completed-tool-events snapshot at tombstone time.
+    # Captured AFTER _close_open_tools runs (step 8c) so abandoned/killed events
+    # land in this tuple. None during the brief window between tombstone (step 5,
+    # alive=False) and step 8c — snapshot contributes zero events from this
+    # teammate during that window (E-3, intentional). Empty tuple is a possible
+    # final value (teammate ran no tools before death).
+    tool_events_at_death: "tuple[ToolEvent, ...] | None" = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +94,7 @@ class BrokerSnapshot:
     teammates: tuple[TeammateInfo, ...]
     live: tuple[LiveTeammateInfo, ...]
     log: tuple[Envelope, ...]
-    tool_events: tuple[Any, ...] = ()  # #19 reservation; empty in #18 (D-10)
+    tool_events: "tuple[ToolEvent, ...]" = ()  # F19 D-5: tightened from tuple[Any, ...]
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -281,6 +288,20 @@ class Broker:
             teammate._close_open_tools(reason=close_reason)
             if hasattr(teammate, "_close_open_subagents"):
                 teammate._close_open_subagents(reason=close_reason)
+
+        # 8c. F19 D-7: capture per-teammate completed_tool_events into TeammateInfo.
+        # Must run AFTER 8b so abandoned/killed events appended by _close_open_tools
+        # are included in the captured tuple. dataclasses.replace because TeammateInfo
+        # is frozen (sentinel F1 — direct mutation would raise FrozenInstanceError).
+        # Defensive on missing attribute: a teammate that never initialized the deque
+        # (older test fixtures, bare-bones mocks) contributes None instead of crashing.
+        if teammate is not None:
+            captured = getattr(teammate, "_completed_tool_events", None)
+            if captured is not None:
+                self._info[teammate_id] = dataclasses.replace(
+                    self._info[teammate_id],
+                    tool_events_at_death=tuple(captured),
+                )
 
         # 9. Emit lifecycle event
         lifecycle_fields: dict[str, Any] = {"teammate_id": teammate_id}
@@ -522,11 +543,30 @@ class Broker:
         else:
             log_tuple = tuple(self._log[-log_limit:])
 
+        # F19 D-6: flatten per-teammate completed-tool-events. Live teammates
+        # contribute their current deque; tombstoned teammates contribute their
+        # frozen tool_events_at_death tuple (D-7). Stable sort by
+        # finished_at_wallclock asc gives deterministic chronological order.
+        # Mid-tombstone window where info.alive=False but tool_events_at_death=None
+        # contributes zero events from that teammate (E-3, intentional).
+        all_tool_events: list[ToolEvent] = []
+        for info in teammates_tuple:
+            if info.alive:
+                tm = self._teammates.get(info.id)
+                if tm is not None:
+                    captured = getattr(tm, "_completed_tool_events", None)
+                    if captured is not None:
+                        all_tool_events.extend(captured)
+            elif info.tool_events_at_death is not None:
+                all_tool_events.extend(info.tool_events_at_death)
+        all_tool_events.sort(key=lambda e: e.finished_at_wallclock)
+
         return BrokerSnapshot(
             crew_id=self.crew_id,
             teammates=teammates_tuple,
             live=tuple(live_entries),
             log=log_tuple,
+            tool_events=tuple(all_tool_events),
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:

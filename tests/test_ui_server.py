@@ -893,3 +893,164 @@ class TestBranchDetection:
         """_unreachable_instance always returns branch='main' (SC-12)."""
         result = _unreachable_instance("crew-x")
         assert result["branch"] == "main"
+
+
+# ---------------------------------------------------------------------------
+# Feature #19 T4: UIServer merge of tool events into transcript stream
+# ---------------------------------------------------------------------------
+
+
+class TestF19BuildLocalInstanceMergesToolEvents:
+    """T4: UIServer merges snapshot.tool_events into the per-crew transcript stream."""
+
+    def _make_snapshot_with(
+        self,
+        *,
+        tool_events: tuple = (),
+        envelopes: tuple = (),
+    ):
+        from claude_crew.broker import BrokerSnapshot, TeammateInfo
+
+        teammates = (TeammateInfo(
+            id="t-x", name="x", role="r",
+            spawned_at=1.0, alive=True,
+        ),)
+        return BrokerSnapshot(
+            crew_id="crew-test",
+            teammates=teammates,
+            live=(),
+            log=envelopes,
+            tool_events=tool_events,
+        )
+
+    def _make_tool_event(
+        self, *, tool_name="Bash", outcome="ok", finished_at=1.5,
+        duration=0.5, args_summary=None, error_summary=None, teammate_id="t-x",
+    ):
+        from claude_crew.teammate import ToolEvent
+        return ToolEvent(
+            teammate_id=teammate_id, tool_name=tool_name, tool_use_id=f"tu-{finished_at}",
+            started_at_wallclock=finished_at - duration, finished_at_wallclock=finished_at,
+            duration_seconds=duration, outcome=outcome,
+            args_summary=args_summary, error_summary=error_summary, redaction_version="v1",
+        )
+
+    def test_tool_events_appear_as_kind_tool(self):
+        events = (
+            self._make_tool_event(tool_name="Bash", finished_at=1.0),
+            self._make_tool_event(tool_name="Read", finished_at=2.0),
+            self._make_tool_event(tool_name="Grep", finished_at=3.0),
+        )
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with(tool_events=events)
+
+        _, messages = ui._build_local_instance(snap)
+
+        assert len(messages) == 3
+        assert all(m["kind"] == "tool" for m in messages)
+        assert all(m["to"] is None for m in messages)
+        assert all(m["from"] == "t-x" for m in messages)
+
+    def test_task_tool_events_filtered_out(self):
+        events = (
+            self._make_tool_event(tool_name="Bash", finished_at=1.0),
+            self._make_tool_event(tool_name="Task", finished_at=2.0),
+            self._make_tool_event(tool_name="Bash", finished_at=3.0),
+            self._make_tool_event(tool_name="Task", finished_at=4.0),
+        )
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with(tool_events=events)
+
+        _, messages = ui._build_local_instance(snap)
+
+        assert len(messages) == 2
+        assert all("Bash" in m["body"] for m in messages)
+        assert not any("Task" in m["body"] for m in messages)
+
+    def test_merged_stream_sorted_by_raw_float_timestamp(self):
+        """Sentinel D1: same-second events must sort by raw float, not truncated _ts string."""
+        from claude_crew.broker import LEAD_ID
+        from claude_crew.envelope import Envelope, new_message_id
+
+        # All within the same second. _ts() truncates to whole seconds, so sorting
+        # on the formatted ISO string would lose ordering.
+        env = Envelope(
+            id=new_message_id(), seq=1,
+            sender=LEAD_ID, recipient="t-x",
+            timestamp=1.2, payload="hi",
+        )
+        events = (
+            self._make_tool_event(finished_at=1.7),
+            self._make_tool_event(finished_at=1.5),
+        )
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with(tool_events=events, envelopes=(env,))
+
+        _, messages = ui._build_local_instance(snap)
+
+        # Ordering should follow raw float: env(1.2), tool(1.5), tool(1.7)
+        assert len(messages) == 3
+        assert messages[0]["kind"] == "msg"
+        assert messages[1]["kind"] == "tool"
+        assert messages[2]["kind"] == "tool"
+
+    def test_empty_tool_events_leaves_messages_unchanged(self):
+        """Regression guard: existing envelope-only behavior preserved."""
+        from claude_crew.broker import LEAD_ID
+        from claude_crew.envelope import Envelope, new_message_id
+
+        env = Envelope(
+            id=new_message_id(), seq=1,
+            sender=LEAD_ID, recipient="t-x",
+            timestamp=1.0, payload="hello",
+        )
+        broker = Broker()
+        ui = UIServer(broker=broker, port=0)
+        snap = self._make_snapshot_with(tool_events=(), envelopes=(env,))
+
+        _, messages = ui._build_local_instance(snap)
+        assert len(messages) == 1
+        assert messages[0]["kind"] == "msg"
+        assert messages[0]["body"] == "hello"
+
+
+class TestF19FormatToolEventBody:
+    """T4 / D-9: body format examples from the spec must produce exact strings."""
+
+    def _ev(self, **kw):
+        from claude_crew.teammate import ToolEvent
+        defaults = dict(
+            teammate_id="t-x", tool_use_id="tu-1",
+            started_at_wallclock=1.0, finished_at_wallclock=1.5,
+            duration_seconds=0.5, outcome="ok",
+            args_summary=None, error_summary=None, redaction_version="v1",
+        )
+        defaults.update(kw)
+        return ToolEvent(**defaults)
+
+    def test_bash_with_args(self):
+        from claude_crew.ui_server import _format_tool_event_body
+        body = _format_tool_event_body(self._ev(
+            tool_name="Bash", outcome="ok", duration_seconds=0.45,
+            args_summary="command=ls /tmp",
+        ))
+        assert body == "Bash (ok, 0.45s) — command=ls /tmp"
+
+    def test_read_no_args_no_error(self):
+        from claude_crew.ui_server import _format_tool_event_body
+        body = _format_tool_event_body(self._ev(
+            tool_name="Read", outcome="ok", duration_seconds=0.01,
+        ))
+        assert body == "Read (ok, 0.01s)"
+
+    def test_webfetch_failed_with_error(self):
+        from claude_crew.ui_server import _format_tool_event_body
+        body = _format_tool_event_body(self._ev(
+            tool_name="WebFetch", outcome="failed", duration_seconds=12.3,
+            error_summary="http 503",
+        ))
+        # {:.2f} always shows 2 decimal places, so 12.3 → "12.30"
+        assert body == "WebFetch (failed, 12.30s) [http 503]"

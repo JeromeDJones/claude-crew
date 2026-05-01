@@ -269,3 +269,9 @@ Plugin hooks and "always-include" hooks split across two different mechanisms:
 - **Where**: `claude_crew/server.py` → `broker.spawn_teammate` → factory chain
 - **Why it matters**: Invalid strings reach `ClaudeAgentOptions` and are silently ignored by the SDK — caller gets no error, spawn appears to succeed with wrong behavior
 - **Suggested action**: Import `_VALID_PERMISSION_MODES` from `_loader.py` into `server.py`; validate spawn-time `permission_mode` at the MCP tool boundary and return `_err("invalid_argument", ...)` on failure
+
+## [2026-05-01] Feature: tool-events-dashboard-stream (#19)
+- **What**: Agent-header `current_tool` badge is plaintext in a secondary scrolling status row, with no animation on the tool name itself (only the status dot pulses). Under wide layouts with many active agents, the badge may require horizontal scroll to see.
+- **Where**: `claude_crew/ui/dashboard.html` AgentStreamColumn component (lines 467–508)
+- **Why it matters**: SC-7 of #19 deliberately keeps the tool-event stream completed-only — the in-flight visibility job belongs to this badge. If the badge isn't prominent, a long-running tool (90s Bash) shows zero stream signal until completion, which leaves the original "operator stares at silence" problem partially unsolved (per co-architect pushback C in #19 Phase 1 review).
+- **Suggested action**: Promote `current_tool` to the pinned agent header alongside the avatar/name; add a subtle pulse or shimmer when a tool has been in-flight >5s; consider adding tool elapsed-time so an operator sees "Bash · 23s" growing.
