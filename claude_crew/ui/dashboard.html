@@ -480,7 +480,14 @@
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
               <ModelBadge model={agent.model}/>
-              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)", marginLeft: "auto" }}>{fmtCost(agent.cost)}</span>
+              <span
+                className="mono"
+                title={`${agent.tokens.in.toLocaleString()} in · ${agent.tokens.out.toLocaleString()} out`}
+                style={{ fontSize: 10.5, color: "var(--fg-3)", marginLeft: "auto" }}
+              >
+                {fmtTokens(agent.tokens.in + agent.tokens.out)}
+              </span>
+              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)" }}>{fmtCost(agent.cost)}</span>
             </div>
           </div>
 

@@ -1,7 +1,8 @@
 # Feature: Token/Cost Telemetry (#14)
 
-**Status**: In Progress (Phase 1)
+**Status**: ✅ Shipped (merged to master 2026-04-30)
 **Created**: 2026-04-30
+**Merged**: 2026-04-30 (commit `55adf47`)
 
 ---
 
@@ -579,23 +580,37 @@ Scenario [live-only]: real SDK ResultMessage carries Anthropic-standard usage ke
 ## Phase 5: Completion
 
 ### Verification
-- [ ] Feature works against Phase 1 success criteria
-- [ ] No regressions — full test suite passes
-- [ ] Spec updated to match implementation
-- [ ] Docs updated if user-facing behavior changed
+- [x] Feature works against Phase 1 success criteria — all 10 SCs traced to passing tests in the final sentinel review.
+- [x] No regressions — full suite green: 511 passed, 10 skipped (was 494 + 9 pre-feature).
+- [x] Spec updated to match implementation — D-4 wording revised, D-8 granularity clarified, OQ-3/OQ-5 marked resolved.
+- [x] Docs updated — PRODUCT-VISION.md feature pipeline status, journal entry, plus #20 peer messaging idea added.
+- [x] Manual test passed — three live SdkTeammates (scout/analyst/writer) showed real per-agent cost ($0.0114–$0.0617) on the dashboard; killing writer preserved its $0.0114 in the instance summary aggregate (SC-3 acceptance signal).
 
 ### Retrospective
 
 **What went well**:
 
+- **Cheap spikes prevented redesigns.** OQ-3 (ResultMessage cadence) and OQ-5 (session_id stability) were both ~10-min reads of SDK source at Phase 2 gate. Either being wrong would have invalidated D-1/D-2 and forced a re-cut. Both validated the design instead.
+- **Crew-assisted SDD, third feature in a row with zero S1 fires.** Co-architect (Opus) at Phase 1 SC gate caught 5 design risks (atomicity, mid-turn death, respawn semantics, type contracts, non-regression). Reviewer (Sonnet) found Gap A (cumulative double-counting) and Gap C (multi-AssistantMessage overcounting). Sentinel at Phase 2 caught the OQ-5 gap before it became implementation-time discovery.
+- **Sentinel reviews each found one real bug per pass.** Post-T2: missing assertion in malformed test (D-8 positive case untested). Post-T5: `UnboundLocalError` in `_tombstone_teammate` else-branch when `teammate is None`. Both were fixed before merge, neither would have been caught by code review alone — they live in subtle gap-shaped places.
+- **The architecture rewarded itself.** Subagent (Task tool) cost auto-rolled into the parent's `total_cost_usd` via shared session_id (A-8 spike) — no extra plumbing needed. Dashboard frontend MCTopBar already summed per-instance values without changes; we just supplied non-zero numbers.
+
 **What was friction**:
 
+- **D-4 / D-8 spec contradiction.** D-4 stated atomic-snapshot in absolute terms ("never see tokens from turn N and cost from turn N-1"), then D-8 added per-field independence as a clarification — explicitly violating D-4. Wasn't caught until T2 implementation surfaced the question. D-4 wording was patched mid-flight; better would have been writing both decisions with the relationship called out from the start.
+- **BDD test naming pinned the wrong scenario.** "test_malformed_result_message_leaves_totals_unchanged" suggested all-or-nothing transactional behavior, but D-8's per-field rule means cost actually DOES update when usage is the malformed field (and vice versa). Test name read true; assertion was incomplete. Sentinel caught it.
+- **Tombstone race-path was a pre-existing latent bug F14 made visible.** The `else` branch in `_tombstone_teammate` (race when teammate self-removed from `_teammates` before broker kill reaches snapshot step) was incomplete pre-F14 but didn't crash. F14 added three uninitialized vars that turned silence into UnboundLocalError. The dataclass-replace pattern is a trip-wire — every new `_at_death` field must initialize all three branches or it's a bug waiting for a race.
+
 **Improvements**:
-1. [Specific, actionable change to workflow]
+
+1. **Spec-write rule for interacting decisions.** When two decisions interact (one constrains, one relaxes), name the relationship in BOTH decisions, not just retrospectively. D-4 should have said "atomic within a healthy ResultMessage; see D-8 for per-field independence on malformed inputs" from the first draft.
+2. **Tombstone field extraction helper.** Backlogged. The three-branch trip-wire (try / except AttributeError / else) repeats per-field manually today. A `_extract_at_death_fields(teammate, snap_or_none) -> dict` helper would eliminate the gap. Worth M-sized cleanup in a future polish pass.
+3. **BDD scenario names should match the rule, not just the trigger.** "test_malformed_result_message_leaves_totals_unchanged" was misleading because the rule is per-field, not transactional. Better: `test_malformed_usage_field_leaves_token_totals_unchanged` (and a separate `test_valid_cost_field_still_updates_when_usage_is_malformed`). When the rule has structure, the test name should reveal it.
 
 **Workflow updates made**:
-- [ ] TEMPLATE.md or SKILL.md updated
-- [ ] Project knowledge base updated (`.claude/rules/`)
-- [ ] MEMORY.md updated (if cross-project insight)
+- [x] BACKLOG.md updated — three F14 follow-up entries (sci-notation guard, tombstone extraction helper, spec-contradiction process learning)
+- [x] PRODUCT-VISION.md updated — pipeline status, journal entry, #20 peer messaging idea added
+- [ ] `.claude/rules/` — no new project rule needed; the spec-write learning is a SDD process improvement, not a project constraint
+- [ ] MEMORY.md — no cross-project insight; F14's lessons are claude-crew-specific
 
-**Gate**: Feature verified, retrospective captured, workflow improved.
+**Gate**: ✅ Feature verified end-to-end against real SDK traffic. Retrospective captured. Workflow improvements logged to BACKLOG and reflected in updated process notes.
