@@ -6,6 +6,26 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-04-30] Teammate vs. subagent system-prompt parity
+
+### Pack system prompt assumes subagent context; teammates get the same prompt but different tools
+- **What**: `claude_crew/subagents/*.md` pack files are written for SUBAGENT invocation. `general_purpose.md` says "You MUST NOT spawn subagents (you have no Task tool by design — subagents are leaves)" — true when spawned as a Task subagent, FALSE when spawned as a top-level teammate via `spawn_teammate(role="general-purpose")`. Teammates have Task tool access; subagents don't. The system prompt is the same for both, so a teammate is told it has no Task tool while in fact it does.
+- **Where**: `claude_crew/subagents/general_purpose.md` (and any future role used both ways), the teammate spawn path in `factories.py` / `sdk_teammate.py` that consumes the pack.
+- **Why it matters**: Caught live 2026-04-30 — the persistent Opus co-architect (a teammate) burned 1.3M input tokens across 6 turns reading raw files in its own context instead of delegating to explorer subagents. The instruction wasn't there to delegate. Per-prompt nudges work but should be system-prompt-level for any non-leaf teammate.
+- **Suggested action**: Two-part. (1) Append a "Delegate raw file reads to explorer subagents" section to teammate system prompts at spawn time (factories.py extension). (2) Consider splitting pack content into `subagent_prompt` and `teammate_prompt` blocks, or adding a `teammate_addendum` field to PackFrontmatter. Folds naturally into Feature #17 (agent definition parity) scope OR a separate small feature.
+
+---
+
+## [2026-04-30] Persistent crew teammates accumulate context cost across turns
+
+### SDK session state is cumulative; persistent agents get expensive across many turns
+- **What**: `SdkTeammate` calls `client.query(prompt, session_id="<crew_id>-<teammate_id>")` per turn. The Anthropic CLI maintains conversation state per session_id, so every turn re-includes ALL prior turns in the model's context window. Token cost scales with conversation length. F14 cost telemetry confirmed this empirically — a co-architect with 6 turns hit 1.3M input tokens, 9× more than a reviewer with 1 turn (similar output sizes).
+- **Where**: `claude_crew/sdk_teammate.py:794-797` (session_id construction).
+- **Why it matters**: Persistent crew teammates that take many lead-driven prompts during a feature design pass become disproportionately expensive. Anthropic's prompt caching mitigates (cache reads at 10% rate; the 1.3M-token co-architect cost $1.75 instead of $19.50), but it still scales linearly with turn count.
+- **Suggested action**: No code change needed — this is intrinsic to how SDK sessions work. Operationally, restart-per-feature beats persist-across-features for high-turn-count roles like co-architect. Document this in PROJECT-VISION's "operational notes" section so future operators know. Could ALSO be addressed by a future feature: `spawn_teammate(reset_session=True)` or a `restart_teammate(id)` MCP tool that flushes the SDK conversation while keeping the broker registration.
+
+---
+
 ## [2026-04-30] Pack-declared model not applied at top-level teammate spawn
 
 ### `pack.model` flows to subagents but not to top-level teammates

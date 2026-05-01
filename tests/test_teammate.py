@@ -348,3 +348,26 @@ class TestEndTurnAbandonsTools:
         sink = teammate._broker._sink
         assert sink.write_tool_event.call_count == 0
         assert teammate._current_turn_started_at_wallclock is None
+
+
+# ---------------------------------------------------------------------------
+# _get_redaction_version removal and REDACTION_VERSION replacement
+# ---------------------------------------------------------------------------
+
+
+class TestRedactionVersionCleanup:
+    def test_get_redaction_version_function_removed(self) -> None:
+        """T4: _get_redaction_version should be removed; REDACTION_VERSION is imported directly."""
+        import claude_crew.teammate as tm
+
+        assert not hasattr(tm, "_get_redaction_version"), (
+            "_get_redaction_version should be removed; use REDACTION_VERSION from claude_crew.redaction directly"
+        )
+
+    def test_redaction_version_still_in_status_snapshot(self) -> None:
+        """T4: status_snapshot still carries redaction_version == 'v1' after the cleanup."""
+        teammate = StubTeammate(id="t-x", name="x", role="r")
+
+        snap = teammate.status_snapshot()
+
+        assert snap["redaction_version"] == "v1"

@@ -18,7 +18,9 @@ import pytest
 from claude_crew import sdk_teammate as sdk_module
 from claude_crew.broker import (
     Broker,
+    BrokerSnapshot,
     LEAD_ID,
+    LiveTeammateInfo,
     TeammateAlreadyDeadError,
     UnknownTeammateError,
 )
@@ -1291,3 +1293,153 @@ class TestTokenCostBrokerIntegration:
         assert status["total_input_tokens"] == 0
         assert status["total_output_tokens"] == 0
         assert status["total_cost_usd"] == 0.0
+
+
+# ---------- T1 (#18): BrokerSnapshot types + Broker.snapshot() ----------
+
+
+@pytest.mark.asyncio
+class TestBrokerSnapshot:
+    """T1 BDD: BrokerSnapshot types and Broker.snapshot() method.
+
+    Scenarios (per Phase 3 spec):
+      1. snapshot exposes all live teammates with embedded info+status+model
+      2. snapshot is isolated from teammate state mutation (deep-copy, D-2)
+      3. snapshot is a synchronous method (D-1)
+      4. log_limit param honors the cap (D-5)
+      5. snapshot includes both alive and tombstoned teammates in `teammates`
+      6. tool_events is empty by default (D-10)
+    """
+
+    async def test_snapshot_includes_alive_teammates_with_info_status_model(
+        self, broker: Broker,
+    ) -> None:
+        """Scenario 1: two alive teammates → live has length 2, each with info/status/model.
+
+        StubTeammate has no _model, so model is None (D-3 documented behaviour).
+        """
+        tid_a = await broker.spawn_teammate(role="planner", name="alice", factory=_factory)
+        tid_b = await broker.spawn_teammate(role="worker", name="bob", factory=_factory)
+
+        snap = broker.snapshot()
+
+        assert isinstance(snap, BrokerSnapshot)
+        assert len(snap.live) == 2
+
+        live_ids = {entry.info.id for entry in snap.live}
+        assert live_ids == {tid_a, tid_b}
+
+        for entry in snap.live:
+            assert isinstance(entry, LiveTeammateInfo)
+            # info references the corresponding TeammateInfo
+            assert entry.info.alive is True
+            # status is a dict (from status_snapshot)
+            assert isinstance(entry.status, dict)
+            # StubTeammate / _NoopTeammate have no _model → None
+            assert entry.model is None
+
+        # Also verify the info objects match what list_crew returns
+        crew_ids = {info.id for info in broker.list_crew()}
+        assert live_ids == crew_ids
+
+    async def test_snapshot_isolated_from_teammate_state_mutation(
+        self, broker: Broker,
+    ) -> None:
+        """Scenario 2 (D-2): mutating teammate._last_tool_completed after snapshot
+        must NOT change the snapshot's view — proves deepcopy is happening.
+        """
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        # Give the teammate a last_tool_completed dict so the snapshot captures it
+        original_tool: dict[str, Any] = {
+            "tool_name": "Read",
+            "outcome": "ok",
+            "finished_at_wallclock": time.time() - 1.0,
+            "duration_seconds": 0.05,
+        }
+        teammate._last_tool_completed = original_tool
+
+        snap = broker.snapshot()
+
+        # Confirm snapshot captured the value
+        assert snap.live[0].status["last_tool_completed"] == original_tool
+
+        # Mutate the inner dict on the live teammate — the snapshot must not see it
+        teammate._last_tool_completed["leaked_key"] = "leak"
+
+        assert "leaked_key" not in snap.live[0].status["last_tool_completed"], (
+            "snapshot status dict reflects post-snapshot mutation — deepcopy is not happening"
+        )
+
+        # Also mutate by replacing the entire reference — still should not affect snapshot
+        teammate._last_tool_completed = {"completely": "different"}
+
+        # The original snapshot value must be stable (it was deep-copied at build time)
+        assert snap.live[0].status["last_tool_completed"]["tool_name"] == "Read"
+
+    async def test_snapshot_is_synchronous_method(self, broker: Broker) -> None:
+        """Scenario 3 (D-1): Broker.snapshot must be a regular def, not async def."""
+        import inspect
+        assert not inspect.iscoroutinefunction(Broker.snapshot), (
+            "Broker.snapshot() must be synchronous (def), not async"
+        )
+
+    async def test_snapshot_log_limit_param(self, broker: Broker) -> None:
+        """Scenario 4 (D-5): log_limit=N returns last N envelopes; None returns all."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        # Inject 500 envelopes directly into _log (bypasses routing)
+        for i in range(500):
+            broker._log.append(  # type: ignore[attr-defined]
+                Envelope(
+                    id=new_message_id(),
+                    seq=i + 1,
+                    sender="lead",
+                    recipient=tid,
+                    timestamp=float(i),
+                    payload=i,
+                )
+            )
+
+        snap_limited = broker.snapshot(log_limit=200)
+        assert len(snap_limited.log) == 200, (
+            f"expected 200 entries with log_limit=200, got {len(snap_limited.log)}"
+        )
+
+        snap_full = broker.snapshot(log_limit=None)
+        # The broker fixture starts clean, but spawn may add envelopes too;
+        # we seeded exactly 500 so the full snap must have >= 500
+        assert len(snap_full.log) >= 500, (
+            f"expected at least 500 entries with log_limit=None, got {len(snap_full.log)}"
+        )
+
+    async def test_snapshot_teammates_includes_alive_and_dead(
+        self, broker: Broker,
+    ) -> None:
+        """Scenario 5: teammates tuple includes both alive and tombstoned entries;
+        live tuple contains only alive entries.
+        """
+        tid_a = await broker.spawn_teammate(role="r", name="alive", factory=_factory)
+        tid_b = await broker.spawn_teammate(role="r", name="dead", factory=_factory)
+        await broker.kill_teammate(tid_b)
+
+        snap = broker.snapshot()
+
+        teammate_ids = {info.id for info in snap.teammates}
+        assert tid_a in teammate_ids
+        assert tid_b in teammate_ids
+        assert len(snap.teammates) == 2
+
+        live_ids = {entry.info.id for entry in snap.live}
+        assert live_ids == {tid_a}
+        assert len(snap.live) == 1
+
+    async def test_snapshot_tool_events_default_empty(
+        self, broker: Broker,
+    ) -> None:
+        """Scenario 6 (D-10): tool_events field reserved for #19; must be empty tuple."""
+        snap = broker.snapshot()
+        assert snap.tool_events == (), (
+            f"expected empty tool_events tuple, got {snap.tool_events!r}"
+        )

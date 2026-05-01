@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,13 +24,15 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from claude_crew.broker import Broker
+from claude_crew.broker import Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
 
 _logger = logging.getLogger(__name__)
 
 _DASHBOARD_PATH = Path(__file__).parent / "ui" / "dashboard.html"
 _POLL_INTERVAL = 1.5
+_BRANCH_TTL_SECONDS = 30
+_BRANCH_DETECT_TIMEOUT = 2.0
 
 
 def _normalize_model(model_id: str | None) -> str:
@@ -58,6 +62,28 @@ def _ts(wallclock: float | None) -> str:
     )
 
 
+def _detect_branch(cwd: str) -> str | None:
+    """Detect the current git branch in `cwd` via `git branch --show-current`.
+
+    Returns the branch name on success, or None on any failure (not a git
+    repo, git missing, subprocess error, timeout, detached HEAD producing
+    empty output). Callers should fall back to "main" on None.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=_BRANCH_DETECT_TIMEOUT,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None  # empty = detached HEAD → fail
+
+
 def _unreachable_instance(crew_id: str) -> dict[str, Any]:
     return {
         "id": crew_id,
@@ -80,11 +106,14 @@ class UIServer:
         port: int = 7821,
         registry: InstanceRegistry | None = None,
         sock: "Any | None" = None,
+        cwd: str | None = None,
     ) -> None:
         self._broker = broker
         self._port = port
         self._registry = registry
         self._sock = sock  # pre-bound socket; closed in serve() finally block
+        self._cwd = cwd if cwd is not None else os.getcwd()
+        self._branch_cache: tuple[str, float] = ("main", 0.0)
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
@@ -100,26 +129,43 @@ class UIServer:
                 "</body></html>"
             )
 
-    def _build_local_instance(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Build the local broker's instance dict and transcript list."""
-        broker = self._broker
+    def _get_branch(self) -> str:
+        """Return the cached git branch name; refresh every _BRANCH_TTL_SECONDS.
+
+        Falls back to "main" on any detection failure. Never raises.
+        """
         now = time.time()
+        if now < self._branch_cache[1]:
+            return self._branch_cache[0]
+        detected = _detect_branch(self._cwd)
+        branch = detected if detected is not None else "main"
+        self._branch_cache = (branch, now + _BRANCH_TTL_SECONDS)
+        return branch
+
+    def _build_local_instance(
+        self, snapshot: BrokerSnapshot
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Build the local broker's instance dict and transcript list FROM A SNAPSHOT.
+
+        Production-path SC-2: reads zero broker or teammate private attrs.
+        Function-input decoupling (D-11 / SC-10): accepts a BrokerSnapshot so tests
+        can call this with synthetic data and no live Broker.
+        """
+        now = time.time()
+
+        # Build a lookup from teammate id → LiveTeammateInfo for alive entries.
+        live_by_id = {entry.info.id: entry for entry in snapshot.live}
 
         agents: list[dict[str, Any]] = []
         total_cost = 0.0
         total_in = 0
         total_out = 0
-        for info in broker._info.values():
+        for info in snapshot.teammates:
             if info.alive:
-                teammate = broker._teammates.get(info.id)
-                snap: dict[str, Any] = {}
-                if teammate is not None:
-                    try:
-                        snap = teammate.status_snapshot()
-                    except Exception:
-                        pass
+                live_entry = live_by_id.get(info.id)
+                snap: dict[str, Any] = live_entry.status if live_entry is not None else {}
+                model_raw = live_entry.model if live_entry is not None else None
 
-                model_raw = getattr(teammate, "_model", None) if teammate else None
                 status = _derive_status(snap)
                 last_activity = snap.get("last_activity_at_wallclock")
 
@@ -155,7 +201,7 @@ class UIServer:
                 total_out += int(info.total_output_tokens_at_death or 0)
 
         messages: list[dict[str, Any]] = []
-        for env in broker._log[-200:]:
+        for env in snapshot.log:
             payload = env.payload
             if isinstance(payload, dict) and payload.get("error"):
                 continue
@@ -173,15 +219,15 @@ class UIServer:
                 "body": str(body)[:2000],
             })
 
-        spawn_times = [info.spawned_at for info in broker._info.values()]
+        spawn_times = [info.spawned_at for info in snapshot.teammates]
         crew_uptime = int(now - min(spawn_times)) if spawn_times else 0
 
         instance: dict[str, Any] = {
-            "id": broker.crew_id,
+            "id": snapshot.crew_id,
             "is_local": True,
-            "label": f"crew-{broker.crew_id}",
+            "label": f"crew-{snapshot.crew_id}",
             "cwd": "~",
-            "branch": "main",
+            "branch": self._get_branch(),
             "uptime": crew_uptime,
             "status": "active" if agents else "idle",
             "cost": total_cost,
@@ -224,16 +270,17 @@ class UIServer:
             return None
 
     async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
-        local_instance, local_messages = self._build_local_instance()
+        snapshot = self._broker.snapshot(log_limit=200)
+        local_instance, local_messages = self._build_local_instance(snapshot)
         instances: list[dict[str, Any]] = [local_instance]
-        transcripts: dict[str, list] = {self._broker.crew_id: local_messages}
+        transcripts: dict[str, list] = {snapshot.crew_id: local_messages}
 
         if local_only or self._registry is None:
             return {"instances": instances, "transcripts": transcripts}
 
         remote_entries = [
             e for e in self._registry.read_all()
-            if e.get("crew_id") != self._broker.crew_id
+            if e.get("crew_id") != snapshot.crew_id
         ]
         if remote_entries:
             results = await asyncio.gather(
