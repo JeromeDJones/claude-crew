@@ -19,7 +19,10 @@ from claude_crew.subagents import load_default_pack, merge_packs
 from claude_crew.subagents._user_loader import (
     _MAX_FILE_BYTES,
     _MAX_FILES_PER_DIR,
+    _OPTIONAL_AGENTDEF_FIELDS,
     _discover_skill_names,
+    _load_user_mcp_server_names,
+    _warn_unknown_mcp_servers,
     _warn_unknown_skills,
     build_merged_pack,
     discover_dir,
@@ -878,3 +881,256 @@ class TestSkillsFactoryRoundTrip:
         assert isinstance(teammate, SdkTeammate)
         gp = teammate._agents["general-purpose"]
         assert gp.skills == "all"  # the literal SDK Literal["all"], not a list
+
+
+# ============================================================================
+# Feature #17 T2 — _warn_unknown_mcp_servers + _warn_shadow_drop
+# ============================================================================
+
+import json
+
+
+def _write_claude_json(home: Path, mcp_servers: dict | None) -> Path:
+    """Plant a ~/.claude.json under home. Pass None for the mcpServers key
+    to omit it; pass {} for an explicit empty map."""
+    home.mkdir(parents=True, exist_ok=True)
+    cfg: dict = {}
+    if mcp_servers is not None:
+        cfg["mcpServers"] = mcp_servers
+    path = home / ".claude.json"
+    path.write_text(json.dumps(cfg))
+    return path
+
+
+class TestLoadUserMcpServerNames:
+    """SC-7 helper: parses ~/.claude.json and returns set of mcpServers names.
+    Best-effort (missing file, malformed JSON, missing key → empty set)."""
+
+    def test_returns_registered_names(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, {"atlassian": {"type": "http"}, "claude-crew": {"type": "stdio"}})
+        assert _load_user_mcp_server_names(home) == {"atlassian", "claude-crew"}
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        assert _load_user_mcp_server_names(tmp_path / "nonexistent") == set()
+
+    def test_missing_mcpservers_key_returns_empty(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        _write_claude_json(home, None)  # ~/.claude.json with no mcpServers key
+        assert _load_user_mcp_server_names(home) == set()
+
+    def test_malformed_json_returns_empty(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir(parents=True)
+        (home / ".claude.json").write_text("{not valid json")
+        assert _load_user_mcp_server_names(home) == set()
+
+    def test_mcpservers_not_a_dict_returns_empty(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir(parents=True)
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": ["should-be-dict"]}))
+        assert _load_user_mcp_server_names(home) == set()
+
+
+class TestWarnUnknownMcpServers:
+    """SC-7: load-time WARN for string-form mcpServers entries not in ~/.claude.json."""
+
+    def test_unknown_string_name_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_claude_json(home, {"atlassian": {"type": "http"}})
+        _write_agent(
+            home / ".claude" / "agents", "myrole.md",
+            extra_frontmatter="mcpServers: [ghost-server]",
+        )
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "myrole" in m and "ghost-server" in m and "unknown mcpServers" in m
+            for m in warn_msgs
+        ), f"expected WARN naming role + 'ghost-server', got {warn_msgs}"
+
+    def test_known_string_name_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_claude_json(home, {"atlassian": {"type": "http"}})
+        _write_agent(
+            home / ".claude" / "agents", "myrole.md",
+            extra_frontmatter="mcpServers: [atlassian]",
+        )
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
+        # Positive probe: assert role loaded so a future bug skipping the
+        # warner entirely wouldn't silently pass this negative assertion.
+        assert "myrole" in merged
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("unknown mcpServers" in m for m in warn_msgs)
+
+    def test_inline_dict_only_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Inline dicts are self-contained — no name to validate against ~/.claude.json."""
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        _write_claude_json(home, {})
+        _write_agent(
+            home / ".claude" / "agents", "myrole.md",
+            extra_frontmatter=(
+                "mcpServers:\n"
+                "  - type: stdio\n"
+                "    name: local-x\n"
+                "    command: uv\n"
+            ),
+        )
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("unknown mcpServers" in m for m in warn_msgs)
+
+    def test_missing_user_config_warns_for_string_entry(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No ~/.claude.json + pack with string-name mcpServers → WARN fires (empty set)."""
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        # No _write_claude_json call — no config exists.
+        _write_agent(
+            home / ".claude" / "agents", "myrole.md",
+            extra_frontmatter="mcpServers: [any-server]",
+        )
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            build_merged_pack(home_dir=home, project_root=proj)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("any-server" in m for m in warn_msgs)
+
+
+class TestOptionalAgentDefFieldsConstant:
+    """SC-11: guard against drift in the optional-fields list (mirrors #22 retro lens)."""
+
+    def test_optional_fields_set_equals_expected(self) -> None:
+        """If the SDK adds a new optional AgentDefinition field, this fails and
+        forces a deliberate inclusion/exclusion decision in _warn_shadow_drop."""
+        expected = {
+            "mcpServers", "memory", "skills", "disallowedTools",
+            "permissionMode", "maxTurns", "background", "initialPrompt", "effort",
+        }
+        assert set(_OPTIONAL_AGENTDEF_FIELDS) == expected
+        # And confirm `tools` is NOT included (required in pack frontmatter, can't drop).
+        assert "tools" not in _OPTIONAL_AGENTDEF_FIELDS
+
+
+class TestWarnShadowDrop:
+    """SC-11: WARN when a higher-precedence pack drops an optional field a lower one set."""
+
+    def _bundled_role(self, **fields) -> AgentDefinition:
+        """Build a minimal AgentDefinition with optional fields set as kwargs."""
+        return AgentDefinition(
+            description="Bundled role.",
+            prompt="bundled body",
+            tools=["Read"],
+            model="sonnet",
+            **fields,
+        )
+
+    def test_user_drops_skills_set_in_default_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role(skills=["foo"])}
+        user = {"explorer": self._bundled_role()}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "explorer" in m and "skills" in m and "user-level" in m
+            for m in warn_msgs
+        ), f"expected user-level shadow-drop WARN for skills, got {warn_msgs}"
+
+    def test_project_drops_mcp_servers_set_in_default_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role(mcpServers=["atlassian"])}
+        project = {"explorer": self._bundled_role()}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, None, project)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "explorer" in m and "mcpServers" in m and "project-level" in m
+            for m in warn_msgs
+        ), f"expected project-level shadow-drop WARN for mcpServers, got {warn_msgs}"
+
+    def test_project_drops_memory_set_in_user_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role()}
+        user = {"explorer": self._bundled_role(memory="project")}
+        project = {"explorer": self._bundled_role()}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, project)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        # The project shadow drops memory that user set.
+        assert any(
+            "explorer" in m and "memory" in m and "project-level" in m
+            for m in warn_msgs
+        ), f"expected project-over-user shadow-drop WARN for memory, got {warn_msgs}"
+
+    def test_explicit_empty_in_higher_does_NOT_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Explicit empty (e.g., disallowedTools=[]) is not None — not a drop."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role(disallowedTools=["Bash"])}
+        user = {"explorer": self._bundled_role(disallowedTools=[])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any(
+            "disallowedTools" in m and "drops" in m for m in warn_msgs
+        ), f"explicit empty should not warn, got {warn_msgs}"
+
+    def test_multiple_dropped_fields_emit_separate_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {
+            "explorer": self._bundled_role(skills=["a"], memory="project")
+        }
+        user = {"explorer": self._bundled_role()}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        skills_warns = [m for m in warn_msgs if "skills" in m and "drops" in m]
+        memory_warns = [m for m in warn_msgs if "memory" in m and "drops" in m]
+        assert len(skills_warns) == 1
+        assert len(memory_warns) == 1
+
+    def test_no_shadow_no_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Roles only present at one layer → no shadow check, no WARN."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role(skills=["foo"])}
+        user = {"different-role": self._bundled_role()}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("drops" in m for m in warn_msgs)
+
+    def test_higher_keeps_field_no_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Higher-precedence pack explicitly sets the field → no drop."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._bundled_role(skills=["a"])}
+        user = {"explorer": self._bundled_role(skills=["b"])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("drops" in m for m in warn_msgs)
