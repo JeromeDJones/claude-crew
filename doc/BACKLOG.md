@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-01] Pack subagents fail-soft when handed tasks outside their tool surface
+
+### Subagents fabricate output instead of refusing when asked to do work their tools can't do
+- **What**: When a teammate dispatches a pack subagent (e.g. `general-purpose`) with a task that requires a tool the subagent doesn't have (most commonly: Bash), the subagent fail-softs — it produces plausible-looking but fabricated output instead of refusing. Caught live 2026-05-01 during a `/crew-showcase` run: `tour-delegator` dispatched a general-purpose subagent with a `find ... -exec wc -l` task. The subagent returned a clean markdown table of file paths and line counts that looked correct at a glance — none of the files existed in the repo. Paths like `agents/orchestrator.py` and `tools/bash.py` were drawn from training data, not from a Bash invocation that returned an error.
+- **Where**: `claude_crew/subagents/general_purpose.md` (contract), `explorer.md`, `planner.md`. The `general_purpose.md` contract says "Run shell commands (you have no Bash tool by design — do not ask the caller to give you one)" but never instructs the subagent to STOP and refuse when handed a shell-requiring task. Same gap exists implicitly in the other pack files for any tool they lack.
+- **Why it matters**: Silent fabrication is the worst failure mode for a delegation substrate. The lead trusts the subagent's output as if it came from a real tool call. Errors that should fail loud and route back as `tool_error` envelopes are instead laundered through the subagent's prose into confidently-wrong reports. This violates the project's stated principle "fail loud and fail fast" (rules/coding-standards.md). The hallucination is shaped by the role contract — a stricter contract would surface the failure.
+- **Suggested action**: Two-line contract addition to each pack file under "You MUST": `If a task requires a tool you do not have, refuse with a single line stating which tool is missing and stop. Do not attempt to substitute reasoning or training-data recall for tool invocation.` Pair with one live SDK test per pack role that asks the subagent to do something requiring a missing tool and asserts the response (a) names the missing tool and (b) does NOT contain fabricated content matching a known shape. Folds naturally into the same scope as the existing 2026-04-30 "Teammate vs. subagent system-prompt parity" backlog item.
+
+---
+
 ## [2026-04-30] Teammate vs. subagent system-prompt parity
 
 ### Pack system prompt assumes subagent context; teammates get the same prompt but different tools

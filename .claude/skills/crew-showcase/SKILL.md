@@ -23,7 +23,7 @@ This skill makes **no changes to the project**. All teammate tasks are read-only
 
 ## The three showcase teammates
 
-Spawn these three in parallel via three `mcp__claude-crew__spawn_teammate` calls in a single message:
+Spawn these three in parallel via three `mcp__claude-crew__spawn_teammate` calls in a single message. **Pass `cwd` on every spawn** — set it to the project root the operator invoked the skill from (typically `/home/jerome/dev/claude-crew`, but read it from the operator's current working directory rather than hardcoding). Without `cwd`, teammates inherit the MCP server's working directory (usually `~`), which (a) skips loading the project's `CLAUDE.md`, (b) shows `~` on the dashboard column header — wrong framing for a "showcase of claude-crew on claude-crew" tour, and (c) breaks any task that uses relative paths.
 
 | Slot | Role | Name | Purpose |
 |---|---|---|---|
@@ -42,14 +42,18 @@ Send these three tasks via `mcp__claude-crew__send_to`, **in parallel** (single 
 ### Task 1 → `tour-delegator` (exercises #22 + #21)
 
 ```
-Dispatch a Task subagent to run this Bash and report the output:
+Dispatch an `explorer` subagent (via the Task tool) to do this read-only investigation and report back:
 
-    find /home/jerome/dev/claude-crew/claude_crew -name "*.py" -exec wc -l {} + | sort -rn | head -10
+    Find every Python file in /home/jerome/dev/claude-crew/claude_crew/ that defines a class
+    inheriting from `Teammate` (use Grep), then for each one, Read the file and report:
+      - file path
+      - class name
+      - the first method defined after __init__
 
 Don't run any tools yourself other than dispatching the subagent. The point is the long-running Agent dispatch — I'm verifying that my dashboard surfaces it as an in-flight badge with a growing elapsed counter and pulses past 5s.
 ```
 
-This produces a parent `Agent` tool that runs for ~5-15 seconds (subagent's Bash + tool-call overhead), which is the sweet spot for SC-3's 5s pulse threshold.
+This produces a parent `Agent` tool that runs ~8-15 seconds — multiple `Grep` + `Read` calls inside the subagent, all using tools the pack actually grants. Critically, this task does **NOT** ask the subagent to run shell. The pack subagents have no Bash by design (`claude_crew/subagents/general_purpose.md` etc.) — asking them to run shell makes them fail-soft (hallucinate plausible-looking output) instead of erroring. Stick to Read/Grep/Glob work for any subagent dispatch in this skill.
 
 ### Task 2 → `tour-explorer` (exercises #19 + #14)
 
@@ -115,5 +119,5 @@ That's it. The operator does the looking; you make the substrate run.
 
 - **MCP server isn't connected** → `mcp__claude-crew__list_crew` fails or returns "no server." Tell the operator to `/mcp` reconnect, then re-invoke the skill.
 - **Teammate spawn fails with "no such role"** → the default subagent pack isn't loaded. Confirm `claude_crew/subagents/{general_purpose,explorer,planner}.md` exist on the running server's branch. If not, the operator's local pack is out of sync — `git pull` and restart.
-- **A teammate doesn't have Bash and refuses Task 1** → expected. The task explicitly asks for subagent dispatch; if the teammate refuses to dispatch a subagent, send a follow-up: "Dispatch any subagent role that has Bash access. The point is to demonstrate delegation — pick whichever subagent works."
+- **The dispatched subagent returns plausible-looking but fabricated output** → likely cause: the task asked the subagent to do something outside its tool surface (e.g. shell). Pack subagents have no Bash by design and currently fail-soft (hallucinate) instead of refusing — see BACKLOG `[2026-05-01] Pack subagents fail-soft when handed tasks outside their tool surface`. Reshape the task to use only Read/Grep/Glob/Edit/Write/WebFetch/WebSearch.
 - **Dashboard doesn't reflect what `get_teammate_status` shows** → the dashboard is connected to a stale server (old code). Have the operator hard-refresh (`Ctrl+Shift+R`) and verify `/mcp` is connected to the right instance.
