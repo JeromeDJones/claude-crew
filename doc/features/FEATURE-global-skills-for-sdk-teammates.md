@@ -699,4 +699,60 @@ Scenario: Project skill dir exists but cwd differs (A-7 cwd trap)
 
 ## Phase 5: Completion
 
-*To be filled at end.*
+**Status**: Implementation complete on `feature/global-skills-sdk-teammates`. Awaiting Jerome's live verification before merge to master.
+
+### Verification
+
+- [x] Feature works against Phase 1 success criteria (all 10 SCs covered by tests; final sentinel pass confirms each carried-into pointer)
+- [x] No regressions — full test suite passes (649 passed, 11 skipped — was 628 pre-T1, +21 new tests)
+- [x] FEATURE.md spec matches implementation
+- [x] PRODUCT-VISION.md updated: row #25 filed (startup diagnostics on dashboard) as a follow-on
+- [x] README.md updated: new Skills subsection covering all five SC-9 elements
+- [x] doc/BACKLOG.md: two entries filed (MN-1 token-delta measure, #25 promotion pointer)
+- [ ] **Jerome live verification (SC-1b manual probe)** — operator declares a skill on a custom role, spawns a teammate via crew-showcase or similar, confirms the skill is invocable end-to-end against a real model
+
+### Final Disposition (sentinel)
+
+**MERGE-WITH-NOTE**. Final sentinel pass:
+- All 10 SCs traced to named tests
+- All 9 active design decisions (D-1 through D-9) carried into code/tests/docs
+- No pre-existing-test drift (the only test that needed updating, `test_bundled_packs_have_expected_setting_sources`, was caught and updated in T3)
+- One BACKLOG item: `general-purpose` token cost delta from re-enabled `setting_sources` (intentional per A-3, but unmeasured at live spawn)
+
+### Retrospective
+
+**What went well**:
+
+1. **Phase 1 spike collapsed scope from M to S-.** The very first scout discovered that `claude-agent-sdk 0.1.68` natively supports skills, that `PackFrontmatter.skills` already exists from #10, and that `sdk_teammate.py:893` already routes via `getattr(role_def, "skills", None)`. Kept the feature small enough for Kael-direct.
+
+2. **Empirical A-1 probe took 5 minutes and resolved a real concern.** Source-only inference said "structurally suggests no escalation"; actually running a planted probe with a temp skill and `disallowed_tools=["Bash"]` returned ground truth — Bash blocked, marker file not written. $0.22, decisive.
+
+3. **Co-architect three-pushback warmup at Phase 2 caught the design choice points before main-session synthesis.** Pushback 1 (union type), Pushback 2 (WARN locus in `_user_loader`), Pushback 3 (cascade is free, asymmetric with role_ss) — all three landed as D-1, D-4, D-6 with carried-into pointers. No drift between pushback and synthesis.
+
+4. **Co-architect Phase 1 pushback on SC-6 default → my reconsideration → reversal**. The first co-architect pass told me to default `skills` narrow on bundled `general-purpose` (different trust shape than lead). I caved. Jerome challenged. I re-examined the analogy (skills are exposure not routing, like any tool) and flipped back to `skills: all`. Lesson: co-architect pushback is a strong signal but not a vote — when an analogy doesn't fit, say so.
+
+5. **Sentinel mid-build checkpoint at T3-T4 boundary caught the L-1 vacuity.** The permissive `or "conflict"` assertion would have masked a different exception path. Tightening to `"contradictory" + "settingSources"` defends the actual SC-3 code path.
+
+6. **Sentinel-as-pseudocode-reader at Phase 2 caught MF-1 (`Literal` import missing), MF-2 (call-site ambiguity), MF-3 (existing test would break)** — all before any code was written. Three runtime errors avoided.
+
+**What was friction**:
+
+1. **My mistake editing `test_general_purpose_contract`**: the existing test had a continuation `assert "Task" not in gp.tools` that I accidentally moved to my new test, causing a `NameError`. Caught immediately by the next pytest run, but a Read-the-context-fully pass before editing would have avoided it.
+
+2. **The OQ-1 dashboard surfacing question** required filing a new vision row mid-Phase 2. Not friction in itself, but a reminder that "where do logs reach an operator" is a recurring genuine question across features (#19 had a similar shape) — a future feature might want to subsume this question structurally rather than handle it per-feature.
+
+**Improvements**:
+
+1. **Add to TEMPLATE.md**: Phase 2 "carried-into pointers" should always include the literal log line text when a feature emits new logs. SC-9 docs need it; named tests need to grep against it. Pinning it once in Phase 2 prevents three Phase 3 tasks from having to align separately.
+
+2. **Add to SKILL.md sentinel-prompt**: "Are any negative assertions (`assert X not in ...`) permissive enough to pass on the wrong code path?" The L-1 finding belongs in the standard sentinel sweep, not as a one-off catch.
+
+3. **Read full method body before editing existing tests**: my `test_general_purpose_contract` slice-mistake would be caught by reading 5 more lines before the Edit. Cheap protocol.
+
+**Workflow updates made**:
+
+- [x] Vision row #25 filed (`doc/PRODUCT-VISION.md`)
+- [x] BACKLOG entries filed (token delta measure; #25 promotion)
+- [x] Co-architect pushback-then-reversal pattern noted as a lesson (would inform a future MEMORY.md update if it recurs)
+
+**Phase 5 gate ready** — awaiting Jerome's live SC-1b probe for merge approval.
