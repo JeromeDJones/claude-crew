@@ -215,18 +215,19 @@ class TestParsePackFile:
         assert key == "general-purpose"
 
     def test_missing_required_field_raises(self, tmp_path: Path) -> None:
+        """Post-#15 only `description` is required."""
         f = tmp_path / "broken.md"
         f.write_text(dedent("""\
             ---
-            description: Missing tools.
             model: haiku
+            tools: [Read]
             ---
 
             body
             """))
         with pytest.raises(PackLoadError) as exc:
             parse_pack_file(f)
-        assert "tools" in str(exc.value)
+        assert "description" in str(exc.value)
         assert str(f) in str(exc.value)
 
     def test_empty_body_raises(self, tmp_path: Path) -> None:

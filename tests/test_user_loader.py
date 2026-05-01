@@ -189,12 +189,13 @@ class TestMalformedFilesIsolated:
     def test_missing_required_field_warns_skipped(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """Post-#15 only `description` is required."""
         caplog.set_level(logging.WARNING, logger=LOGGER)
         agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True)
-        # Missing `tools` (required).
+        # Missing `description` (the only remaining required field).
         (agents_dir / "incomplete.md").write_text(
-            "---\ndescription: Foo\nmodel: haiku\n---\n\nbody\n"
+            "---\nmodel: haiku\ntools: [Read]\n---\n\nbody\n"
         )
         _write_agent(agents_dir, "ok.md")
 
@@ -1018,9 +1019,12 @@ class TestOptionalAgentDefFieldsConstant:
         expected = {
             "mcpServers", "memory", "skills", "disallowedTools",
             "permissionMode", "maxTurns", "background", "initialPrompt", "effort",
+            "model",
         }
         assert set(_OPTIONAL_AGENTDEF_FIELDS) == expected
-        # And confirm `tools` is NOT included (required in pack frontmatter, can't drop).
+        # `tools` is NOT in _OPTIONAL_AGENTDEF_FIELDS — its default is [], not None,
+        # so the existing `is None` branch can't detect a drop. Sentinel H-2:
+        # collection-shrinkage handled separately via _check_drop_collection.
         assert "tools" not in _OPTIONAL_AGENTDEF_FIELDS
 
 
@@ -1141,3 +1145,92 @@ class TestWarnShadowDrop:
             _warn_shadow_drop(default, user, None)
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any("drops" in m for m in warn_msgs)
+
+
+class TestShadowDropOptionalModelAndTools:
+    """T2 (Pillar C) — model shadow-drop + tools/disallowedTools collection-shrinkage.
+
+    Per Phase 2 sentinel H-2 fix: model uses the existing `is None` branch
+    (added to _OPTIONAL_AGENTDEF_FIELDS); tools/disallowedTools use a new
+    collection-shrinkage branch because their AgentDefinition default is []
+    (not None).
+    """
+
+    def _role(self, **fields) -> AgentDefinition:
+        return AgentDefinition(
+            description="Role.",
+            prompt="body",
+            **fields,
+        )
+
+    def test_user_drops_model_set_in_default_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._role(tools=["Read"], model="opus")}
+        user = {"explorer": self._role(tools=["Read"])}  # model defaults to None
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "explorer" in m and "model" in m and "user-level" in m
+            for m in warn_msgs
+        ), f"expected user-level shadow-drop WARN for model, got {warn_msgs}"
+
+    def test_user_drops_tools_collection_shrinkage_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """User-level pack with empty tools shadows default's non-empty tools."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._role(tools=["Read", "Write"])}
+        user = {"explorer": self._role(tools=[])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "explorer" in m and "tools" in m and ("Read" in m or "Write" in m)
+            for m in warn_msgs
+        ), f"expected tools collection-shrinkage WARN, got {warn_msgs}"
+
+    def test_disallowed_tools_explicit_empty_NOT_a_drop(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Preserves #17 design: `disallowedTools=[]` is operator intent
+        (removing a restriction), not a silent drop. Only `tools=[]` collection-
+        shrinkage warns, since losing the tool surface is dangerous."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._role(tools=["Read"], disallowedTools=["Bash"])}
+        project = {"explorer": self._role(tools=["Read"], disallowedTools=[])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, None, project)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any(
+            "disallowedTools" in m and "drops" in m for m in warn_msgs
+        ), f"disallowedTools=[] is operator intent; got {warn_msgs}"
+
+    def test_no_warn_when_collections_unchanged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._role(tools=["Read"])}
+        user = {"explorer": self._role(tools=["Read"])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("drops" in m for m in warn_msgs)
+
+    def test_no_warn_when_higher_pack_keeps_subset(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A higher pack with tools=[Read] (subset of default's [Read, Write]) is
+        an explicit operator choice, not a silent drop. We don't WARN on every
+        list change — only on full collection-shrinkage to empty."""
+        from claude_crew.subagents._user_loader import _warn_shadow_drop
+        default = {"explorer": self._role(tools=["Read", "Write"])}
+        user = {"explorer": self._role(tools=["Read"])}
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _warn_shadow_drop(default, user, None)
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any(
+            "drops collection field" in m for m in warn_msgs
+        ), f"subset is operator intent, not a drop; got {warn_msgs}"

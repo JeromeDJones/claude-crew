@@ -399,7 +399,7 @@ The naive fix — adding `"model"` and `"tools"` to `_OPTIONAL_AGENTDEF_FIELDS` 
 **Two-part fix:**
 
 1. **Add `"model"` to `_OPTIONAL_AGENTDEF_FIELDS`.** Works as expected — `model=None` is the absent sentinel; `_check_drop` detects the drop on the existing `is None` branch.
-2. **Extend `_check_drop` with a new branch for collection-shrinkage.** New helper `_check_drop_collection(field_name, lower_val, higher_val) -> bool` that tests: if `lower_val` is a non-empty tuple/list AND `higher_val` is an empty tuple/list (or `None`), warn. Wired in for `"tools"` and `"disallowedTools"`. The WARN message names the field, the lost entries, and both file paths.
+2. **Extend `_check_drop` with a new branch for collection-shrinkage.** Iterate `_COLLECTION_FIELDS = ("tools",)` — only `tools` qualifies; losing the tool surface silently is dangerous. `disallowedTools=[]` was deliberately preserved as operator intent in #17 (`test_explicit_empty_in_higher_does_NOT_warn`) — removing a restriction is intentional, not a silent drop. WARN names the field, the lost entries, and both file paths.
 3. **Update stale comment** at `_user_loader.py:337-340` ("a drop cannot occur because tools/model are required") — both assertions become false post-feature. Replace with comment reflecting new semantics.
 
 This preserves claude-crew's safe-by-default `tools=()` semantics while closing the silent shadow-drop gap.

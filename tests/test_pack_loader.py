@@ -312,7 +312,7 @@ class TestToolsCoercion:
             "tools: [Read, Write]",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "Write"]
+        assert fm.tools == ("Read", "Write")
 
     def test_tools_comma_string(self, tmp_path: Path) -> None:
         text = _build_pack([
@@ -321,7 +321,7 @@ class TestToolsCoercion:
             "tools: Read, Write, Edit, Bash",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "Write", "Edit", "Bash"]
+        assert fm.tools == ("Read", "Write", "Edit", "Bash")
 
     def test_tools_single_string_no_comma_does_not_iterate_chars(self, tmp_path: Path) -> None:
         """REGRESSION: closes _loader.py:315 latent character-iteration bug.
@@ -335,7 +335,7 @@ class TestToolsCoercion:
             "tools: Read",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read"]
+        assert fm.tools == ("Read",)
         assert fm.tools != ["R", "e", "a", "d"]
 
     def test_tools_comma_string_with_mcp_prefix(self, tmp_path: Path) -> None:
@@ -345,7 +345,7 @@ class TestToolsCoercion:
             "tools: Read, mcp__knowledge-graph__search_codebase_definitions",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "mcp__knowledge-graph__search_codebase_definitions"]
+        assert fm.tools == ("Read", "mcp__knowledge-graph__search_codebase_definitions")
 
     def test_tools_trailing_comma_tolerated(self, tmp_path: Path) -> None:
         text = _build_pack([
@@ -354,7 +354,7 @@ class TestToolsCoercion:
             "tools: Read, Write,",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "Write"]
+        assert fm.tools == ("Read", "Write")
 
     def test_tools_double_comma_drops_empty(self, tmp_path: Path) -> None:
         text = _build_pack([
@@ -363,7 +363,7 @@ class TestToolsCoercion:
             "tools: Read,,Write",
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "Write"]
+        assert fm.tools == ("Read", "Write")
 
     def test_tools_quoted_comma_string(self, tmp_path: Path) -> None:
         """A YAML-quoted single string with internal commas still splits.
@@ -379,7 +379,7 @@ class TestToolsCoercion:
             'tools: "Read, Write"',
         ])
         _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ["Read", "Write"]
+        assert fm.tools == ("Read", "Write")
 
     def test_tools_int_raises(self, tmp_path: Path) -> None:
         text = _build_pack([
@@ -463,3 +463,129 @@ class TestDisallowedToolsCoercion:
         ])
         with pytest.raises(PackLoadError, match="disallowedTools.*list element must be a string"):
             parse_pack_text(text, tmp_path / "agent.md")
+
+
+# ---------------------------------------------------------------------------
+# T2 (Pillar C): optional model + tools
+#
+# Covers SC-3, SC-4, SC-9 from FEATURE-claude-code-agent-format-compatibility.md.
+# Per Claude Code spec, model and tools are optional. claude-crew defaults to
+# `tools=()` (safe-by-default — no implicit tool access via SDK inherit) and
+# `model=None` (SDK applies its own default at spawn). No-tools INFO emitted
+# when `tools:` is absent (operator might have forgotten to declare them).
+# ---------------------------------------------------------------------------
+
+
+import logging  # noqa: E402  (lives down here to keep T1 block self-contained)
+
+LOGGER = "claude_crew.subagents._loader"
+
+
+class TestOptionalModel:
+    """SC-3: model is optional at pack-load."""
+
+    def test_pack_without_model_loads(self, tmp_path: Path) -> None:
+        text = _build_pack([
+            "description: T",
+            "tools: [Read]",
+        ])
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.model is None
+        assert agent.model is None
+
+    def test_pack_with_explicit_model_unchanged(self, tmp_path: Path) -> None:
+        """Regression: existing packs declaring model still work."""
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+        ])
+        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.model == "haiku"
+        assert agent.model == "haiku"
+
+
+class TestOptionalTools:
+    """SC-4: tools is optional at pack-load; absent emits no-tools INFO."""
+
+    def test_pack_without_tools_loads(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ()
+        assert agent.tools == []
+
+    def test_pack_without_tools_emits_info(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            parse_pack_text(text, tmp_path / "agent.md")
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "no tools declared" in m for m in info_msgs
+        ), f"expected no-tools INFO, got {info_msgs}"
+
+    def test_pack_with_explicit_empty_tools_string_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """X.3: explicit `tools: ""` is operator intent — silent.
+
+        Distinguishes "operator forgot to declare tools" (INFO fires) from
+        "operator chose no tools" (silent).
+        """
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            'tools: ""',
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert fm.tools == ()
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert not any("no tools declared" in m for m in info_msgs), (
+            f"explicit empty tools must NOT emit INFO; got {info_msgs}"
+        )
+
+    def test_pack_with_tools_silent(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read]",
+        ])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            parse_pack_text(text, tmp_path / "agent.md")
+        info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert not any("no tools declared" in m for m in info_msgs), (
+            f"declared tools must NOT emit INFO; got {info_msgs}"
+        )
+
+    def test_tools_field_is_tuple(self, tmp_path: Path) -> None:
+        """Sentinel M-1: tools is tuple, not list (frozen dataclass immutability)."""
+        text = _build_pack([
+            "description: T",
+            "model: haiku",
+            "tools: [Read, Write]",
+        ])
+        _, _, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
+        assert isinstance(fm.tools, tuple)
+
+
+class TestMinimalPack:
+    """SC-8: minimal pack with only description loads cleanly."""
+
+    def test_description_only_pack_loads(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = _build_pack(["description: A minimal probe."])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            _, agent, fm, _ = parse_pack_text(text, tmp_path / "minimal-probe.md")
+        assert fm.description == "A minimal probe."
+        assert fm.model is None
+        assert fm.tools == ()
+        assert agent.tools == []
+        assert agent.model is None

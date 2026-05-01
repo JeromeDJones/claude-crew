@@ -334,20 +334,31 @@ def _warn_unknown_mcp_servers(
             )
 
 
-# Optional fields only. `tools` is required in PackFrontmatter (a higher-precedence
-# pack must declare it or pack-load fails); a "drop" cannot occur. `model` is also
-# required. `description` is required. Everything else is optional and may be
-# silently dropped via merge_packs whole-key replacement (Feature #17 SF-2, D-10).
+# Optional fields whose AgentDefinition default is None. A drop is detected via
+# `is None` on the higher-precedence pack. `description` is required and cannot
+# drop. `tools` lives in _COLLECTION_FIELDS instead — its AgentDefinition default
+# is `[]` (not None), so shrink-to-empty needs a separate branch (#15 sentinel
+# H-2). `disallowedTools` IS in this set (default None) AND in _COLLECTION_FIELDS
+# (covers the explicit-empty case `disallowedTools: []`).
 _OPTIONAL_AGENTDEF_FIELDS: tuple[str, ...] = (
     "mcpServers", "memory", "skills", "disallowedTools", "permissionMode",
-    "maxTurns", "background", "initialPrompt", "effort",
+    "maxTurns", "background", "initialPrompt", "effort", "model",
 )
+
+# Fields whose AgentDefinition default is an empty collection (not None). Shadow
+# detection here checks for non-empty → empty shrinkage, since the existing
+# `is None` branch can't see the drop. Only `tools` qualifies — losing the
+# tool surface silently is dangerous. `disallowedTools=[]` is operator intent
+# (deliberately removing a restriction) and must NOT warn — see #17 test
+# `test_explicit_empty_in_higher_does_NOT_warn`.
+_COLLECTION_FIELDS: tuple[str, ...] = ("tools",)
 
 
 def _check_drop(
     layer: str, role: str, lower: AgentDefinition, higher: AgentDefinition
 ) -> None:
-    """Emit a WARN per optional field set on ``lower`` but None on ``higher``."""
+    """Emit a WARN per optional field set on ``lower`` but None on ``higher``,
+    plus a WARN per collection field that shrinks to empty across layers."""
     for field in _OPTIONAL_AGENTDEF_FIELDS:
         lower_val = getattr(lower, field, None)
         higher_val = getattr(higher, field, None)
@@ -356,6 +367,19 @@ def _check_drop(
                 "%s-level agent %r drops optional field %r set by lower-precedence "
                 "pack (value=%r); pack-merge is whole-replacement, not field-level",
                 layer, role, field, lower_val,
+            )
+    # Collection-shrinkage: tools/disallowedTools default to [] (not None). A
+    # higher pack with tools=[] (or absent → []) silently strips a non-empty
+    # tool surface. Only fire when the lower has entries AND the higher is
+    # empty/None — partial-subset is operator intent, not a drop.
+    for field in _COLLECTION_FIELDS:
+        lower_val = getattr(lower, field, None) or ()
+        higher_val = getattr(higher, field, None) or ()
+        if lower_val and not higher_val:
+            logger.warning(
+                "%s-level agent %r drops collection field %r set by lower-precedence "
+                "pack (lost: %r); pack-merge is whole-replacement, not field-level",
+                layer, role, field, list(lower_val),
             )
 
 

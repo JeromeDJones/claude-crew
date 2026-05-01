@@ -11,7 +11,7 @@ and re-usable by Feature #3b's user-defined-agent loader.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -61,9 +61,16 @@ def _coerce_str_or_list(value: Any, field_name: str, path: Path) -> list[str]:
 class PackFrontmatter:
     """Validated frontmatter fields for a pack file.
 
-    Required: description, model, tools.
-    Optional: effort, maxTurns, initialPrompt, background, skills,
+    Required: description.
+    Optional: model, tools, effort, maxTurns, initialPrompt, background, skills,
               permissionMode, disallowedTools, settingSources, mcpServers, memory.
+
+    `model` and `tools` were required pre-#15. Per Claude Code's agent file
+    spec, both are optional; absence yields `model=None` (SDK applies its own
+    default) and `tools=()` (empty tuple, NOT None — claude-crew teammates
+    have no parent to inherit from, and the SDK's "inherits all if omitted"
+    semantic would silently grant full tool access). Empty tuple is
+    safe-by-default.
 
     The ``mcpServers`` field accepts a list of (str | dict) entries — string
     entries reference servers in ``~/.claude.json``; dict entries are inline
@@ -86,8 +93,8 @@ class PackFrontmatter:
     """
 
     description: str
-    model: str
-    tools: list[str]
+    model: str | None = None
+    tools: tuple[str, ...] = field(default_factory=tuple)
     effort: str | None = None
     maxTurns: int | None = None
     initialPrompt: str | None = None
@@ -100,8 +107,8 @@ class PackFrontmatter:
     memory: Literal["user", "project", "local"] | None = None
 
 
-_REQUIRED = ("description", "model", "tools")
-_OPTIONAL = ("effort", "maxTurns", "initialPrompt", "background",
+_REQUIRED = ("description",)
+_OPTIONAL = ("model", "tools", "effort", "maxTurns", "initialPrompt", "background",
              "skills", "permissionMode", "disallowedTools", "settingSources",
              "mcpServers", "memory")
 
@@ -171,6 +178,14 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         raise PackLoadError(f"pack file {path} has empty body")
 
     key = path.stem.replace("_", "-")
+
+    # X.3: no-tools INFO fires only when `tools:` is fully absent — distinguishes
+    # "operator forgot" (INFO) from "operator chose empty" (silent).
+    if "tools" not in fm_dict:
+        logger.info(
+            "agent %r has no tools declared — teammate will spawn but cannot invoke tools",
+            key,
+        )
     agent_kwargs: dict[str, Any] = {
         "description": fm.description,
         "prompt": body.rstrip() + _LEAF_SUFFIX,
@@ -346,8 +361,8 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
 
     return PackFrontmatter(
         description=str(d["description"]),
-        model=str(d["model"]),
-        tools=_coerce_str_or_list(d["tools"], "tools", path),
+        model=str(d["model"]) if d.get("model") is not None else None,
+        tools=tuple(_coerce_str_or_list(d["tools"], "tools", path)) if "tools" in d else (),
         effort=str(d["effort"]) if d.get("effort") is not None else None,
         maxTurns=int(d["maxTurns"]) if d.get("maxTurns") is not None else None,
         initialPrompt=(
