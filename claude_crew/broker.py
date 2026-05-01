@@ -202,6 +202,9 @@ class Broker:
             last_tool_completed_at_death = None
             last_subagent_completed_at_death = None
             in_flight_subagents_at_death = 0
+            total_input_tokens_at_death = None
+            total_output_tokens_at_death = None
+            total_cost_usd_at_death = None
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(

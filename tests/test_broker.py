@@ -1255,3 +1255,39 @@ class TestTokenCostBrokerIntegration:
         assert status["total_input_tokens"] == 200
         assert status["total_output_tokens"] == 100
         assert status["total_cost_usd"] == 0.25
+
+    async def test_tombstone_when_teammate_already_removed_does_not_crash(
+        self, broker: Broker,
+    ) -> None:
+        """Race path: _tombstone_teammate called after teammate self-removed from _teammates.
+
+        Sentinel-found gap (Phase 4 final review): the else branch when
+        teammate is None must initialize all _at_death fields, including the
+        F14 token/cost trio. Otherwise dataclasses.replace raises
+        UnboundLocalError. Pre-F14 this branch was incomplete in spirit (it
+        produced a stale tombstone) but didn't crash; F14 made it crashable.
+        """
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        # Simulate the race: remove from _teammates BEFORE _tombstone_teammate runs.
+        # Concretely this happens if the teammate task finishes its own cleanup
+        # before the broker's kill path reaches the snapshot step.
+        broker._teammates.pop(tid, None)
+
+        # Now run the tombstone path — must not raise UnboundLocalError.
+        await broker._tombstone_teammate(tid, 0, "kill")
+
+        # Verify tombstone is well-formed: alive=False, F14 fields default to None
+        # (AttributeError-equivalent path — no live teammate to query).
+        info = broker._info[tid]
+        assert info.alive is False
+        assert info.total_input_tokens_at_death is None
+        assert info.total_output_tokens_at_death is None
+        assert info.total_cost_usd_at_death is None
+
+        # get_teammate_status must coerce None → numeric zero on the wire.
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["total_input_tokens"] == 0
+        assert status["total_output_tokens"] == 0
+        assert status["total_cost_usd"] == 0.0
