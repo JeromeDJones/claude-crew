@@ -322,11 +322,9 @@ Plugin hooks and "always-include" hooks split across two different mechanisms:
 - **Why it matters**: Operator-facing observability gap. The dashboard's whole point is showing in-flight cost; long parallel dispatches are exactly the case where you want to watch cost grow. Currently you watch nothing for minutes.
 - **Suggested action**: Investigate whether SDK emits incremental usage events on `AssistantMessage` or via tool-result callbacks. If yes, augment `_collect_response_text` to surface mid-turn updates. May conflict with #14 D-1 ("`ResultMessage` is single source") — re-evaluate that decision against the operator-experience signal.
 
-## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15)
-- **What**: SDK runtime behavior on `AgentDefinition(tools=[])` is unverified. Phase 2 made a security-driven choice to default `tools` to empty tuple instead of `None` (which would let SDK inherit-all). The Python data model is correct, but no test confirms the SDK actually enforces `tools=[]` as no-tools at spawn time.
-- **Where**: Test gap. Affected files: `claude_crew/subagents/_loader.py:229-235` (where empty list lands), and the SDK boundary itself.
-- **Why it matters**: If the SDK silently treats `tools=[]` as "inherit all" (same as not passing `tools`), the Phase 2 security decision evaporates at runtime with no observable failure. Sentinel reviewer M-1 flagged this 2026-05-02.
-- **Suggested action**: Add a live-gated test (`CLAUDE_CREW_LIVE_TESTS=1`) that spawns an agent with `tools=()` and asserts the SDK refuses tool invocations. If the SDK ignores empty-list and inherits, the security design needs revisiting (e.g., explicit `tools=["__none__"]` sentinel, or a no-op-tool list).
+## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15) — RESOLVED 2026-05-02
+- **What**: SDK runtime behavior on `AgentDefinition(tools=[])` was unverified at merge time.
+- **Resolution**: Live test added at `tests/test_format_compat_e2e.py::TestLiveSdkToolsEmptyEnforcement`. Spawns a parent teammate with full tools and an `agents` dict containing a `probe-no-tools` role declaring `tools=[]`. Parent dispatches the probe via Task and asks it to read a file with a unique marker. Test passes when marker does NOT appear in parent's reply (SDK enforced empty tools). Verified against real SDK 2026-05-02 — marker was not present, **SDK correctly enforces `tools=[]`**. Phase 2 security decision validated at the SDK boundary.
 
 ## [2026-05-02] Feature: claude-code-agent-format-compatibility (#15)
 - **What**: `_warn_shadow_drop` enhancement (Q-9 deferred). When a user-level pack's `name:` value collides with a project-level pack's stem (or vice versa) and the underlying file stems differ, the WARN message could name BOTH stems alongside the canonical name to give operators visibility into the "I named the file `runner.md` but it shadowed `senior-runner` because both had `name: runner`" failure mode.

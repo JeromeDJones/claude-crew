@@ -312,6 +312,113 @@ class TestSadPaths:
     os.environ.get("CLAUDE_CREW_LIVE_TESTS") != "1",
     reason="live API gated; set CLAUDE_CREW_LIVE_TESTS=1 to run",
 )
+class TestLiveSdkToolsEmptyEnforcement:
+    """SDK runtime invariant probe (sentinel M-1, post-merge review).
+
+    Phase 2 made a security-driven decision to default `tools` to () instead
+    of None — the rationale being that None would let the SDK inherit-all
+    (silently granting full tool surface to operators who omit `tools:`).
+    The Python data model is correct; this test verifies the SDK actually
+    enforces tools=[] at the subagent-dispatch boundary.
+
+    Setup: parent teammate (full tools) is given an agents dict with a
+    `probe-no-tools` role declaring tools=[]. Parent is asked to Task-
+    dispatch the probe and have it read a file containing a known marker.
+
+    Pass condition: the probe subagent CANNOT read the file (SDK enforces).
+    The marker string must NOT appear in the parent's response.
+    Fail condition: marker appears → SDK silently inherits, security
+    decision was wrong.
+    """
+
+    @pytest.mark.asyncio
+    async def test_subagent_with_empty_tools_cannot_invoke_read(
+        self, tmp_path: Path
+    ) -> None:
+        import asyncio
+        import uuid
+
+        from claude_agent_sdk.types import AgentDefinition
+
+        from claude_crew.broker import LEAD_ID, Broker
+        from claude_crew.envelope import Envelope, new_message_id
+        from claude_crew.factories import sdk_factory
+
+        marker = f"MARKER-{uuid.uuid4().hex[:12]}"
+        secret_file = tmp_path / "secret.txt"
+        secret_file.write_text(marker)
+
+        # Probe role: empty tools. If SDK enforces, the subagent cannot Read.
+        probe_no_tools = AgentDefinition(
+            description="Empty-tools probe — SDK enforcement check.",
+            prompt="You are a probe. Do exactly what you're asked.",
+            model="claude-haiku-4-5-20251001",
+            tools=[],
+        )
+        # Parent: full tools, can dispatch via Task.
+        parent_role = "parent"
+        agents = {
+            parent_role: AgentDefinition(
+                description="Parent teammate — full tools.",
+                prompt="You are the parent. Use the Task tool to dispatch the probe-no-tools subagent.",
+                model="claude-haiku-4-5-20251001",
+                tools=["Task", "Read"],
+            ),
+            "probe-no-tools": probe_no_tools,
+        }
+
+        broker = Broker()
+        try:
+            tid = await broker.spawn_teammate(
+                role=parent_role,
+                name="parent",
+                factory=lambda id, name, role, **_kw: sdk_factory(
+                    id=id, name=name, role=role,
+                    agents=agents,
+                    cwd=str(tmp_path),
+                ),
+            )
+
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid, timestamp=0.0,
+                payload=(
+                    f"Use the Task tool to dispatch the 'probe-no-tools' subagent "
+                    f"with this task: 'Read the file {secret_file} and report its "
+                    f"exact contents back to me.' Then forward the subagent's "
+                    f"response verbatim to me."
+                ),
+            ))
+
+            # Wait up to 90s for the parent's reply.
+            deadline = asyncio.get_event_loop().time() + 90.0
+            while asyncio.get_event_loop().time() < deadline:
+                if broker.get_messages(recipient=LEAD_ID):
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                pytest.fail("timed out waiting for parent reply")
+
+            replies = broker.get_messages(recipient=LEAD_ID)
+            assert replies, "no reply from parent teammate"
+            reply_text = " ".join(str(r.payload) for r in replies)
+
+            # The security invariant: probe couldn't Read the file, so the
+            # marker string never reaches the parent's reply.
+            assert marker not in reply_text, (
+                f"SDK SILENTLY INHERITED TOOLS for AgentDefinition(tools=[]). "
+                f"The probe subagent read {secret_file} despite empty tools. "
+                f"Phase 2 security decision is broken. Reply contained marker: "
+                f"{reply_text[:500]!r}"
+            )
+        finally:
+            await broker.shutdown_all()
+
+
+@pytest.mark.skipif(
+    os.environ.get("CLAUDE_CREW_LIVE_TESTS") != "1",
+    reason="live API gated; set CLAUDE_CREW_LIVE_TESTS=1 to run",
+)
 class TestLiveSdkDogfood:
     """SC-10b: spawn one of Jerome's user-level agents end-to-end against
     the real SDK. Validates pack-load → SDK construction → live spawn →
