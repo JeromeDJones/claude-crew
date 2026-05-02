@@ -54,8 +54,18 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 - Tests that exercise the transcript sink set `CLAUDE_CREW_TRANSCRIPT_DIR` to a `tmp_path` and unset `CLAUDE_CREW_TRANSCRIPT_DISABLED`.
 - Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
 
+### SDK behavior — verified invariants
+
+**`AgentDefinition(tools=[])` is enforced by the SDK** as a true no-tools surface. Verified live 2026-05-02 (`tests/test_format_compat_e2e.py::TestLiveSdkToolsEmptyEnforcement`): a parent teammate dispatches a Task subagent declaring `tools=[]` and asks it to read a marker file; the marker never reaches the parent because the subagent has no Read available. **This is load-bearing for #15's safe-by-default `tools=()` design** — operators omitting `tools:` get a no-tool agent at the SDK boundary, NOT silent inherit-all. Re-run the live test if upgrading `claude-agent-sdk`.
+
+**`AgentDefinition(model=None)` is wire-safe.** The SDK serializes via `{k: v for k, v in asdict(agent_def).items() if v is not None}` (`claude_agent_sdk/_internal/client.py:157`); the CLI conditionally appends `--model` only if truthy (`subprocess_cli.py:253-254`). Absent `model:` in a pack = no `--model` flag = SDK default at spawn.
+
+**Token/cost telemetry rolls up at end-of-turn.** `_collect_response_text` extracts from `ResultMessage.usage` per #14 D-1. Long parent turns with heavy subagent dispatch (e.g., 30+ Tasks over 5+ minutes) show `0/0/$0.00` for the entire duration; tokens populate cleanly when the parent's turn returns. Observed 2026-05-02 with a 7-minute sentinel review (final: 143k in / 8k out / $1.40). Tracked as a UX gap in `doc/BACKLOG.md`.
+
 ### Known limitations
 
 **MCP servers must be in user-level config.** SDK teammates load `~/.claude.json` but not project-level MCP config. Register any required MCP server in `~/.claude.json`.
 
 **Shell hook env vars not injected in SDK mode.** `CLAUDE_TOOL_NAME`, `CLAUDE_HOOK_EVENT`, etc. are always empty inside teammate sessions. Use `matcher` in hook config instead of env-var checks.
+
+**Windows `\r\n` line endings rejected in pack frontmatter.** `_split_frontmatter` hard-codes `"---\n"`; Windows-authored agent files raise `PackLoadError`. Pre-existing limitation. Tracked in `doc/BACKLOG.md`.
