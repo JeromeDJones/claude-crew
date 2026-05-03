@@ -224,6 +224,24 @@ def load_project_agents(
     return discover_dir(root / ".claude" / "agents")
 
 
+def _normalize_path(p: Path) -> Path:
+    """Canonicalize a path for cross-filesystem comparison.
+
+    Always expands ``~`` and resolves symlinks/``..`` segments via
+    ``Path.resolve(strict=False)``. Unlike ``Path.resolve()`` without
+    args, this does not require the path to exist — needed because
+    ``installed_plugins.json`` may reference paths that were valid
+    at install time but moved since (or, for tests, paths that don't
+    exist on the host filesystem).
+
+    Used for both the installPath escape check (H1) and the
+    projectPath equality check (M1: avoids the case where one side
+    resolves and the other doesn't, producing a false-mismatch on
+    case-preserving case-insensitive filesystems like macOS).
+    """
+    return p.expanduser().resolve(strict=False)
+
+
 def _read_installed_plugins(
     home_dir: Path | None = None,
     project_root: Path | None = None,
@@ -267,7 +285,9 @@ def _read_installed_plugins(
     if not isinstance(plugins, dict):
         return []
 
-    project_resolved = project.resolve() if project.exists() else project
+    plugins_root = (home / ".claude" / "plugins").expanduser()
+    plugins_root_resolved = _normalize_path(plugins_root)
+    project_resolved = _normalize_path(project)
     pairs: list[tuple[str, Path]] = []
     for key in sorted(plugins.keys()):
         installs = plugins.get(key)
@@ -284,17 +304,33 @@ def _read_installed_plugins(
                 project_path_raw = install.get("projectPath")
                 if not isinstance(project_path_raw, str):
                     continue
-                project_path = Path(project_path_raw)
-                resolved = (
-                    project_path.resolve() if project_path.exists() else project_path
-                )
-                if resolved != project_resolved:
+                if _normalize_path(Path(project_path_raw)) != project_resolved:
                     continue
             elif scope != "user":
                 # Unknown scope: skip silently. Future-compat — an installer
                 # writing an unrecognized scope token shouldn't crash startup.
                 continue
-            pairs.append((key, Path(install_path_raw) / "agents"))
+
+            # H1 / sentinel: refuse installPaths that escape ~/.claude/plugins/.
+            # The trust model is "Claude Code's installer wrote this file"; a
+            # corrupted manifest pointing installPath at /etc or ../.. would
+            # otherwise turn an arbitrary on-disk .md file into a spawnable
+            # role. discover_dir doesn't exec, but a crafted agent file in an
+            # attacker-controlled path becomes a teammate prompt — code-
+            # execution-adjacent in an agent context.
+            install_path = Path(install_path_raw).expanduser()
+            install_resolved = _normalize_path(install_path)
+            try:
+                escapes = not install_resolved.is_relative_to(plugins_root_resolved)
+            except ValueError:
+                escapes = True
+            if escapes:
+                logger.warning(
+                    "plugin %r installPath %r is outside %s; skipping",
+                    key, install_path_raw, plugins_root_resolved,
+                )
+                continue
+            pairs.append((key, install_resolved / "agents"))
     return pairs
 
 
@@ -319,17 +355,22 @@ def load_plugin_agents(
     pack: dict[str, AgentDefinition] = {}
     role_ss: dict[str, list[str] | None] = {}
     bodies: dict[str, str] = {}
-    seen_plugin_for_key: dict[str, str] = {}
+    # H2: track (plugin_key, agents_dir) so the collision WARN distinguishes
+    # same-plugin-multiple-installs from cross-plugin collisions. The plugin
+    # key alone reads as a meaningless "appears in 'p@m' and 'p@m'" when one
+    # plugin has both user and local-scope installs that ship the same role.
+    seen_for_key: dict[str, tuple[str, Path]] = {}
 
     for plugin_key, agents_dir in pairs:
         plugin_pack, plugin_ss, plugin_bodies = discover_dir(agents_dir)
         for role_key, agent in plugin_pack.items():
             if role_key in pack:
-                prior_plugin = seen_plugin_for_key[role_key]
+                prior_plugin, prior_dir = seen_for_key[role_key]
                 logger.warning(
-                    "agent key %r appears in plugins %r and %r; %r wins "
-                    "(plugin lexicographic order)",
-                    role_key, prior_plugin, plugin_key, plugin_key,
+                    "agent key %r appears in plugin %r at %s and plugin %r at %s; "
+                    "%s wins (later in plugin/install iteration order)",
+                    role_key, prior_plugin, prior_dir,
+                    plugin_key, agents_dir, agents_dir,
                 )
             pack[role_key] = agent
             bodies[role_key] = plugin_bodies[role_key]
@@ -337,7 +378,7 @@ def load_plugin_agents(
                 role_ss[role_key] = plugin_ss[role_key]
             else:
                 role_ss.pop(role_key, None)
-            seen_plugin_for_key[role_key] = plugin_key
+            seen_for_key[role_key] = (plugin_key, agents_dir)
     return pack, role_ss, bodies
 
 

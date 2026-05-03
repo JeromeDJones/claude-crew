@@ -41,6 +41,12 @@ def _write_plugin_manifest(
     return cfg_path
 
 
+def _plugin_install(home: Path, *segments: str) -> Path:
+    """Return a path rooted under ``<home>/.claude/plugins/`` (passes the
+    H1 escape guard) made up of the given segments. Does not create it."""
+    return home / ".claude" / "plugins" / Path(*segments)
+
+
 def _write_agent(
     dir_: Path,
     filename: str,
@@ -97,7 +103,7 @@ class TestReadInstalledPlugins:
         assert _read_installed_plugins(tmp_path, tmp_path) == []
 
     def test_user_scope_install_included(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "myplugin"
+        install = _plugin_install(tmp_path, "cache", "myplugin")
         install.mkdir(parents=True)
         _write_plugin_manifest(tmp_path, {
             "myplugin@m": [{"scope": "user", "installPath": str(install)}],
@@ -108,7 +114,7 @@ class TestReadInstalledPlugins:
     def test_local_scope_install_only_when_project_path_matches(
         self, tmp_path: Path,
     ) -> None:
-        install = tmp_path / "cache" / "p"
+        install = _plugin_install(tmp_path, "cache", "p")
         install.mkdir(parents=True)
         right_project = tmp_path / "matching"
         right_project.mkdir()
@@ -132,7 +138,7 @@ class TestReadInstalledPlugins:
         assert _read_installed_plugins(tmp_path, wrong_project) == []
 
     def test_unknown_scope_skipped(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "p"
+        install = _plugin_install(tmp_path, "cache", "p")
         install.mkdir(parents=True)
         _write_plugin_manifest(tmp_path, {
             "p@m": [{"scope": "team", "installPath": str(install)}],
@@ -148,10 +154,10 @@ class TestReadInstalledPlugins:
         assert _read_installed_plugins(tmp_path, tmp_path) == []
 
     def test_multiple_plugins_sorted_by_key(self, tmp_path: Path) -> None:
-        a_install = tmp_path / "a"
-        b_install = tmp_path / "b"
-        a_install.mkdir()
-        b_install.mkdir()
+        a_install = _plugin_install(tmp_path, "a")
+        b_install = _plugin_install(tmp_path, "b")
+        a_install.mkdir(parents=True)
+        b_install.mkdir(parents=True)
         _write_plugin_manifest(tmp_path, {
             "zeta@m": [{"scope": "user", "installPath": str(b_install)}],
             "alpha@m": [{"scope": "user", "installPath": str(a_install)}],
@@ -164,10 +170,10 @@ class TestReadInstalledPlugins:
     ) -> None:
         """One plugin with both user and local-scope installs → both included
         when project_root matches."""
-        user_install = tmp_path / "user-install"
-        local_install = tmp_path / "local-install"
-        user_install.mkdir()
-        local_install.mkdir()
+        user_install = _plugin_install(tmp_path, "user-install")
+        local_install = _plugin_install(tmp_path, "local-install")
+        user_install.mkdir(parents=True)
+        local_install.mkdir(parents=True)
         project = tmp_path / "proj"
         project.mkdir()
         _write_plugin_manifest(tmp_path, {
@@ -202,7 +208,7 @@ class TestLoadPluginAgents:
         assert bodies == {}
 
     def test_loads_agents_from_user_scope_plugin(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         agents_dir = install / "agents"
         _write_agent(agents_dir, "rr-planner.md", description="RR planner")
         _write_plugin_manifest(tmp_path, {
@@ -214,7 +220,7 @@ class TestLoadPluginAgents:
         assert "rr-planner" in bodies
 
     def test_missing_agents_dir_does_not_raise(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "p"
+        install = _plugin_install(tmp_path, "cache", "p")
         install.mkdir(parents=True)
         # No agents/ subdir.
         _write_plugin_manifest(tmp_path, {
@@ -224,8 +230,8 @@ class TestLoadPluginAgents:
         assert pack == {}
 
     def test_aggregates_across_plugins(self, tmp_path: Path) -> None:
-        a = tmp_path / "a"
-        b = tmp_path / "b"
+        a = _plugin_install(tmp_path, "a")
+        b = _plugin_install(tmp_path, "b")
         _write_agent(a / "agents", "alice.md")
         _write_agent(b / "agents", "bob.md")
         _write_plugin_manifest(tmp_path, {
@@ -238,8 +244,9 @@ class TestLoadPluginAgents:
     def test_cross_plugin_collision_lex_later_wins_with_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        a = tmp_path / "a"
-        b = tmp_path / "b"
+        plugins_root = tmp_path / ".claude" / "plugins"
+        a = plugins_root / "a"
+        b = plugins_root / "b"
         _write_agent(a / "agents", "shared.md", description="from-a")
         _write_agent(b / "agents", "shared.md", description="from-b")
         _write_plugin_manifest(tmp_path, {
@@ -250,10 +257,192 @@ class TestLoadPluginAgents:
         pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
         # Lex-later "beta@m" wins.
         assert pack["shared"].description == "from-b"
+        # H2: the WARN names both plugin keys AND the agents_dir paths so
+        # same-plugin-multiple-install collisions don't render as
+        # "'p@m' and 'p@m'" (meaningless) — they render with distinct paths.
+        msgs = [r.getMessage() for r in caplog.records]
         assert any(
-            "alpha@m" in r.getMessage() and "beta@m" in r.getMessage()
-            for r in caplog.records
+            "alpha@m" in m and "beta@m" in m and "agents" in m
+            for m in msgs
+        ), f"collision WARN missing plugin keys + paths; got: {msgs}"
+
+    def test_same_plugin_two_installs_collision_warning_has_distinct_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """H2 regression: one plugin with both user and local-scope installs
+        that ship the same role — WARN must distinguish via paths, not just
+        repeat the plugin key on both sides."""
+        plugins_root = tmp_path / ".claude" / "plugins"
+        user_install = plugins_root / "user-cache"
+        local_install = plugins_root / "local-cache"
+        project = tmp_path / "proj"
+        project.mkdir()
+        _write_agent(user_install / "agents", "dupe.md", description="user-scope")
+        _write_agent(local_install / "agents", "dupe.md", description="local-scope")
+        _write_plugin_manifest(tmp_path, {
+            "p@m": [
+                {"scope": "user", "installPath": str(user_install)},
+                {
+                    "scope": "local",
+                    "installPath": str(local_install),
+                    "projectPath": str(project),
+                },
+            ],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        load_plugin_agents(tmp_path, project)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "user-cache" in m and "local-cache" in m
+            for m in msgs
+        ), f"collision WARN doesn't distinguish install paths; got: {msgs}"
+
+
+# -----------------------------------------------------------------------------
+# H1 — installPath escape guard
+# -----------------------------------------------------------------------------
+
+
+class TestInstallPathEscapeGuard:
+    """H1 — installPaths outside ~/.claude/plugins/ are refused with a WARN."""
+
+    def test_install_path_outside_plugins_root_is_skipped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # An attacker-controlled or corrupted manifest that points
+        # installPath at some unrelated on-disk location.
+        rogue = tmp_path / "rogue"
+        _write_agent(rogue / "agents", "evil.md", description="should not load")
+        _write_plugin_manifest(tmp_path, {
+            "rogue@m": [{"scope": "user", "installPath": str(rogue)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
+        assert "evil" not in pack
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "rogue@m" in m and "outside" in m for m in msgs
+        ), f"escape-guard WARN missing; got: {msgs}"
+
+    def test_install_path_inside_plugins_root_is_loaded(
+        self, tmp_path: Path,
+    ) -> None:
+        plugins_root = tmp_path / ".claude" / "plugins"
+        good = plugins_root / "cache" / "ok"
+        _write_agent(good / "agents", "ok.md")
+        _write_plugin_manifest(tmp_path, {
+            "ok@m": [{"scope": "user", "installPath": str(good)}],
+        })
+        pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
+        assert "ok" in pack
+
+    def test_install_path_with_traversal_segments_is_rejected(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        plugins_root = tmp_path / ".claude" / "plugins"
+        plugins_root.mkdir(parents=True)
+        # Path that lexically lives under plugins_root but resolves out via ../
+        escape = plugins_root / ".." / ".." / "rogue"
+        _write_agent(tmp_path / "rogue" / "agents", "evil.md")
+        _write_plugin_manifest(tmp_path, {
+            "rogue@m": [{"scope": "user", "installPath": str(escape)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
+        assert "evil" not in pack
+        assert any(
+            "outside" in r.getMessage() for r in caplog.records
         )
+
+
+# -----------------------------------------------------------------------------
+# Sentinel coverage gaps: M2, M3, L1
+# -----------------------------------------------------------------------------
+
+
+class TestSentinelCoverageGaps:
+    """Targeted tests filling the gaps the sentinel review called out."""
+
+    def test_empty_plugins_dict_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """L1 — manifest with `plugins: {}` (no installs) loads cleanly."""
+        _write_plugin_manifest(tmp_path, {})
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        pack, ss, bodies = load_plugin_agents(tmp_path, tmp_path)
+        assert pack == {}
+        assert ss == {}
+        assert bodies == {}
+        # No WARN records — silent empty result.
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    def test_plugin_to_project_drop_with_no_user(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """M2 — plugin sets a field, no user-level role exists, project
+        drops the field. Verifies _warn_shadow_drop fires the project-vs-
+        plugin check, not just project-vs-user."""
+        install = _plugin_install(tmp_path, "cache", "rr")
+        project = tmp_path / "proj"
+        _write_agent(
+            install / "agents", "rr-planner.md",
+            description="plugin", extra="skills: [plan-feature]",
+        )
+        _write_agent(
+            project / ".claude" / "agents", "rr-planner.md",
+            description="project override",  # no skills declared → drops
+        )
+        _write_plugin_manifest(tmp_path, {
+            "rr@m": [{"scope": "user", "installPath": str(install)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        build_merged_pack(home_dir=tmp_path, project_root=project)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "project-level agent 'rr-planner'" in m and "skills" in m
+            for m in msgs
+        ), f"plugin→project shadow-drop WARN missing; got: {msgs}"
+
+    def test_plugin_agent_with_unknown_skill_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """M3 — _warn_unknown_skills must include plugin-layer agents.
+        A plugin agent that declares a skill not on disk should warn."""
+        install = _plugin_install(tmp_path, "cache", "rr")
+        _write_agent(
+            install / "agents", "rr-planner.md",
+            extra="skills: [definitely-not-a-real-skill]",
+        )
+        _write_plugin_manifest(tmp_path, {
+            "rr@m": [{"scope": "user", "installPath": str(install)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "rr-planner" in m and "definitely-not-a-real-skill" in m
+            for m in msgs
+        ), f"unknown-skill WARN didn't surface plugin agent; got: {msgs}"
+
+    def test_plugin_agent_with_unknown_mcp_server_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """M3 — _warn_unknown_mcp_servers must include plugin-layer agents."""
+        install = _plugin_install(tmp_path, "cache", "rr")
+        _write_agent(
+            install / "agents", "rr-planner.md",
+            extra="mcpServers: [not-a-registered-server]",
+        )
+        _write_plugin_manifest(tmp_path, {
+            "rr@m": [{"scope": "user", "installPath": str(install)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "rr-planner" in m and "not-a-registered-server" in m
+            for m in msgs
+        ), f"unknown-mcpServers WARN didn't surface plugin agent; got: {msgs}"
 
 
 # -----------------------------------------------------------------------------
@@ -265,7 +454,7 @@ class TestBuildMergedPackPluginLayer:
     """Precedence: project > user > plugin > default."""
 
     def test_plugin_agents_appear_in_merged(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         _write_agent(
             install / "agents", "rr-planner.md",
             description="from plugin", tools=["Read", "Write"],
@@ -281,7 +470,7 @@ class TestBuildMergedPackPluginLayer:
         assert "rr-planner" in bodies
 
     def test_user_overrides_plugin(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         _write_agent(install / "agents", "rr-planner.md", description="from plugin")
         _write_agent(
             tmp_path / ".claude" / "agents", "rr-planner.md",
@@ -296,7 +485,7 @@ class TestBuildMergedPackPluginLayer:
         assert merged["rr-planner"].description == "from user"
 
     def test_project_overrides_plugin_when_no_user(self, tmp_path: Path) -> None:
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         project = tmp_path / "proj"
         _write_agent(install / "agents", "rr-planner.md", description="from plugin")
         _write_agent(
@@ -312,7 +501,7 @@ class TestBuildMergedPackPluginLayer:
     def test_plugin_shadowing_default_logs_info(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         # Shadow the bundled "explorer" role.
         _write_agent(
             install / "agents", "explorer.md",
@@ -334,7 +523,7 @@ class TestBuildMergedPackPluginLayer:
     ) -> None:
         """User-level redefinition that drops a field set by the plugin
         emits the same shadow-drop WARN as user-shadowing-default."""
-        install = tmp_path / "cache" / "rr"
+        install = _plugin_install(tmp_path, "cache", "rr")
         _write_agent(
             install / "agents", "rr-planner.md",
             description="plugin", extra="skills: [plan-feature]",
