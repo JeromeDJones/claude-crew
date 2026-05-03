@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from mcp.shared.memory import create_connected_server_and_client_session
 
@@ -468,3 +471,116 @@ class TestSpawnExtrasGuard:
             )
             body = _content_json(result)
             assert body["teammate_id"].startswith("t-")
+
+
+# ---------- list_available_tools (AT-7, AT-8, AT-13, AT-14, AT-15) ----------
+
+
+def _client_with(home_dir: Path | None = None, project_root: Path | None = None):
+    """Create a connected client/server pair with injected home_dir / project_root."""
+    return create_connected_server_and_client_session(
+        make_server(home_dir=home_dir, project_root=project_root)
+    )
+
+
+class TestListAvailableTools:
+    """AT-7, AT-8, AT-13, AT-14, AT-15: list_available_tools MCP tool."""
+
+    async def test_shape_and_required_keys(self, tmp_path: Path) -> None:
+        """AT-7: response has required keys, Task not in builtins, no env/command/args."""
+        async with _client_with(home_dir=tmp_path, project_root=tmp_path) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("list_available_tools", {}))
+
+        assert "builtins" in result
+        assert "mcp_servers" in result
+        assert "skills" in result
+        assert "plugins" in result
+        assert "project_root" in result
+
+        # Task must NOT appear in builtins
+        assert "Task" not in result["builtins"], (
+            "Task must not be in builtins (leaf-node invariant)"
+        )
+
+        # project_root must be a non-empty string
+        assert isinstance(result["project_root"], str)
+        assert result["project_root"], "project_root must be a non-empty string"
+
+        # No MCP server entry may contain command, args, or env
+        for entry in result["mcp_servers"]:
+            assert "command" not in entry, f"command must not be serialized: {entry}"
+            assert "args" not in entry, f"args must not be serialized: {entry}"
+            assert "env" not in entry, f"env must not be serialized: {entry}"
+
+    async def test_reuses_user_loader_for_mcp_servers(self, tmp_path: Path) -> None:
+        """AT-8: mocked ~/.claude.json with one server name → single entry with running=null.
+        Verifies _load_user_mcp_server_names is called (not reimplemented)."""
+        # Plant a ~/.claude.json in tmp_path
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "test-server": {
+                    "command": "npx",
+                    "args": ["-y", "test-server-pkg"],
+                    "env": {"SECRET_KEY": "hunter2"},
+                }
+            }
+        }))
+
+        called_with: list[Any] = []
+        from claude_crew import server as server_module
+        from claude_crew.subagents._user_loader import _load_user_mcp_server_names as _orig
+
+        def _spy(home_dir=None):
+            called_with.append(home_dir)
+            return _orig(home_dir)
+
+        with patch.object(server_module, "_load_user_mcp_server_names", side_effect=_spy):
+            async with _client_with(home_dir=tmp_path, project_root=tmp_path) as s:
+                await s.initialize()
+                result = _content_json(await s.call_tool("list_available_tools", {}))
+
+        assert result["mcp_servers"] == [{"name": "test-server", "running": None}], (
+            f"expected single entry with running=null; got {result['mcp_servers']!r}"
+        )
+        assert called_with, "_load_user_mcp_server_names must have been called"
+        # No command/args/env exposed
+        entry = result["mcp_servers"][0]
+        assert "command" not in entry
+        assert "args" not in entry
+        assert "env" not in entry
+
+    async def test_missing_claude_json_returns_empty_mcp_servers(
+        self, tmp_path: Path
+    ) -> None:
+        """AT-13: home dir with no ~/.claude.json → mcp_servers == []. No exception."""
+        async with _client_with(home_dir=tmp_path, project_root=tmp_path) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("list_available_tools", {}))
+
+        assert result["mcp_servers"] == [], (
+            f"expected empty mcp_servers when .claude.json is absent; got {result['mcp_servers']!r}"
+        )
+
+    async def test_no_skill_dirs_returns_empty_skills(self, tmp_path: Path) -> None:
+        """AT-14: no ~/.claude/skills/ and no project skill dir → skills == []. No exception."""
+        async with _client_with(home_dir=tmp_path, project_root=tmp_path) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("list_available_tools", {}))
+
+        assert result["skills"] == [], (
+            f"expected empty skills when no skill dirs exist; got {result['skills']!r}"
+        )
+
+    async def test_absent_installed_plugins_returns_empty_plugins(
+        self, tmp_path: Path
+    ) -> None:
+        """AT-15: no installed_plugins.json → plugins == []. No exception."""
+        async with _client_with(home_dir=tmp_path, project_root=tmp_path) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("list_available_tools", {}))
+
+        assert result["plugins"] == [], (
+            f"expected empty plugins when installed_plugins.json is absent; got {result['plugins']!r}"
+        )
