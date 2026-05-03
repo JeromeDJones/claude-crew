@@ -149,6 +149,66 @@
       opacity: 0.85;
     }
 
+    /* ui-agent-transparency: dead-teammate row dimming */
+    .tm-row-dead {
+      opacity: 0.45;
+      filter: grayscale(0.35);
+      pointer-events: auto; /* keep chips/panel clickable */
+    }
+
+    /* ui-agent-transparency: config chips strip */
+    .tm-config-chips {
+      display: flex; gap: 5px; padding: 4px 14px;
+      flex-wrap: wrap; align-items: center;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--bg-0);
+      flex-shrink: 0; min-height: 26px; cursor: pointer;
+    }
+    .tm-config-chip {
+      display: inline-flex; align-items: center;
+      height: 18px; padding: 0 7px; border-radius: 9px;
+      background: var(--bg-2); border: 1px solid var(--line);
+      font-size: 10px; color: var(--fg-2);
+      white-space: nowrap;
+    }
+    /* detail panel backdrop + panel */
+    .tm-detail-backdrop {
+      position: fixed; inset: 0; z-index: 1000;
+      background: oklch(0.10 0.01 240 / 0.45);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .tm-detail-panel {
+      background: var(--bg-1); border: 1px solid var(--line);
+      border-radius: 8px; padding: 22px 24px;
+      width: min(640px, 90vw); max-height: 85vh;
+      overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+      box-shadow: 0 8px 32px oklch(0.10 0.01 240 / 0.30);
+    }
+    .tm-detail-section { display: flex; flex-direction: column; gap: 4px; }
+    .tm-detail-label {
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--fg-3);
+    }
+    .tm-detail-value { font-size: 12px; color: var(--fg-0); }
+    .tm-detail-prompt {
+      font-family: var(--font-mono); font-size: 11px; color: var(--fg-1);
+      background: var(--bg-2); border: 1px solid var(--line);
+      border-radius: 4px; padding: 8px 10px;
+      max-height: 60vh; overflow: auto;
+      white-space: pre-wrap; word-break: break-word;
+      margin: 0;
+    }
+    .tm-detail-list {
+      display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0;
+      list-style: none;
+    }
+    .tm-detail-list-item {
+      display: inline-flex; align-items: center;
+      height: 20px; padding: 0 8px; border-radius: 4px;
+      background: var(--bg-2); border: 1px solid var(--line);
+      font-family: var(--font-mono); font-size: 11px; color: var(--fg-1);
+    }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
@@ -328,6 +388,123 @@
           <span className="mono" style={{ fontWeight: 600 }}>{count}</span>
           <span style={{ color: "var(--fg-3)" }}>{status === "tool-use" ? "tool" : status}</span>
         </div>
+      );
+    }
+
+    // --- ConfigChips ---
+    function ConfigChips({ config, onClick }) {
+      if (!config) return null;
+      const chips = [];
+      chips.push({ key: 'tools', text: `${(config.tools || []).length} tools` });
+      const skillsArr = Array.isArray(config.skills) ? config.skills : (config.skills ? [config.skills] : []);
+      if (skillsArr.length > 0) chips.push({ key: 'skills', text: `${skillsArr.length} skills` });
+      if (config.permission_mode) chips.push({ key: 'perm', text: config.permission_mode });
+      const mcpArr = config.mcp_servers || [];
+      if (mcpArr.length > 0) chips.push({ key: 'mcp', text: `${mcpArr.length} MCP` });
+      if (chips.length === 0) return null;
+      return (
+        <div className="tm-config-chips" onClick={onClick} title="Click to view full config">
+          {chips.map(c => (
+            <span key={c.key} className="tm-config-chip">{c.text}</span>
+          ))}
+        </div>
+      );
+    }
+
+    // --- ConfigDetailPanel ---
+    function ConfigDetailPanel({ config, agentRole, onClose }) {
+      useEffect(() => {
+        const handler = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+      }, [onClose]);
+
+      const skillsArr = Array.isArray(config.skills) ? config.skills : (config.skills ? [config.skills] : []);
+      const toolsArr = config.tools || [];
+      const dtArr = config.disallowed_tools || [];
+      const mcpArr = config.mcp_servers || [];
+
+      return ReactDOM.createPortal(
+        <div className="tm-detail-backdrop" onClick={onClose}>
+          <div className="tm-detail-panel" onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{agentRole} — config</span>
+              <button onClick={onClose} style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--fg-3)', fontSize: 16, lineHeight: 1,
+              }}>✕</button>
+            </div>
+
+            {config.model && (
+              <div className="tm-detail-section">
+                <div className="tm-detail-label">model</div>
+                <div className="tm-detail-value">{config.model}</div>
+              </div>
+            )}
+
+            {(config.permission_mode || config.effort) && (
+              <div style={{ display: 'flex', gap: 24 }}>
+                {config.permission_mode && (
+                  <div className="tm-detail-section">
+                    <div className="tm-detail-label">permission mode</div>
+                    <div className="tm-detail-value">{config.permission_mode}</div>
+                  </div>
+                )}
+                {config.effort && (
+                  <div className="tm-detail-section">
+                    <div className="tm-detail-label">effort</div>
+                    <div className="tm-detail-value">{config.effort}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {toolsArr.length > 0 && (
+              <div className="tm-detail-section">
+                <div className="tm-detail-label">tools ({toolsArr.length})</div>
+                <ul className="tm-detail-list">
+                  {toolsArr.map(t => <li key={t} className="tm-detail-list-item">{t}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {dtArr.length > 0 && (
+              <div className="tm-detail-section">
+                <div className="tm-detail-label">disallowed tools</div>
+                <ul className="tm-detail-list">
+                  {dtArr.map(t => <li key={t} className="tm-detail-list-item">{t}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {skillsArr.length > 0 && (
+              <div className="tm-detail-section">
+                <div className="tm-detail-label">skills</div>
+                <ul className="tm-detail-list">
+                  {skillsArr.map(s => <li key={s} className="tm-detail-list-item">{s}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {mcpArr.length > 0 && (
+              <div className="tm-detail-section">
+                <div className="tm-detail-label">MCP servers</div>
+                <ul className="tm-detail-list">
+                  {mcpArr.map(s => <li key={s} className="tm-detail-list-item">{s}</li>)}
+                </ul>
+              </div>
+            )}
+
+            <div className="tm-detail-section">
+              <div className="tm-detail-label">system prompt</div>
+              {config.system_prompt
+                ? <pre className="tm-detail-prompt">{config.system_prompt}</pre>
+                : <div className="tm-detail-value" style={{ color: 'var(--fg-3)' }}>(none)</div>
+              }
+            </div>
+          </div>
+        </div>,
+        document.body,
       );
     }
 
@@ -563,7 +740,7 @@
     }
 
     // --- AgentStreamColumn ---
-    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival }) {
+    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival, onOpenPanel }) {
       const scrollRef = useRef(null);
       const isPinnedRef = useRef(true);
 
@@ -614,9 +791,11 @@
         );
       }
 
+      const isDead = agent.dead === true;
+
       return (
-        <div style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
-          <div className={accentClass}/>
+        <div className={isDead ? "tm-row-dead" : undefined} style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
+          {!isDead && <div className={accentClass}/>}
           <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <AgentAvatar id={agent.id} role={agent.role} size={22}/>
@@ -644,7 +823,7 @@
             </div>
           </div>
 
-          <div style={{
+          {!isDead && <div style={{
             padding: "6px 14px", fontSize: 10.5, color: "var(--fg-2)",
             display: "flex", alignItems: "center", gap: 6,
             borderBottom: "1px solid var(--line-soft)", background: "var(--bg-0)",
@@ -653,12 +832,12 @@
             <span className={`dot ${agent.status}`}/>
             <span style={{ textTransform: "lowercase" }}>{agent.status}</span>
             <span style={{ marginLeft: "auto", flexShrink: 0 }}>{fmtAgo(agent.lastMsg)}</span>
-          </div>
+          </div>}
 
-          {/* F22 D-2/D-10: dedicated tool-chip row, always reserved height (22px).
-              Empty when no in-flight tool and no settle frame, so layout stays
-              stable across rapid Pre/Post pairs (SC-8). */}
-          <div className="tool-chip-row">{chipNode}</div>
+          {agent.config && <ConfigChips config={agent.config} onClick={() => onOpenPanel && onOpenPanel(agent)}/>}
+
+          {/* F22 D-2/D-10: dedicated tool-chip row — hidden for dead teammates. */}
+          {!isDead && <div className="tool-chip-row">{chipNode}</div>}
 
           <div
             ref={scrollRef}
@@ -679,6 +858,7 @@
 
     // --- StreamColumns ---
     function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival }) {
+      const [openPanel, setOpenPanel] = useState(null);
       const byAgent = useMemo(() => {
         const out = {};
         agents.forEach(a => { out[a.id] = []; });
@@ -714,22 +894,32 @@
       }
 
       return (
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${agents.length}, minmax(220px, 1fr))`,
-          minWidth: 0, overflow: "hidden",
-        }}>
-          {agents.map(a => (
-            <AgentStreamColumn
-              key={a.id}
-              agent={a}
-              msgs={byAgent[a.id] || []}
-              agentMap={agentMap}
-              serverNow={cli.now_wallclock}
-              perfAtArrival={perfAtArrival}
+        <>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: `repeat(${agents.length}, minmax(220px, 1fr))`,
+            minWidth: 0, overflow: "hidden",
+          }}>
+            {agents.map(a => (
+              <AgentStreamColumn
+                key={a.id}
+                agent={a}
+                msgs={byAgent[a.id] || []}
+                agentMap={agentMap}
+                serverNow={cli.now_wallclock}
+                perfAtArrival={perfAtArrival}
+                onOpenPanel={(agent) => setOpenPanel(agent)}
+              />
+            ))}
+          </div>
+          {openPanel && openPanel.config && (
+            <ConfigDetailPanel
+              config={openPanel.config}
+              agentRole={openPanel.role}
+              onClose={() => setOpenPanel(null)}
             />
-          ))}
-        </div>
+          )}
+        </>
       );
     }
 

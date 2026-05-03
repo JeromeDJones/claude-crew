@@ -13,12 +13,15 @@ import dataclasses
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import Teammate, ToolEvent
 from claude_crew.transcript import TranscriptSink
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import AgentDefinition
 
 LEAD_ID = "lead"
 
@@ -80,6 +83,10 @@ class LiveTeammateInfo:
     info: TeammateInfo
     status: dict[str, Any]
     model: str | None
+    # Config snapshot taken at spawn time (ui-agent-transparency).
+    # None when no AgentDefinition was resolved for the role; omitted from
+    # the WS payload in that case (key absent, not null).
+    config: "dict[str, Any] | None" = None
 
 
 @dataclass(frozen=True)
@@ -95,12 +102,20 @@ class BrokerSnapshot:
     live: tuple[LiveTeammateInfo, ...]
     log: tuple[Envelope, ...]
     tool_events: "tuple[ToolEvent, ...]" = ()  # F19 D-5: tightened from tuple[Any, ...]
+    # ui-agent-transparency edge case: config snapshots for dead teammates so the
+    # dashboard can render dimmed rows with accessible chips/panel post-kill.
+    # Mapping: teammate_id → config_dict (only entries with non-None config included).
+    dead_configs: "dict[str, dict[str, Any]]" = dataclasses.field(default_factory=dict)
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
 # Teammate. The model kwarg is optional — factories that don't care about
 # model (e.g., stub) accept and ignore it.
 TeammateFactory = Callable[..., Teammate]
+
+# A resolver maps a role string to the resolved AgentDefinition for that role,
+# or None if the role is absent from the merged pack.
+AgentDefResolver = Callable[[str], "AgentDefinition | None"]
 
 
 class Broker:
@@ -113,6 +128,9 @@ class Broker:
         self._log: list[Envelope] = []
         self._seen_ids: set[str] = set()
         self._next_seq: int = 1
+        # Per-teammate config snapshots keyed by teammate_id. Value is None when
+        # no AgentDefinition was resolved for the role at spawn time.
+        self._configs: dict[str, dict[str, Any] | None] = {}
         self._sink = TranscriptSink(crew_id=self.crew_id)
         self._sink.write_lifecycle("started", {})
 
@@ -127,6 +145,7 @@ class Broker:
         effort: str | None = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
+        agent_def_resolver: "AgentDefResolver | None" = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
@@ -146,6 +165,15 @@ class Broker:
             spawned_at=time.time(),
             alive=True,
         )
+
+        # Capture the config snapshot at spawn time.
+        agent_def = agent_def_resolver(role) if agent_def_resolver is not None else None
+        self._configs[teammate_id] = self._snapshot_config(
+            agent_def=agent_def,
+            effort=effort,
+            permission_mode=permission_mode,
+        )
+
         self._sink.write_lifecycle("spawn", {
             "teammate_id": teammate_id,
             "name": resolved_name,
@@ -153,6 +181,78 @@ class Broker:
             "model": model,
         })
         return teammate_id
+
+    def _snapshot_config(
+        self,
+        agent_def: "AgentDefinition | None",
+        effort: str | None,
+        permission_mode: str | None,
+    ) -> "dict[str, Any] | None":
+        """Build a config snapshot dict from a resolved AgentDefinition.
+
+        Returns None when agent_def is None (role absent from merged pack).
+        Tombstoned teammates retain their config until reaped.
+
+        Resolution rules:
+        - effort: spawn-time kwarg override, else AgentDefinition.effort
+        - permission_mode: spawn-time kwarg override, else AgentDefinition.permissionMode
+        - mcp_servers: names only — bare strings pass through; dict entries
+          use their "name" key (falling back to "<unnamed>"). Never serializes
+          any other dict field (that is where API keys live).
+        """
+        if agent_def is None:
+            return None
+
+        # tools: list[str] (may be empty, must not be None)
+        tools_raw = getattr(agent_def, "tools", None)
+        tools = list(tools_raw) if tools_raw is not None else []
+
+        # disallowed_tools: list[str]
+        dt_raw = getattr(agent_def, "disallowedTools", None)
+        disallowed_tools = list(dt_raw) if dt_raw is not None else []
+
+        # skills: list[str] — spec data contract is always list[str].
+        # "all" literal is normalized to ["all"] so downstream consumers always
+        # see a list (len("all") == 3 would be a misleading chip count).
+        skills_raw = getattr(agent_def, "skills", None)
+        if skills_raw is None:
+            skills: list[str] = []
+        elif isinstance(skills_raw, str):
+            skills = [skills_raw]  # "all" literal → single-element list
+        else:
+            skills = list(skills_raw)
+
+        # mcp_servers: names only
+        mcp_raw = getattr(agent_def, "mcpServers", None)
+        if mcp_raw is None:
+            mcp_names: list[str] = []
+        else:
+            mcp_names = []
+            for entry in mcp_raw:
+                if isinstance(entry, str):
+                    mcp_names.append(entry)
+                elif isinstance(entry, dict):
+                    mcp_names.append(entry.get("name", "<unnamed>"))
+
+        # effort: kwarg override OR AgentDefinition.effort
+        resolved_effort = effort if effort is not None else getattr(agent_def, "effort", None)
+
+        # permission_mode: kwarg override OR AgentDefinition.permissionMode
+        resolved_pm = (
+            permission_mode if permission_mode is not None
+            else getattr(agent_def, "permissionMode", None)
+        )
+
+        return {
+            "model": getattr(agent_def, "model", None),
+            "tools": tools,
+            "disallowed_tools": disallowed_tools,
+            "skills": skills,
+            "permission_mode": resolved_pm,
+            "mcp_servers": mcp_names,
+            "system_prompt": getattr(agent_def, "prompt", None),
+            "effort": resolved_effort,
+        }
 
     async def _tombstone_teammate(
         self,
@@ -536,7 +636,11 @@ class Broker:
                     raw = {}
                 status = copy.deepcopy(raw)
             model = getattr(teammate, "_model", None) if teammate is not None else None
-            live_entries.append(LiveTeammateInfo(info=info, status=status, model=model))
+            # Config snapshot taken at spawn time; None when no AgentDef resolved.
+            config = self._configs.get(info.id)
+            live_entries.append(LiveTeammateInfo(
+                info=info, status=status, model=model, config=config,
+            ))
 
         if log_limit is None:
             log_tuple = tuple(self._log)
@@ -561,12 +665,22 @@ class Broker:
                 all_tool_events.extend(info.tool_events_at_death)
         all_tool_events.sort(key=lambda e: e.finished_at_wallclock)
 
+        # ui-agent-transparency: surface config for dead teammates so the dashboard
+        # can render dimmed rows with accessible chips/panel post-kill.
+        dead_configs: dict[str, Any] = {}
+        for info in teammates_tuple:
+            if not info.alive:
+                cfg = self._configs.get(info.id)
+                if cfg is not None:
+                    dead_configs[info.id] = cfg
+
         return BrokerSnapshot(
             crew_id=self.crew_id,
             teammates=teammates_tuple,
             live=tuple(live_entries),
             log=log_tuple,
             tool_events=tuple(all_tool_events),
+            dead_configs=dead_configs,
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
@@ -600,7 +714,7 @@ class Broker:
             # Do NOT call status_snapshot() — the teammate was popped from _teammates.
             # Force current_turn_started_at_wallclock=None (D3 defense-in-depth on top of
             # _end_turn() in the death handler).
-            return {
+            dead_result: dict[str, Any] = {
                 "teammate_id": teammate_id,
                 "name": info.name,
                 "role": info.role,
@@ -628,12 +742,17 @@ class Broker:
                 "total_output_tokens": info.total_output_tokens_at_death if info.total_output_tokens_at_death is not None else 0,
                 "total_cost_usd": info.total_cost_usd_at_death if info.total_cost_usd_at_death is not None else 0.0,
             }
+            # Config snapshot retained from spawn (omit key when no AgentDef resolved).
+            config = self._configs.get(teammate_id)
+            if config is not None:
+                dead_result["config"] = config
+            return dead_result
 
         # Alive: combine TeammateInfo lifecycle fields with live activity snapshot
         teammate = self._teammates.get(teammate_id)
         snap = teammate.status_snapshot() if teammate is not None else {}
 
-        return {
+        alive_result: dict[str, Any] = {
             "teammate_id": teammate_id,
             "name": info.name,
             "role": info.role,
@@ -662,3 +781,8 @@ class Broker:
             "total_output_tokens": snap.get("total_output_tokens", 0),
             "total_cost_usd": snap.get("total_cost_usd", 0.0),
         }
+        # Config snapshot from spawn time (omit key when no AgentDef resolved).
+        config = self._configs.get(teammate_id)
+        if config is not None:
+            alive_result["config"] = config
+        return alive_result

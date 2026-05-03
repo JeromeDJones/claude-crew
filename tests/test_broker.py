@@ -1617,3 +1617,308 @@ class TestF19SnapshotFlatten:
         # Generous bounds — gives headroom for slow CI without making the test useless.
         assert median < 0.005, f"median snapshot construction {median*1000:.2f}ms > 5ms"
         assert p95 < 0.010, f"p95 snapshot construction {p95*1000:.2f}ms > 10ms"
+
+
+# ---------- broker config snapshot (ui-agent-transparency) ----------
+#
+# AT1-5, AT8: verify Broker._snapshot_config, spawn_teammate(agent_def_resolver=...),
+# and get_teammate_status config key presence/absence.
+
+
+import types as _types  # used by _make_agent_def below
+
+
+def _make_agent_def(**kwargs) -> object:
+    """Build a lightweight AgentDefinition stand-in for broker snapshot tests.
+
+    Uses SimpleNamespace so _snapshot_config's getattr calls work without
+    importing the real claude_agent_sdk.types.AgentDefinition.  Fields not
+    supplied default to the natural absent value (None / empty).
+    """
+    defaults = {
+        "model": None,
+        "tools": [],
+        "disallowedTools": None,
+        "skills": None,
+        "permissionMode": None,
+        "mcpServers": None,
+        "prompt": None,
+        "effort": None,
+    }
+    defaults.update(kwargs)
+    return _types.SimpleNamespace(**defaults)
+
+
+class TestConfigSnapshot:
+    """AT1-5, AT8: broker config snapshot via agent_def_resolver."""
+
+    # ---------- AT1 ----------
+
+    async def test_config_block_populated_from_agent_def(self, broker: Broker) -> None:
+        """AT1: tools/skills/permissionMode/disallowed_tools round-trip through status."""
+        agent_def = _make_agent_def(
+            tools=["Bash", "Read"],
+            skills=["sdd-workflow"],
+            permissionMode="bypassPermissions",
+            disallowedTools=["WebFetch"],
+        )
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        status = broker.get_teammate_status(tid)
+
+        assert "config" in status
+        cfg = status["config"]
+        assert cfg["tools"] == ["Bash", "Read"]
+        assert cfg["skills"] == ["sdd-workflow"]
+        assert cfg["permission_mode"] == "bypassPermissions"
+        assert cfg["disallowed_tools"] == ["WebFetch"]
+
+    async def test_permission_mode_kwarg_overrides_agent_def(self, broker: Broker) -> None:
+        """AT1 extension: spawn-time kwarg override takes precedence over AgentDefinition.permissionMode."""
+        agent_def = _make_agent_def(permissionMode="default")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            permission_mode="bypassPermissions",
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["permission_mode"] == "bypassPermissions"
+
+    async def test_effort_kwarg_overrides_agent_def(self, broker: Broker) -> None:
+        """AT1 extension: spawn-time effort kwarg overrides AgentDefinition.effort."""
+        agent_def = _make_agent_def(effort="low")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            effort="high",
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["effort"] == "high"
+
+    async def test_effort_falls_back_to_agent_def_when_no_kwarg(self, broker: Broker) -> None:
+        """AT1 extension: AgentDefinition.effort used when no kwarg override supplied."""
+        agent_def = _make_agent_def(effort="medium")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["effort"] == "medium"
+
+    # ---------- AT2 ----------
+
+    async def test_system_prompt_round_trips_verbatim(self, broker: Broker) -> None:
+        """AT2: full system prompt string is preserved in config.system_prompt."""
+        full_prompt = "You are a specialist.\n\nDo only this task.\n" * 20  # long-ish
+        agent_def = _make_agent_def(prompt=full_prompt)
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["system_prompt"] == full_prompt
+
+    async def test_no_system_prompt_gives_none(self, broker: Broker) -> None:
+        """AT2 edge: pack with no prompt → config.system_prompt is None."""
+        agent_def = _make_agent_def(prompt=None)
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["system_prompt"] is None
+
+    # ---------- AT3 ----------
+
+    async def test_mcp_servers_bare_string_entries_pass_through(self, broker: Broker) -> None:
+        """AT3: bare string MCP server names pass through unchanged."""
+        agent_def = _make_agent_def(mcpServers=["github", "jira"])
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["mcp_servers"] == ["github", "jira"]
+
+    async def test_mcp_servers_dict_entry_name_key_only(self, broker: Broker) -> None:
+        """AT3: dict-form MCP entries expose only the 'name' key; api_key not present."""
+        agent_def = _make_agent_def(
+            mcpServers=[
+                {"name": "my-server", "type": "stdio", "api_key": "s3cr3t", "command": "mcp-my-server"},
+                "plain-server",
+            ]
+        )
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["mcp_servers"] == ["my-server", "plain-server"]
+        # Verify no secret values appear anywhere in the config dict
+        import json
+        cfg_json = json.dumps(cfg)
+        assert "s3cr3t" not in cfg_json
+
+    async def test_mcp_dict_without_name_key_falls_back_to_unnamed(self, broker: Broker) -> None:
+        """AT3: dict-form MCP entry with no 'name' key → '<unnamed>'."""
+        agent_def = _make_agent_def(
+            mcpServers=[{"type": "stdio", "command": "tool", "token": "abc123"}]
+        )
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["mcp_servers"] == ["<unnamed>"]
+        import json
+        assert "abc123" not in json.dumps(cfg)
+
+    # ---------- AT4 ----------
+
+    async def test_empty_tools_list_preserved(self, broker: Broker) -> None:
+        """AT4: tools=[] is present as empty list, not absent or None."""
+        agent_def = _make_agent_def(tools=[])
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert "tools" in cfg
+        assert cfg["tools"] == []
+
+    # ---------- AT5 ----------
+
+    async def test_config_retained_after_kill(self, broker: Broker) -> None:
+        """AT5: tombstoned teammate retains its config snapshot."""
+        agent_def = _make_agent_def(tools=["Bash"], prompt="stay-after-death")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        alive_cfg = broker.get_teammate_status(tid)["config"]
+        assert alive_cfg is not None
+
+        await broker.kill_teammate(tid)
+
+        dead_status = broker.get_teammate_status(tid)
+        assert dead_status["alive"] is False
+        assert "config" in dead_status
+        assert dead_status["config"]["tools"] == ["Bash"]
+        assert dead_status["config"]["system_prompt"] == "stay-after-death"
+
+    # ---------- AT8 ----------
+
+    async def test_config_absent_when_no_agent_def_resolver(self, broker: Broker) -> None:
+        """AT8: no agent_def_resolver → config key absent from get_teammate_status."""
+        tid = await broker.spawn_teammate(
+            role="role_not_in_pack", name=None, factory=_factory,
+            # no agent_def_resolver supplied
+        )
+        status = broker.get_teammate_status(tid)
+        assert "config" not in status
+
+    async def test_config_absent_when_resolver_returns_none(self, broker: Broker) -> None:
+        """AT8: resolver returning None → config key absent (role not in pack)."""
+        resolver = lambda role: None  # noqa: E731  # simulates role_not_in_pack
+
+        tid = await broker.spawn_teammate(
+            role="role_not_in_pack", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        status = broker.get_teammate_status(tid)
+        assert "config" not in status
+
+    async def test_config_absent_for_dead_teammate_when_no_resolver(
+        self, broker: Broker
+    ) -> None:
+        """AT8 + AT5 combined: dead teammate with no resolver has no config key."""
+        tid = await broker.spawn_teammate(
+            role="role_not_in_pack", name=None, factory=_factory,
+        )
+        await broker.kill_teammate(tid)
+        dead_status = broker.get_teammate_status(tid)
+        assert dead_status["alive"] is False
+        assert "config" not in dead_status
+
+    # ---------- _snapshot_config unit tests ----------
+
+    def test_snapshot_config_returns_none_for_none_agent_def(self, broker: Broker) -> None:
+        """_snapshot_config returns None directly when agent_def is None."""
+        result = broker._snapshot_config(
+            agent_def=None, effort=None, permission_mode=None
+        )
+        assert result is None
+
+    def test_snapshot_config_all_fields_present(self, broker: Broker) -> None:
+        """_snapshot_config builds a complete dict with all 8 keys."""
+        agent_def = _make_agent_def(
+            model="claude-sonnet-4-6",
+            tools=["Bash"],
+            disallowedTools=["WebFetch"],
+            skills=["sdd-workflow"],
+            permissionMode="default",
+            mcpServers=["github"],
+            prompt="Be helpful.",
+            effort="medium",
+        )
+        cfg = broker._snapshot_config(
+            agent_def=agent_def, effort=None, permission_mode=None
+        )
+        assert cfg is not None
+        expected_keys = {
+            "model", "tools", "disallowed_tools", "skills",
+            "permission_mode", "mcp_servers", "system_prompt", "effort",
+        }
+        assert set(cfg.keys()) == expected_keys
+
+    def test_skills_all_literal_normalized_to_list(self, broker: Broker) -> None:
+        """MEDIUM-01 regression: skills='all' must produce ['all'], not bare str.
+
+        The spec data contract is list[str]. A bare 'all' string would cause
+        len('all') == 3 in downstream UI chip count, which is wrong.
+        """
+        agent_def = _make_agent_def(skills="all")
+        cfg = broker._snapshot_config(
+            agent_def=agent_def, effort=None, permission_mode=None
+        )
+        assert cfg is not None
+        assert cfg["skills"] == ["all"], (
+            f"Expected ['all'] but got {cfg['skills']!r}; "
+            "'all' literal must be wrapped in a list"
+        )
+
+    async def test_config_skills_all_via_status(self, broker: Broker) -> None:
+        """MEDIUM-01 end-to-end: skills='all' round-trips as ['all'] through get_teammate_status."""
+        agent_def = _make_agent_def(skills="all")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["skills"] == ["all"]

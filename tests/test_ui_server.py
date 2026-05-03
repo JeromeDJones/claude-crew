@@ -1405,3 +1405,288 @@ class TestF22DashboardHtml:
     def test_pulse_keyframe_still_present(self, html):
         """SC-10: do not break existing #19/#8 pulse-animation usage."""
         assert "@keyframes pulse" in html
+
+
+# ── AT6: config block in WS state push (ui-agent-transparency) ───────────────
+
+import types as _types
+
+
+def _make_config_agent_def(**kwargs) -> object:
+    """Lightweight AgentDefinition stand-in for ui_server config tests."""
+    defaults = {
+        "model": None,
+        "tools": [],
+        "disallowedTools": None,
+        "skills": None,
+        "permissionMode": None,
+        "mcpServers": None,
+        "prompt": None,
+        "effort": None,
+    }
+    defaults.update(kwargs)
+    return _types.SimpleNamespace(**defaults)
+
+
+class TestConfigBlockInWsPayload:
+    """AT6: config block round-trips from broker through _build_local_instance.
+
+    These tests drive a stub broker with agents that have (or don't have) a
+    config snapshot and verify both shapes appear correctly in the agents[] list
+    that the WS state push embeds.
+    """
+
+    @pytest.fixture
+    async def broker_two_teammates(self):
+        """Broker with two teammates: one with config, one without."""
+        broker = Broker()
+
+        def _stub(id, name, role, **_kw):
+            from claude_crew.teammate import StubTeammate
+            return StubTeammate(id=id, name=name, role=role)
+
+        # Teammate A: has a resolved AgentDefinition → config present
+        agent_def = _make_config_agent_def(
+            model="claude-sonnet-4-6",
+            tools=["Bash", "Read"],
+            skills=["sdd-workflow"],
+            permissionMode="bypassPermissions",
+            disallowedTools=["WebFetch"],
+            prompt="You are a builder.",
+            effort="medium",
+            mcpServers=["github"],
+        )
+        tid_a = await broker.spawn_teammate(
+            role="builder", name="builder", factory=_stub,
+            agent_def_resolver=lambda role: agent_def,
+        )
+
+        # Teammate B: no resolver → no config
+        tid_b = await broker.spawn_teammate(
+            role="reviewer", name="reviewer", factory=_stub,
+            # no agent_def_resolver
+        )
+
+        yield broker, tid_a, tid_b
+        await broker.shutdown_all()
+
+    async def test_agent_with_config_has_config_key(self, broker_two_teammates):
+        """AT6: agent entry has 'config' key when AgentDef was resolved at spawn."""
+        broker, tid_a, tid_b = broker_two_teammates
+        ui = UIServer(broker, port=0)
+        snap = broker.snapshot(log_limit=200)
+        instance, _ = ui._build_local_instance(snap)
+        agents_by_id = {a["id"]: a for a in instance["agents"]}
+
+        assert "config" in agents_by_id[tid_a], (
+            f"agent {tid_a} should carry 'config'; got keys: {set(agents_by_id[tid_a])}"
+        )
+
+    async def test_agent_without_config_has_no_config_key(self, broker_two_teammates):
+        """AT6: agent entry has NO 'config' key when no AgentDef was resolved."""
+        broker, tid_a, tid_b = broker_two_teammates
+        ui = UIServer(broker, port=0)
+        snap = broker.snapshot(log_limit=200)
+        instance, _ = ui._build_local_instance(snap)
+        agents_by_id = {a["id"]: a for a in instance["agents"]}
+
+        assert "config" not in agents_by_id[tid_b], (
+            f"agent {tid_b} must NOT carry 'config' (no resolver); "
+            f"got keys: {set(agents_by_id[tid_b])}"
+        )
+
+    async def test_config_values_match_agent_def(self, broker_two_teammates):
+        """AT6: config block values match the AgentDefinition supplied to the resolver."""
+        broker, tid_a, _ = broker_two_teammates
+        ui = UIServer(broker, port=0)
+        snap = broker.snapshot(log_limit=200)
+        instance, _ = ui._build_local_instance(snap)
+        agent_a = next(a for a in instance["agents"] if a["id"] == tid_a)
+        cfg = agent_a["config"]
+
+        assert cfg["tools"] == ["Bash", "Read"]
+        assert cfg["skills"] == ["sdd-workflow"]
+        assert cfg["permission_mode"] == "bypassPermissions"
+        assert cfg["disallowed_tools"] == ["WebFetch"]
+        assert cfg["system_prompt"] == "You are a builder."
+        assert cfg["effort"] == "medium"
+        assert cfg["mcp_servers"] == ["github"]
+
+    async def test_ws_frame_carries_config_for_configured_agent(self, broker_two_teammates):
+        """AT6: WS state frame (via _build_state) embeds config in agents list."""
+        broker, tid_a, tid_b = broker_two_teammates
+        ui = UIServer(broker, port=0)
+        state = await ui._build_state()
+        instance = state["instances"][0]
+        agents_by_id = {a["id"]: a for a in instance["agents"]}
+
+        assert "config" in agents_by_id[tid_a]
+        assert "config" not in agents_by_id[tid_b]
+
+    def test_config_not_null_but_absent_when_no_resolver(self):
+        """AT6: 'config' key is absent (not present as null/None) for no-resolver agents.
+
+        This is a unit test on _build_local_instance with a synthetic snapshot.
+        """
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, LiveTeammateInfo, TeammateInfo
+
+        now = _time.time()
+        info = TeammateInfo(id="t-1", name="x", role="r", spawned_at=now, alive=True)
+        live_entry = LiveTeammateInfo(
+            info=info,
+            status={},
+            model=None,
+            config=None,  # explicitly None → key must be absent in output
+        )
+        snap = BrokerSnapshot(
+            crew_id="test",
+            teammates=(info,),
+            live=(live_entry,),
+            log=(),
+        )
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert len(instance["agents"]) == 1
+        assert "config" not in instance["agents"][0]
+
+    def test_config_present_when_live_entry_has_config(self):
+        """AT6: 'config' key is present when LiveTeammateInfo.config is non-None."""
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, LiveTeammateInfo, TeammateInfo
+
+        sample_config = {
+            "model": None,
+            "tools": ["Bash"],
+            "disallowed_tools": [],
+            "skills": [],
+            "permission_mode": None,
+            "mcp_servers": [],
+            "system_prompt": "Hello",
+            "effort": None,
+        }
+        now = _time.time()
+        info = TeammateInfo(id="t-1", name="x", role="r", spawned_at=now, alive=True)
+        live_entry = LiveTeammateInfo(
+            info=info,
+            status={},
+            model=None,
+            config=sample_config,
+        )
+        snap = BrokerSnapshot(
+            crew_id="test",
+            teammates=(info,),
+            live=(live_entry,),
+            log=(),
+        )
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert "config" in instance["agents"][0]
+        assert instance["agents"][0]["config"] == sample_config
+
+
+class TestDeadTeammateWithConfigInWsPayload:
+    """Edge case: dead teammate with retained config appears in agents[] as a dimmed row.
+
+    Spec § Edge Cases line 93: after kill_teammate, the dead row stays in the
+    dashboard with config chips/panel accessible.
+    """
+
+    DEAD_CONFIG = {
+        "model": "claude-sonnet-4-6",
+        "tools": ["Bash", "Read"],
+        "disallowed_tools": [],
+        "skills": ["sdd-workflow"],
+        "permission_mode": "bypassPermissions",
+        "mcp_servers": ["github"],
+        "system_prompt": "Dead agent system prompt.",
+        "effort": "high",
+    }
+
+    def _make_dead_snapshot(self, *, with_config: bool):
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, TeammateInfo
+
+        now = _time.time()
+        info_dead = TeammateInfo(
+            id="t-dead-1", name="ex-builder", role="builder",
+            spawned_at=now - 300, alive=False,
+            died_at_wallclock=now - 10,
+            total_cost_usd_at_death=0.05,
+            total_input_tokens_at_death=1000,
+            total_output_tokens_at_death=500,
+        )
+        dead_configs = {"t-dead-1": self.DEAD_CONFIG} if with_config else {}
+        return BrokerSnapshot(
+            crew_id="crew-dead-test",
+            teammates=(info_dead,),
+            live=(),
+            log=(),
+            dead_configs=dead_configs,
+        )
+
+    def test_dead_with_config_appears_in_agents(self):
+        """Dead teammate with retained config shows up in agents[]."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert len(instance["agents"]) == 1
+
+    def test_dead_agent_has_dead_marker(self):
+        """Dead agent entry carries dead=True."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert instance["agents"][0]["dead"] is True
+
+    def test_dead_agent_has_config_block(self):
+        """Dead agent entry carries the retained config block."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        entry = instance["agents"][0]
+        assert "config" in entry
+        assert entry["config"] == self.DEAD_CONFIG
+
+    def test_dead_agent_status_is_dead(self):
+        """Dead agent entry has status='dead'."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert instance["agents"][0]["status"] == "dead"
+
+    def test_dead_agent_empty_tools(self):
+        """Dead agent entry has empty tools (no in-flight activity)."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        entry = instance["agents"][0]
+        assert entry["tools"] == []
+        assert entry["in_flight_count"] == 0
+        assert entry["oldest_in_flight"] is None
+
+    def test_dead_without_config_excluded_from_agents(self):
+        """Dead teammate WITHOUT retained config stays excluded (existing behavior)."""
+        snap = self._make_dead_snapshot(with_config=False)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        assert len(instance["agents"]) == 0
+
+    def test_dead_agent_cost_preserved(self):
+        """Dead agent entry carries cost/token data from the tombstone."""
+        snap = self._make_dead_snapshot(with_config=True)
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+        entry = instance["agents"][0]
+        assert entry["cost"] == 0.05
+        assert entry["tokens"]["in"] == 1000
+        assert entry["tokens"]["out"] == 500
