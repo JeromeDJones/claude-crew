@@ -92,6 +92,8 @@ def make_server(
         effort: str | None = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
+        extra_tools: list[str] | None = None,
+        extra_skills: list[str] | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
@@ -120,15 +122,27 @@ def make_server(
                 "default", "acceptEdits", "plan", "bypassPermissions",
                 "dontAsk", "auto". Overrides the role's pack-declared
                 permissionMode when provided.
+            extra_tools: Optional list of additional tool IDs to grant beyond
+                the pack's declared tools. Additive only — pack tools are
+                never removed. "Task" is explicitly disallowed.
+            extra_skills: Optional list of additional skill names to grant
+                beyond the pack's declared skills. Additive only.
         """
         if permission_mode is not None and permission_mode not in _VALID_PERMISSION_MODES:
             raise ToolError(
                 f"permission_mode {permission_mode!r} is not a valid PermissionMode; "
                 f"accepted: {sorted(_VALID_PERMISSION_MODES)}"
             )
+        # Guard: Task cannot be granted at spawn time (leaf-node invariant)
+        if "Task" in (extra_tools or []):
+            raise ToolError(
+                "Task tool cannot be granted at spawn time — "
+                "claude-crew teammates are leaf nodes by design."
+            )
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
+            extra_tools=extra_tools, extra_skills=extra_skills,
         )
         info = next(t for t in broker.list_crew() if t.id == tid)
         return {"teammate_id": info.id, "name": info.name, "role": info.role}

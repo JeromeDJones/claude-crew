@@ -1892,6 +1892,7 @@ class TestConfigSnapshot:
         expected_keys = {
             "model", "tools", "disallowed_tools", "skills",
             "permission_mode", "mcp_servers", "system_prompt", "effort",
+            "extra_tools", "extra_skills",
         }
         assert set(cfg.keys()) == expected_keys
 
@@ -1964,3 +1965,128 @@ class TestConfigSnapshot:
         )
         cfg = broker.get_teammate_status(tid)["config"]
         assert cfg["tools"] == ["Read", "Write"]
+
+
+# ---------- Extra tools / skills (AT-1, AT-2, AT-4, AT-5, AT-6) ----------
+
+
+class TestExtraToolsAndSkills:
+    """Acceptance tests for spawn-time extra_tools and extra_skills.
+
+    AT-1: additive merge + snapshot
+    AT-2: dedup (extra already in pack → not doubled, not in net-new)
+    AT-4: skills additive merge
+    AT-5: backward compat (no extras → identical behavior)
+    AT-6: no pack entry + extras → config block returned (not null)
+    """
+
+    async def test_extra_tools_are_additive(self, broker: Broker) -> None:
+        """AT-1: pack tools + extra_tools → merged effective list; net-new in extra_tools."""
+        agent_def = _make_agent_def(tools=["Read", "Grep"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_tools=["mcp__knowledge-graph__repo_map"],
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"] == ["Read", "Grep", "mcp__knowledge-graph__repo_map"], (
+            "effective tools must be insertion-order union of pack + extras"
+        )
+        assert cfg["extra_tools"] == ["mcp__knowledge-graph__repo_map"], (
+            "net-new extra_tools must be the tools not already in the pack"
+        )
+
+    async def test_extra_tools_dedup_already_in_pack(self, broker: Broker) -> None:
+        """AT-2: extra tool already in pack → no duplicate in effective list; empty net-new."""
+        agent_def = _make_agent_def(tools=["Read", "Grep"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_tools=["Read"],
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"] == ["Read", "Grep"], (
+            "Read was already in pack — no duplicate in effective list"
+        )
+        assert cfg["extra_tools"] == [], (
+            "Read was already in pack; net-new extra_tools must be empty"
+        )
+
+    async def test_extra_skills_are_additive(self, broker: Broker) -> None:
+        """AT-4: pack skills + extra_skills → merged effective list; net-new in extra_skills."""
+        agent_def = _make_agent_def(tools=["Read"], skills=["sdd-workflow"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_skills=["repo-reactor:plan-feature"],
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert "sdd-workflow" in cfg["skills"]
+        assert "repo-reactor:plan-feature" in cfg["skills"]
+        assert cfg["extra_skills"] == ["repo-reactor:plan-feature"], (
+            "net-new extra_skills must contain the new skill"
+        )
+
+    async def test_no_extras_backward_compatible(self, broker: Broker) -> None:
+        """AT-5: extra_tools=None, extra_skills=None → same behavior as pre-feature spawn."""
+        agent_def = _make_agent_def(tools=["Read", "Grep"], skills=["sdd-workflow"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_tools=None,
+            extra_skills=None,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"] == ["Read", "Grep"]
+        assert cfg["skills"] == ["sdd-workflow"]
+        assert cfg["extra_tools"] == []
+        assert cfg["extra_skills"] == []
+
+    async def test_empty_list_extras_backward_compatible(self, broker: Broker) -> None:
+        """AT-5 variant: extra_tools=[], extra_skills=[] → same behavior as None."""
+        agent_def = _make_agent_def(tools=["Read"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_tools=[],
+            extra_skills=[],
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"] == ["Read"]
+        assert cfg["extra_tools"] == []
+        assert cfg["extra_skills"] == []
+
+    async def test_no_pack_entry_with_extras_returns_config(self, broker: Broker) -> None:
+        """AT-6: role not in pack + extra_tools → config block returned (not null)."""
+        tid = await broker.spawn_teammate(
+            role="unknown-role", name=None, factory=_factory,
+            # No agent_def_resolver → broker gets no pack entry for this role
+            extra_tools=["Read", "Grep"],
+        )
+        status = broker.get_teammate_status(tid)
+        assert "config" in status, (
+            "config block must be present even when role has no pack entry, "
+            "as long as extras are provided"
+        )
+        cfg = status["config"]
+        assert cfg["tools"] == ["Read", "Grep"], (
+            "tools must equal the provided extras when there is no pack baseline"
+        )
+
+    async def test_extra_tools_duplicate_in_request_deduped(self, broker: Broker) -> None:
+        """Edge case: duplicate entries in extra_tools → deduped in effective list."""
+        agent_def = _make_agent_def(tools=["Bash"])
+
+        tid = await broker.spawn_teammate(
+            role="planner", name=None, factory=_factory,
+            agent_def_resolver=lambda role: agent_def,
+            extra_tools=["Read", "Read"],
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"].count("Read") == 1, "duplicate in extra_tools must be deduped"
+        assert cfg["extra_tools"].count("Read") == 1
