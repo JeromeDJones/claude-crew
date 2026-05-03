@@ -88,5 +88,10 @@ def default_factory() -> TeammateFactory:
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]
+        # Expose the merged pack to the broker so it can snapshot each
+        # teammate's resolved AgentDefinition at spawn time. Without this,
+        # production teammates have no `config` block and dashboard chips
+        # render empty.
+        factory.agent_def_resolver = lambda role: merged_pack.get(role)  # type: ignore[attr-defined]
         return factory
     return stub_factory

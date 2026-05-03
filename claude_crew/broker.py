@@ -166,7 +166,12 @@ class Broker:
             alive=True,
         )
 
-        # Capture the config snapshot at spawn time.
+        # Capture the config snapshot at spawn time. If the caller did not
+        # pass an explicit resolver, fall back to one attached to the factory
+        # (production path: factories.default_factory exposes the merged pack
+        # via the factory.agent_def_resolver attribute).
+        if agent_def_resolver is None:
+            agent_def_resolver = getattr(factory, "agent_def_resolver", None)
         agent_def = agent_def_resolver(role) if agent_def_resolver is not None else None
         self._configs[teammate_id] = self._snapshot_config(
             agent_def=agent_def,

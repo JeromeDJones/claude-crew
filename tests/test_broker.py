@@ -1922,3 +1922,45 @@ class TestConfigSnapshot:
         )
         cfg = broker.get_teammate_status(tid)["config"]
         assert cfg["skills"] == ["all"]
+
+    async def test_factory_attached_resolver_is_used_when_arg_omitted(
+        self, broker: Broker
+    ) -> None:
+        """Production wiring path: if the caller does not pass agent_def_resolver,
+        the broker falls back to factory.agent_def_resolver. Without this,
+        production teammates spawned through default_factory get no `config`
+        block and dashboard chips render empty.
+        """
+        agent_def = _make_agent_def(tools=["Bash", "Read"], skills=["sdd"])
+
+        def factory_with_resolver(id, name, role, **kwargs):
+            return _factory(id, name, role, **kwargs)
+
+        factory_with_resolver.agent_def_resolver = lambda role: agent_def
+
+        tid = await broker.spawn_teammate(
+            role="scout", name=None, factory=factory_with_resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg is not None, "config must be populated via factory-attached resolver"
+        assert cfg["tools"] == ["Bash", "Read"]
+        assert cfg["skills"] == ["sdd"]
+
+    async def test_explicit_resolver_overrides_factory_attached(
+        self, broker: Broker
+    ) -> None:
+        """Explicit-arg resolver takes precedence over factory-attached resolver."""
+        factory_def = _make_agent_def(tools=["Bash"])
+        explicit_def = _make_agent_def(tools=["Read", "Write"])
+
+        def factory_with_resolver(id, name, role, **kwargs):
+            return _factory(id, name, role, **kwargs)
+
+        factory_with_resolver.agent_def_resolver = lambda role: factory_def
+
+        tid = await broker.spawn_teammate(
+            role="scout", name=None, factory=factory_with_resolver,
+            agent_def_resolver=lambda role: explicit_def,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["tools"] == ["Read", "Write"]

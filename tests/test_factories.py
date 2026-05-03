@@ -400,3 +400,47 @@ class TestMakeServerAuthGate:
 
         with pytest.raises(SystemExit):
             make_server(factory=custom_factory)
+
+
+class TestDefaultFactoryAgentDefResolver:
+    """default_factory must expose the merged pack to the broker via
+    `factory.agent_def_resolver`. Without this the broker has no AgentDefinition
+    to snapshot at spawn time and the per-teammate `config` block is empty —
+    breaking dashboard chips and the click-to-open detail panel.
+    """
+
+    def test_default_factory_attaches_agent_def_resolver(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        from textwrap import dedent
+
+        home = tmp_path / "home"
+        agents_dir = home / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "scout.md").write_text(dedent("""\
+            ---
+            description: Test scout.
+            model: haiku
+            tools: [Read, Grep]
+            ---
+
+            You are a scout.
+            """))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = factories.default_factory()
+
+        assert hasattr(f, "agent_def_resolver"), (
+            "default_factory must attach agent_def_resolver so the broker "
+            "can snapshot config at spawn time"
+        )
+        resolver = f.agent_def_resolver
+
+        scout_def = resolver("scout")
+        assert scout_def is not None
+        assert getattr(scout_def, "tools", None) == ["Read", "Grep"]
+        assert resolver("definitely-not-a-real-role") is None
