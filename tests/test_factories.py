@@ -444,3 +444,183 @@ class TestDefaultFactoryAgentDefResolver:
         assert scout_def is not None
         assert getattr(scout_def, "tools", None) == ["Read", "Grep"]
         assert resolver("definitely-not-a-real-role") is None
+
+
+# ---------- Extra tools — factory does not mutate merged_pack (AT-10, AT-16) ----------
+
+
+class TestExtraToolsFactoryClosure:
+    """AT-10 (sequential) and AT-16 (concurrent): factory closure must not mutate
+    the original merged_pack when extra_tools / extra_skills are provided."""
+
+    def _hermetic_setup(self, monkeypatch, tmp_path):
+        """Set up a hermetic sdk factory with a known merged pack."""
+        from textwrap import dedent
+
+        home = tmp_path / "home"
+        agents_dir = home / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "planner.md").write_text(dedent("""\
+            ---
+            description: Test planner.
+            tools: [Read, Grep]
+            ---
+
+            You are a planner.
+            """))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+    def test_factory_does_not_mutate_merged_pack_sequential(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """AT-10: two sequential spawns with different extras; original pack unchanged.
+
+        Uses mock_build_merged_pack so pack baseline is known and extras are
+        distinct from pack contents.  Pack has only ["Bash"].
+        """
+        import copy
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.factories import default_factory
+
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        planner_def = AgentDefinition(
+            description="test planner",
+            prompt="You plan.",
+            tools=["Bash"],
+        )
+
+        def mock_build_merged_pack():
+            return {"planner": planner_def}, {"planner": []}, {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        # Capture the agents dict passed to sdk_factory
+        captured_agents: list[dict] = []
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            agents = kwargs.get("agents", {})
+            captured_agents.append(copy.deepcopy(agents))
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+
+        f = default_factory()
+        original_tools = list(f.agent_def_resolver("planner").tools or [])
+
+        # First spawn with extra_tools=["Write"]
+        f("t-1", "n", "planner", extra_tools=["Write"])
+        # Second spawn with extra_tools=["WebFetch"]
+        f("t-2", "n", "planner", extra_tools=["WebFetch"])
+
+        # Original pack must be unchanged
+        post_spawn_tools = list(f.agent_def_resolver("planner").tools or [])
+        assert post_spawn_tools == original_tools, (
+            f"merged_pack[planner].tools was mutated: before={original_tools}, "
+            f"after={post_spawn_tools}"
+        )
+
+        # First spawn: Bash (from pack) + Write (extra); no WebFetch
+        assert "Bash" in captured_agents[0]["planner"].tools
+        assert "Write" in captured_agents[0]["planner"].tools
+        assert "WebFetch" not in captured_agents[0]["planner"].tools
+        # Second spawn: Bash (from pack) + WebFetch (extra); no Write
+        assert "Bash" in captured_agents[1]["planner"].tools
+        assert "WebFetch" in captured_agents[1]["planner"].tools
+        assert "Write" not in captured_agents[1]["planner"].tools
+
+    async def test_factory_does_not_mutate_merged_pack_concurrent(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """AT-16: two concurrent spawns via asyncio.gather; each sees only its own extras.
+
+        Uses mock_build_merged_pack so the pack baseline is known and extras
+        are distinct from what's already in the pack.  Pack has only ["Bash"];
+        t1 gets extra_tools=["Write"], t2 gets extra_tools=["WebFetch"].
+        After gather: t1 must have ["Bash","Write"] only; t2 must have
+        ["Bash","WebFetch"] only; original pack must still be ["Bash"].
+        """
+        import asyncio
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.broker import Broker
+        from claude_crew.factories import default_factory
+
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        # Inject a controlled merged pack — planner has only ["Bash"]
+        planner_def = AgentDefinition(
+            description="test planner",
+            prompt="You plan.",
+            tools=["Bash"],
+        )
+
+        def mock_build_merged_pack():
+            return {"planner": planner_def}, {"planner": []}, {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        # Capture the agents dict passed to sdk_factory on each call
+        captured: dict[str, list[str]] = {}
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            agents = kwargs.get("agents", {})
+            agent_def = agents.get(role)
+            captured[id] = list(getattr(agent_def, "tools", None) or [])
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        capturing_sdk_factory.requires_auth = True
+
+        f = default_factory()
+        original_tools = list(f.agent_def_resolver("planner").tools or [])
+
+        b = Broker()
+        try:
+            t1_id, t2_id = await asyncio.gather(
+                b.spawn_teammate(
+                    role="planner", name="p1", factory=f, extra_tools=["Write"]
+                ),
+                b.spawn_teammate(
+                    role="planner", name="p2", factory=f, extra_tools=["WebFetch"]
+                ),
+            )
+
+            # Original pack must be unchanged
+            post_tools = list(f.agent_def_resolver("planner").tools or [])
+            assert post_tools == original_tools, (
+                f"merged_pack mutated after concurrent spawns: {original_tools} → {post_tools}"
+            )
+
+            # t1 must have only Bash + Write (not WebFetch from t2)
+            assert "Bash" in captured[t1_id], f"t1 must inherit pack Bash; got {captured[t1_id]}"
+            assert "Write" in captured[t1_id], f"t1 must have Write; got {captured[t1_id]}"
+            assert "WebFetch" not in captured[t1_id], (
+                f"t1 must NOT have WebFetch (t2's extra); got {captured[t1_id]}"
+            )
+
+            # t2 must have only Bash + WebFetch (not Write from t1)
+            assert "Bash" in captured[t2_id], f"t2 must inherit pack Bash; got {captured[t2_id]}"
+            assert "WebFetch" in captured[t2_id], f"t2 must have WebFetch; got {captured[t2_id]}"
+            assert "Write" not in captured[t2_id], (
+                f"t2 must NOT have Write (t1's extra); got {captured[t2_id]}"
+            )
+        finally:
+            await b.shutdown_all()

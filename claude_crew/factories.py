@@ -7,10 +7,13 @@ decide whether to invoke `validate_auth_or_exit()` at startup.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from claude_crew.broker import TeammateFactory
 from claude_crew.teammate import StubTeammate, Teammate
+
+logger = logging.getLogger(__name__)
 
 
 def stub_factory(
@@ -18,8 +21,11 @@ def stub_factory(
     *, model: str | None = None, effort: str | None = None,
     cwd: str | None = None, permission_mode: str | None = None,
     setting_sources: list[str] | None = None,
+    extra_tools: list[str] | None = None,
+    extra_skills: list[str] | None = None,
 ) -> Teammate:
-    # Stub ignores model/effort/cwd/permission_mode/setting_sources — kept for signature uniformity with sdk_factory.
+    # Stub ignores model/effort/cwd/permission_mode/setting_sources/extra_tools/extra_skills
+    # — kept for signature uniformity with sdk_factory.
     return StubTeammate(id=id, name=name, role=role)
 
 
@@ -71,7 +77,13 @@ def default_factory() -> TeammateFactory:
     """
     mode = os.environ.get("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
     if mode == "sdk":
-        from claude_crew.subagents._user_loader import build_merged_pack
+        import dataclasses
+
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.subagents._user_loader import (
+            _discover_skill_names,
+            build_merged_pack,
+        )
 
         merged_pack, role_ss, merged_bodies = build_merged_pack()
 
@@ -79,9 +91,58 @@ def default_factory() -> TeammateFactory:
             id: str, name: str, role: str,
             *, model: str | None = None, effort: str | None = None,
             cwd: str | None = None, permission_mode: str | None = None,
+            extra_tools: list[str] | None = None,
+            extra_skills: list[str] | None = None,
         ) -> Teammate:
+            # Warn about unknown extra skills at spawn time.
+            if extra_skills:
+                discovered = _discover_skill_names()
+                for skill in extra_skills:
+                    if skill not in discovered:
+                        logger.warning(
+                            "extra_skills: skill %r not found in any skill directory "
+                            "— SDK will reject it at spawn if truly absent",
+                            skill,
+                        )
+
+            if extra_tools or extra_skills:
+                # Per-spawn patched agents dict — original merged_pack must not be mutated.
+                agent_def = merged_pack.get(role)
+                if agent_def is not None:
+                    pack_tools = agent_def.tools or []
+                    pack_skills = agent_def.skills
+                    # skills may be "all" literal or a list; only merge when it's a list
+                    if isinstance(pack_skills, str):
+                        # "all" literal — keep as-is, just append extras without duplication
+                        effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
+                        patched_def = dataclasses.replace(
+                            agent_def,
+                            tools=effective_tools,
+                        )
+                    else:
+                        pack_skills_list = pack_skills or []
+                        effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
+                        effective_skills = list(dict.fromkeys(pack_skills_list + (extra_skills or [])))
+                        patched_def = dataclasses.replace(
+                            agent_def,
+                            tools=effective_tools,
+                            skills=effective_skills,
+                        )
+                else:
+                    # Role not in pack — create a synthetic AgentDefinition for extras only.
+                    patched_def = AgentDefinition(
+                        description="",
+                        prompt="",
+                        tools=list(dict.fromkeys(extra_tools or [])),
+                        skills=list(dict.fromkeys(extra_skills or [])) or None,
+                    )
+                # Fresh dict per spawn — no shared mutable reference
+                effective_agents = {**merged_pack, role: patched_def}
+            else:
+                effective_agents = merged_pack
+
             return sdk_factory(
-                id, name, role, model=model, effort=effort, agents=merged_pack,
+                id, name, role, model=model, effort=effort, agents=effective_agents,
                 pack_bodies=merged_bodies,
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),

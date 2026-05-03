@@ -117,6 +117,81 @@ DEAD_CONFIG = {
     "effort": "medium",
 }
 
+EXTRAS_CONFIG = {
+    "tools": ["Read", "Grep", "mcp__knowledge-graph__repo_map"],
+    "extra_tools": ["mcp__knowledge-graph__repo_map"],
+    "extra_skills": [],
+    "skills": [],
+    "permission_mode": "default",
+    "disallowed_tools": [],
+    "mcp_servers": [],
+    "system_prompt": "You are a planner agent with extras for testing.",
+    "model": "claude-sonnet-4-6",
+    "effort": "medium",
+}
+
+
+@pytest.fixture(scope="module")
+def extras_broker():
+    """Broker with one teammate whose config includes extra_tools."""
+    broker = Broker()
+    tid = f"t-extras-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=tid, name="planner", role="rr-planner")
+    broker._teammates[tid] = tm
+    broker._inboxes[tid] = asyncio.Queue()
+    broker._info[tid] = TeammateInfo(
+        id=tid,
+        name="planner",
+        role="rr-planner",
+        spawned_at=time.time(),
+        alive=True,
+    )
+    broker._configs[tid] = EXTRAS_CONFIG
+    yield broker, tid
+
+
+@pytest.fixture(scope="module")
+def extras_server_url(extras_broker):
+    """Start UIServer backed by an extras-config broker; yield base URL."""
+    broker, _ = extras_broker
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (extras-broker) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    t.join(timeout=3)
+
 
 @pytest.fixture(scope="module")
 def dead_broker():
@@ -286,4 +361,64 @@ def test_dead_teammate_row_renders_dimmed_with_chips(dead_server_url, page):
     prompt_pre.wait_for(state="visible", timeout=3000)
     assert DEAD_CONFIG["system_prompt"] in prompt_pre.inner_text(), (
         f"Expected dead agent's system_prompt in panel; got: {prompt_pre.inner_text()[:200]}"
+    )
+
+
+@pytest.mark.dashboard
+def test_extras_chip_renders_with_correct_class(extras_server_url, page):
+    """AT-11: ConfigChips renders a '+N extras' chip with CSS class tm-config-chip-extra.
+
+    When config.extra_tools is non-empty, a chip with text matching /+N extra(s)/
+    must appear alongside the standard tools chip. The extras chip must carry
+    CSS class tm-config-chip-extra (visually distinct from tm-config-chip).
+    Pre-feature snapshots without extra_tools must not show an extras chip.
+    """
+    page.goto(extras_server_url)
+    # Wait for chips to appear (WS data received + React rendered)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+
+    # Assert an extras chip is present
+    extras_chips = page.locator(".tm-config-chip-extra").all()
+    assert len(extras_chips) == 1, (
+        f"Expected exactly 1 extras chip; got {len(extras_chips)}"
+    )
+
+    # Assert chip text matches "+1 extra"
+    chip_text = extras_chips[0].inner_text()
+    assert "+1 extra" in chip_text, (
+        f"Expected chip text to contain '+1 extra'; got: {chip_text!r}"
+    )
+
+    # Assert the extras chip also carries the base tm-config-chip class
+    # (it should have both: tm-config-chip tm-config-chip-extra)
+    chip_classes = extras_chips[0].get_attribute("class") or ""
+    assert "tm-config-chip" in chip_classes, (
+        f"Expected extras chip to have tm-config-chip class; classes: {chip_classes!r}"
+    )
+    assert "tm-config-chip-extra" in chip_classes, (
+        f"Expected extras chip to have tm-config-chip-extra class; classes: {chip_classes!r}"
+    )
+
+    # Assert regular tools chip is also present (backward compat: both chips coexist)
+    all_chips = page.locator(".tm-config-chip").all()
+    chip_texts = [c.inner_text() for c in all_chips]
+    assert any("tools" in t for t in chip_texts), (
+        f"Expected a 'tools' chip alongside the extras chip; got: {chip_texts}"
+    )
+
+
+@pytest.mark.dashboard
+def test_no_extras_chip_when_extra_tools_absent(live_server_url, page):
+    """AT-11 backward compat: no extras chip when config lacks extra_tools field.
+
+    Pre-feature snapshots (KNOWN_CONFIG has no extra_tools) must render
+    identically to pre-feature behavior — no tm-config-chip-extra chip.
+    """
+    page.goto(live_server_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+
+    extras_chips = page.locator(".tm-config-chip-extra").all()
+    assert len(extras_chips) == 0, (
+        f"Expected no extras chip for pre-feature config; got {len(extras_chips)}: "
+        f"{[c.inner_text() for c in extras_chips]}"
     )

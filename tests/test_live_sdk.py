@@ -3,6 +3,8 @@
 These tests cost real money and require working Claude credentials.
 SC-4 (UUID recall over 10+ turns) and the SC-5 spike (CLAUDE.md
 loading via setting_sources) live here.
+
+AT-12: extra_tools merge reaches SDK subprocess (knowledge-graph probe).
 """
 
 from __future__ import annotations
@@ -16,12 +18,18 @@ import pytest
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.factories import sdk_factory
+from claude_crew.subagents._user_loader import _load_user_mcp_server_names
 
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CLAUDE_CREW_LIVE_TESTS") != "1",
     reason="live API gated; set CLAUDE_CREW_LIVE_TESTS=1 to run",
 )
+
+
+def _has_kg_server() -> bool:
+    """True if the knowledge-graph MCP server is registered in ~/.claude.json."""
+    return "knowledge-graph" in _load_user_mcp_server_names()
 
 
 async def _wait_for_lead(broker: Broker, count: int, timeout: float = 90.0) -> None:
@@ -310,3 +318,69 @@ class TestPermissionModeAndCwdLive:
         assert "probe" in ctrl_probe_content, (
             f"probe.txt should contain 'probe'; got: {ctrl_probe_content!r}"
         )
+
+
+@pytest.mark.skipif(
+    not _has_kg_server(),
+    reason=(
+        "knowledge-graph MCP server not registered in ~/.claude.json — "
+        "skipping live extra_tools subprocess probe"
+    ),
+)
+class TestExtraToolsReachSdkSubprocess:
+    """AT-12: extra_tools merge reaches the SDK subprocess.
+
+    Proves that granting mcp__knowledge-graph__repo_map via extra_tools
+    makes the tool accessible inside the spawned teammate session — the
+    merge must reach the SDK CLI arguments, not just the broker snapshot.
+
+    Gated by: CLAUDE_CREW_LIVE_TESTS=1 AND knowledge-graph in ~/.claude.json.
+    """
+
+    async def test_extra_tools_reach_sdk_subprocess(self, broker: Broker) -> None:
+        from claude_crew.factories import default_factory
+
+        factory = default_factory()
+        tid = await broker.spawn_teammate(
+            role="rr-planner",
+            name=None,
+            factory=factory,
+            extra_tools=["mcp__knowledge-graph__repo_map"],
+        )
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload=(
+                "Use the mcp__knowledge-graph__repo_map tool to give me a brief "
+                "repo map of the current project. Call the tool and report the "
+                "first 3 entries you receive back."
+            ),
+        ))
+        await _wait_for_lead(broker, 1, timeout=120.0)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        result = msgs[-1]
+        text = (
+            result.payload.get("text", "") if isinstance(result.payload, dict)
+            else str(result.payload)
+        )
+
+        assert text.strip(), f"empty response from rr-planner: {result.payload!r}"
+
+        # The tool must be accessible — response must NOT contain tool-unavailable phrases.
+        unavailable_phrases = [
+            "tool not available",
+            "don't have access to",
+            "do not have access to",
+            "no tool named",
+            "cannot use that tool",
+            "can't use that tool",
+            "unable to use",
+            "tool is not",
+        ]
+        lower_text = text.lower()
+        for phrase in unavailable_phrases:
+            assert phrase not in lower_text, (
+                f"extra_tools merge appears to have NOT reached the SDK subprocess; "
+                f"tool-unavailable phrase {phrase!r} found in response: {text!r}"
+            )

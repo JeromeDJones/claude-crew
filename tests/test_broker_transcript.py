@@ -45,32 +45,32 @@ async def _wait_for_lead(broker: Broker, count: int, timeout: float = 1.0):
 
 
 class TestCrewIdAndFile:
-    def test_broker_allocates_crew_id_at_init(self, enable_transcripts) -> None:
+    async def test_broker_allocates_crew_id_at_init(self, enable_transcripts) -> None:
         b = Broker()
         try:
             assert isinstance(b.crew_id, str)
             assert len(b.crew_id) == 8
             assert all(c in "0123456789abcdef" for c in b.crew_id)
         finally:
-            asyncio.run(b.shutdown_all())
+            await b.shutdown_all()
 
-    def test_two_brokers_get_distinct_crew_ids(self, enable_transcripts) -> None:
+    async def test_two_brokers_get_distinct_crew_ids(self, enable_transcripts) -> None:
         a = Broker()
         b = Broker()
         try:
             assert a.crew_id != b.crew_id
         finally:
-            asyncio.run(a.shutdown_all())
-            asyncio.run(b.shutdown_all())
+            await a.shutdown_all()
+            await b.shutdown_all()
 
-    def test_transcript_file_appears_at_init(self, enable_transcripts) -> None:
+    async def test_transcript_file_appears_at_init(self, enable_transcripts) -> None:
         b = Broker()
         try:
             files = list(enable_transcripts.iterdir())
             assert len(files) == 1
             assert b.crew_id in files[0].name
         finally:
-            asyncio.run(b.shutdown_all())
+            await b.shutdown_all()
 
 
 # ---------- lifecycle events ----------
@@ -226,5 +226,60 @@ class TestDisabledMode:
             ))
             await _wait_for_lead(b, 1)
             assert list(tmp_path.iterdir()) == []
+        finally:
+            await b.shutdown_all()
+
+
+# ---------- extra_tools / extra_skills in transcript (AT-9) ----------
+
+
+class TestSpawnTranscriptExtras:
+    """AT-9: spawn lifecycle record always includes extra_tools/extra_skills."""
+
+    async def test_transcript_spawn_record_includes_extra_fields(
+        self, enable_transcripts,
+    ) -> None:
+        """AT-9: spawn with extra_tools → transcript record has extra_tools/extra_skills."""
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(
+                role="planner", name="alice",
+                factory=_stub_factory,
+                extra_tools=["Grep"],
+            )
+            files = list(enable_transcripts.iterdir())
+            lines = _read_lines(files[0])
+            spawns = [l for l in lines if l.get("event") == "spawn"]
+            assert len(spawns) == 1
+            spawn = spawns[0]
+            assert spawn["teammate_id"] == tid
+            assert "extra_tools" in spawn, "spawn record must always include extra_tools"
+            assert "extra_skills" in spawn, "spawn record must always include extra_skills"
+            assert spawn["extra_tools"] == ["Grep"]
+            assert spawn["extra_skills"] == []
+        finally:
+            await b.shutdown_all()
+
+    async def test_transcript_spawn_record_extras_empty_when_none(
+        self, enable_transcripts,
+    ) -> None:
+        """AT-9 variant: spawn without extras → extra_tools=[] and extra_skills=[] always present."""
+        b = Broker()
+        try:
+            tid = await b.spawn_teammate(
+                role="scout", name=None,
+                factory=_stub_factory,
+            )
+            files = list(enable_transcripts.iterdir())
+            lines = _read_lines(files[0])
+            spawns = [l for l in lines if l.get("event") == "spawn"]
+            assert len(spawns) == 1
+            spawn = spawns[0]
+            assert spawn.get("extra_tools") == [], (
+                "extra_tools must be [] when no extras provided (not absent)"
+            )
+            assert spawn.get("extra_skills") == [], (
+                "extra_skills must be [] when no extras provided (not absent)"
+            )
         finally:
             await b.shutdown_all()

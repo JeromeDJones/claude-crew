@@ -171,6 +171,12 @@
       font-size: 10px; color: var(--fg-2);
       white-space: nowrap;
     }
+    /* lead-extends-teammate-tools-and-skills: visually distinct extras chip */
+    .tm-config-chip-extra {
+      background: oklch(0.62 0.15 75 / 0.12);
+      border-color: oklch(0.62 0.15 75 / 0.40);
+      color: oklch(0.40 0.12 75);
+    }
     /* detail panel backdrop + panel */
     .tm-detail-backdrop {
       position: fixed; inset: 0; z-index: 1000;
@@ -396,6 +402,9 @@
       if (!config) return null;
       const chips = [];
       chips.push({ key: 'tools', text: `${(config.tools || []).length} tools` });
+      // lead-extends-teammate-tools-and-skills: show "+N extras" chip for lead-extended tools
+      const extrasArr = config.extra_tools || [];
+      if (extrasArr.length > 0) chips.push({ key: 'extras', text: `+${extrasArr.length} extra${extrasArr.length === 1 ? '' : 's'}`, extra: true });
       const skillsArr = Array.isArray(config.skills) ? config.skills : (config.skills ? [config.skills] : []);
       if (skillsArr.length > 0) chips.push({ key: 'skills', text: `${skillsArr.length} skills` });
       if (config.permission_mode) chips.push({ key: 'perm', text: config.permission_mode });
@@ -405,7 +414,7 @@
       return (
         <div className="tm-config-chips" onClick={onClick} title="Click to view full config">
           {chips.map(c => (
-            <span key={c.key} className="tm-config-chip">{c.text}</span>
+            <span key={c.key} className={c.extra ? "tm-config-chip tm-config-chip-extra" : "tm-config-chip"}>{c.text}</span>
           ))}
         </div>
       );
@@ -423,6 +432,9 @@
       const toolsArr = config.tools || [];
       const dtArr = config.disallowed_tools || [];
       const mcpArr = config.mcp_servers || [];
+      // lead-extends-teammate-tools-and-skills: split tools into Pack/Extras when extras present
+      const extrasArr = config.extra_tools || [];
+      const packToolsArr = extrasArr.length > 0 ? toolsArr.filter(t => !extrasArr.includes(t)) : toolsArr;
 
       return ReactDOM.createPortal(
         <div className="tm-detail-backdrop" onClick={onClose}>
@@ -459,13 +471,29 @@
               </div>
             )}
 
-            {toolsArr.length > 0 && (
+            {toolsArr.length > 0 && extrasArr.length === 0 && (
               <div className="tm-detail-section">
                 <div className="tm-detail-label">tools ({toolsArr.length})</div>
                 <ul className="tm-detail-list">
                   {toolsArr.map(t => <li key={t} className="tm-detail-list-item">{t}</li>)}
                 </ul>
               </div>
+            )}
+            {toolsArr.length > 0 && extrasArr.length > 0 && (
+              <>
+                <div className="tm-detail-section">
+                  <div className="tm-detail-label">pack ({packToolsArr.length})</div>
+                  <ul className="tm-detail-list">
+                    {packToolsArr.map(t => <li key={t} className="tm-detail-list-item">{t}</li>)}
+                  </ul>
+                </div>
+                <div className="tm-detail-section">
+                  <div className="tm-detail-label">extras (+{extrasArr.length})</div>
+                  <ul className="tm-detail-list">
+                    {extrasArr.map(t => <li key={t} className="tm-detail-list-item">{t}</li>)}
+                  </ul>
+                </div>
+              </>
             )}
 
             {dtArr.length > 0 && (

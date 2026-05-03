@@ -146,6 +146,8 @@ class Broker:
         cwd: str | None = None,
         permission_mode: str | None = None,
         agent_def_resolver: "AgentDefResolver | None" = None,
+        extra_tools: list[str] | None = None,
+        extra_skills: list[str] | None = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
@@ -153,6 +155,7 @@ class Broker:
         teammate = factory(
             teammate_id, resolved_name, role,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
+            extra_tools=extra_tools, extra_skills=extra_skills,
         )
         await teammate.start(self, inbox)
 
@@ -177,6 +180,8 @@ class Broker:
             agent_def=agent_def,
             effort=effort,
             permission_mode=permission_mode,
+            extra_tools=extra_tools,
+            extra_skills=extra_skills,
         )
 
         self._sink.write_lifecycle("spawn", {
@@ -184,6 +189,8 @@ class Broker:
             "name": resolved_name,
             "role": role,
             "model": model,
+            "extra_tools": extra_tools or [],
+            "extra_skills": extra_skills or [],
         })
         return teammate_id
 
@@ -192,10 +199,15 @@ class Broker:
         agent_def: "AgentDefinition | None",
         effort: str | None,
         permission_mode: str | None,
+        extra_tools: list[str] | None = None,
+        extra_skills: list[str] | None = None,
     ) -> "dict[str, Any] | None":
         """Build a config snapshot dict from a resolved AgentDefinition.
 
-        Returns None when agent_def is None (role absent from merged pack).
+        Returns None when agent_def is None and no extras are provided
+        (role absent from merged pack). When extras are provided but
+        agent_def is None, returns a minimal snapshot so extras are visible
+        in get_teammate_status.
         Tombstoned teammates retain their config until reaped.
 
         Resolution rules:
@@ -204,13 +216,32 @@ class Broker:
         - mcp_servers: names only — bare strings pass through; dict entries
           use their "name" key (falling back to "<unnamed>"). Never serializes
           any other dict field (that is where API keys live).
+        - extra_tools/extra_skills: net-new tools/skills beyond the pack baseline.
+          Always present as empty lists when no extras (consistent snapshot shape).
         """
         if agent_def is None:
+            # No pack entry — return minimal snapshot if extras provided, else None.
+            if extra_tools or extra_skills:
+                effective_tools = list(dict.fromkeys(extra_tools or []))
+                effective_skills = list(dict.fromkeys(extra_skills or []))
+                return {
+                    "model": None,
+                    "tools": effective_tools,
+                    "disallowed_tools": [],
+                    "skills": effective_skills,
+                    "permission_mode": permission_mode,
+                    "mcp_servers": [],
+                    "system_prompt": None,
+                    "effort": effort,
+                    # All extras are net-new (no pack baseline to compare against)
+                    "extra_tools": effective_tools[:],
+                    "extra_skills": effective_skills[:],
+                }
             return None
 
         # tools: list[str] (may be empty, must not be None)
         tools_raw = getattr(agent_def, "tools", None)
-        tools = list(tools_raw) if tools_raw is not None else []
+        pack_tools: list[str] = list(tools_raw) if tools_raw is not None else []
 
         # disallowed_tools: list[str]
         dt_raw = getattr(agent_def, "disallowedTools", None)
@@ -221,11 +252,11 @@ class Broker:
         # see a list (len("all") == 3 would be a misleading chip count).
         skills_raw = getattr(agent_def, "skills", None)
         if skills_raw is None:
-            skills: list[str] = []
+            pack_skills: list[str] = []
         elif isinstance(skills_raw, str):
-            skills = [skills_raw]  # "all" literal → single-element list
+            pack_skills = [skills_raw]  # "all" literal → single-element list
         else:
-            skills = list(skills_raw)
+            pack_skills = list(skills_raw)
 
         # mcp_servers: names only
         mcp_raw = getattr(agent_def, "mcpServers", None)
@@ -248,15 +279,33 @@ class Broker:
             else getattr(agent_def, "permissionMode", None)
         )
 
+        # Additive+deduped merge: effective = pack ∪ extras (insertion-order preserved)
+        pack_tools_set = set(pack_tools)
+        effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
+
+        pack_skills_set = set(pack_skills)
+        effective_skills = list(dict.fromkeys(pack_skills + (extra_skills or [])))
+
+        # Net-new extras: items from caller's list not already in the pack (deduped)
+        net_extra_tools = list(dict.fromkeys(
+            t for t in (extra_tools or []) if t not in pack_tools_set
+        ))
+        net_extra_skills = list(dict.fromkeys(
+            s for s in (extra_skills or []) if s not in pack_skills_set
+        ))
+
         return {
             "model": getattr(agent_def, "model", None),
-            "tools": tools,
+            "tools": effective_tools,
             "disallowed_tools": disallowed_tools,
-            "skills": skills,
+            "skills": effective_skills,
             "permission_mode": resolved_pm,
             "mcp_servers": mcp_names,
             "system_prompt": getattr(agent_def, "prompt", None),
             "effort": resolved_effort,
+            # Extra fields: always present as lists (empty when no extras)
+            "extra_tools": net_extra_tools,
+            "extra_skills": net_extra_skills,
         }
 
     async def _tombstone_teammate(

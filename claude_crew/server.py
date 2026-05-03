@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -24,6 +25,17 @@ from claude_crew.broker import (
     UnknownTeammateError,
 )
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.subagents._user_loader import (
+    _discover_skill_names,
+    _load_user_mcp_server_names,
+    _read_installed_plugins,
+    discover_dir,
+)
+
+# SDK built-ins available to grant via extra_tools (Task excluded — leaf-node invariant).
+_SDK_BUILTIN_TOOLS: list[str] = [
+    "Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "Agent",
+]
 
 
 # Maximum wait_seconds accepted by the get_messages long-poll tool.
@@ -45,8 +57,14 @@ def _err(code: str, message: str) -> dict[str, Any]:
 def make_server(
     broker: Broker | None = None,
     factory: TeammateFactory | None = None,
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
 ) -> FastMCP:
     broker = broker if broker is not None else Broker()
+    # Capture project_root once at server creation time so list_available_tools
+    # returns a stable value for the process lifetime.
+    _project_root: Path = project_root if project_root is not None else Path.cwd()
+    _home_dir: Path | None = home_dir  # None → discovery functions use Path.home()
     if factory is None:
         # Lazy import to avoid circular: factories imports server's siblings.
         from claude_crew.factories import default_factory
@@ -92,6 +110,8 @@ def make_server(
         effort: str | None = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
+        extra_tools: list[str] | None = None,
+        extra_skills: list[str] | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
@@ -120,15 +140,27 @@ def make_server(
                 "default", "acceptEdits", "plan", "bypassPermissions",
                 "dontAsk", "auto". Overrides the role's pack-declared
                 permissionMode when provided.
+            extra_tools: Optional list of additional tool IDs to grant beyond
+                the pack's declared tools. Additive only — pack tools are
+                never removed. "Task" is explicitly disallowed.
+            extra_skills: Optional list of additional skill names to grant
+                beyond the pack's declared skills. Additive only.
         """
         if permission_mode is not None and permission_mode not in _VALID_PERMISSION_MODES:
             raise ToolError(
                 f"permission_mode {permission_mode!r} is not a valid PermissionMode; "
                 f"accepted: {sorted(_VALID_PERMISSION_MODES)}"
             )
+        # Guard: Task cannot be granted at spawn time (leaf-node invariant)
+        if "Task" in (extra_tools or []):
+            raise ToolError(
+                "Task tool cannot be granted at spawn time — "
+                "claude-crew teammates are leaf nodes by design."
+            )
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
+            extra_tools=extra_tools, extra_skills=extra_skills,
         )
         info = next(t for t in broker.list_crew() if t.id == tid)
         return {"teammate_id": info.id, "name": info.name, "role": info.role}
@@ -335,6 +367,65 @@ def make_server(
             "path": str(sink.path) if sink.path else None,
             "crew_id": broker.crew_id,
             "disabled": sink.disabled,
+        }
+
+    @mcp.tool()
+    async def list_available_tools() -> dict[str, Any]:
+        """Return a grouped discovery payload of what the lead can grant via extra_tools / extra_skills.
+
+        TOOL ID CONVENTION (load-bearing):
+        MCP tool IDs follow ``mcp__<server>__<tool>``. This payload returns server NAMES
+        only — enumerating individual tool IDs requires spawning every MCP server at startup
+        and querying it; rejected as too costly. The lead matches server names against its
+        own tool surface (system-reminder enumeration) to construct the full MCP tool ID.
+
+        Returns:
+            builtins: SDK built-in tools (no Task).
+            mcp_servers: Registered MCP server names from ~/.claude.json; running=null.
+            skills: Skill names from user and project skill dirs.
+            plugins: Installed plugins, each with key, agents list, and skills list.
+            project_root: Working directory captured at server startup.
+        """
+        # MCP servers: names only, never command/args/env
+        mcp_server_names = _load_user_mcp_server_names(_home_dir)
+        mcp_servers = [
+            {"name": name, "running": None}
+            for name in sorted(mcp_server_names)
+        ]
+
+        # Skills: union of user + project skill dirs
+        skill_names = _discover_skill_names(_home_dir, _project_root)
+        skills = sorted(skill_names)
+
+        # Plugins: each entry has key, agents list, skills list
+        plugin_pairs = _read_installed_plugins(_home_dir, _project_root)
+        plugins_out = []
+        for plugin_key, agents_dir in plugin_pairs:
+            # Agent role names
+            pack, _, _ = discover_dir(agents_dir)
+            agent_names = sorted(pack.keys())
+
+            # Plugin skills: by convention live at <installPath>/skills/
+            plugin_skills_dir = agents_dir.parent / "skills"
+            plugin_skill_names: list[str] = []
+            if plugin_skills_dir.is_dir():
+                for child in plugin_skills_dir.iterdir():
+                    if child.is_dir() and (child / "SKILL.md").is_file():
+                        plugin_skill_names.append(child.name)
+            plugin_skill_names.sort()
+
+            plugins_out.append({
+                "key": plugin_key,
+                "agents": agent_names,
+                "skills": plugin_skill_names,
+            })
+
+        return {
+            "builtins": _SDK_BUILTIN_TOOLS,
+            "mcp_servers": mcp_servers,
+            "skills": skills,
+            "plugins": plugins_out,
+            "project_root": str(_project_root),
         }
 
     # Stash the broker on the server for tests / introspection.
