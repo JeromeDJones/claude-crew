@@ -132,7 +132,7 @@ class TestGetMessagesTool:
                 "send_to", {"teammate_id": spawn["teammate_id"], "payload": "hello"},
             )
             result = await _poll_until(
-                lambda: s.call_tool("get_messages", {}),
+                lambda: s.call_tool("get_messages", {"wait_seconds": 0.1}),
                 lambda r: bool(_content_json(r)["messages"]),
             )
             body = _content_json(result)
@@ -147,7 +147,9 @@ class TestGetMessagesTool:
     async def test_get_messages_empty_returns_no_messages(self) -> None:
         async with _client() as s:
             await s.initialize()
-            result = _content_json(await s.call_tool("get_messages", {}))
+            result = _content_json(
+                await s.call_tool("get_messages", {"wait_seconds": 0.1}),
+            )
             assert result["messages"] == []
             assert result["next_seq"] == 0
 
@@ -160,14 +162,14 @@ class TestGetMessagesTool:
                     "send_to", {"teammate_id": spawn["teammate_id"], "payload": i},
                 )
             result = await _poll_until(
-                lambda: s.call_tool("get_messages", {}),
+                lambda: s.call_tool("get_messages", {"wait_seconds": 0.1}),
                 lambda r: len(_content_json(r)["messages"]) == 3,
             )
             body = _content_json(result)
             assert len(body["messages"]) == 3
             first_seq = body["messages"][0]["seq"]
             filtered = _content_json(await s.call_tool(
-                "get_messages", {"since_seq": first_seq},
+                "get_messages", {"since_seq": first_seq, "wait_seconds": 0.1},
             ))
             assert len(filtered["messages"]) == 2
 
@@ -297,22 +299,20 @@ class TestGetMessagesLongPollTool:
     """F9 SC-1/2/3/4/6 — wait_seconds parameter on the get_messages MCP tool.
 
     Scenarios:
-      1. explicit wait_seconds=0 → bit-for-bit identical (SC-1)
+      1. wait_seconds=0 is rejected (long-poll required) (SC-1)
       2. messages already in _log → return immediately even with large wait_seconds (SC-2)
       3. block-and-wake: long-poll returns when a LEAD-bound send fires mid-wait (SC-3)
       4. timeout: no message arrives → empty list, correct shape, no error (SC-4)
       5. server-layer cap: wait_seconds=9999 → broker helper called with 600.0 (SC-6)
     """
 
-    async def test_wait_seconds_zero_preserves_existing_behavior(self) -> None:
-        """SC-1: explicit wait_seconds=0 → same response shape as the default."""
+    async def test_wait_seconds_zero_is_rejected(self) -> None:
+        """SC-1: wait_seconds=0 → ToolError (long-poll is required)."""
         async with _client() as s:
             await s.initialize()
-            result = _content_json(
-                await s.call_tool("get_messages", {"wait_seconds": 0}),
-            )
-        assert result["messages"] == []
-        assert result["next_seq"] == 0
+            result = await s.call_tool("get_messages", {"wait_seconds": 0})
+            assert result.isError, "expected ToolError for wait_seconds=0"
+            assert "must be > 0" in str(result.content[0].text)
 
     async def test_messages_present_returns_immediately(self) -> None:
         """SC-2: wait_seconds>0 but messages already in _log → no blocking."""
@@ -401,16 +401,12 @@ class TestGetMessagesLongPollTool:
         assert result["messages"] == []
         await b.shutdown_all()
 
-    async def test_negative_wait_seconds_treated_as_zero(self) -> None:
-        """M-1 (sentinel): wait_seconds=-5 → no blocking, returns immediately."""
+    async def test_negative_wait_seconds_is_rejected(self) -> None:
+        """Negative wait_seconds → ToolError (long-poll is required)."""
         async with _client() as s:
             await s.initialize()
-            start = time.monotonic()
-            result = _content_json(
-                await s.call_tool("get_messages", {"since_seq": 0, "wait_seconds": -5}),
+            result = await s.call_tool(
+                "get_messages", {"since_seq": 0, "wait_seconds": -5},
             )
-            elapsed = time.monotonic() - start
-
-        assert result["messages"] == []
-        assert result["next_seq"] == 0
-        assert elapsed < 0.2, f"negative wait_seconds should return immediately, got {elapsed:.3f} s"
+            assert result.isError, "expected ToolError for negative wait_seconds"
+            assert "must be > 0" in str(result.content[0].text)

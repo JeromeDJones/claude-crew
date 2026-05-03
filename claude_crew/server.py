@@ -53,7 +53,36 @@ def make_server(
         factory = default_factory()
     if getattr(factory, "requires_auth", False):
         validate_auth_or_exit()
-    mcp = FastMCP("claude-crew")
+    mcp = FastMCP(
+        "claude-crew",
+        instructions=(
+            "claude-crew spawns long-lived agents (\"teammates\") as top-level "
+            "Claude processes that persist across multiple turns of the lead "
+            "session and can be messaged mid-task.\n\n"
+            "Use claude-crew when:\n"
+            "- You need an agent that lives across multiple lead-session turns, "
+            "receiving and responding to messages over time.\n"
+            "- The agent itself needs to spawn subagents to do its work. "
+            "In-session subagents (the Task/Agent tool) run as isolated workers "
+            "and cannot recursively delegate; claude-crew teammates run as "
+            "top-level Claude processes and inherit the full toolkit, including "
+            "spawning their own subagents.\n"
+            "- You're running concurrent work and want to message agents "
+            "mid-task (send_to, broadcast) rather than waiting for one return "
+            "value.\n"
+            "- The work benefits from agent learning across runs — teammates "
+            "can persist project-scoped memory that future invocations inherit.\n\n"
+            "Do NOT use claude-crew for:\n"
+            "- One-shot work where the agent runs, returns, and is done. Use "
+            "the in-session Agent/Task tool — lighter, faster, no spawn or "
+            "teardown overhead.\n"
+            "- Pure parallelism without dialog or recursive delegation. "
+            "In-session subagents already run in parallel.\n\n"
+            "Pattern: claude-crew for *relationship* (persistence + dialog + "
+            "memory) and *recursive delegation* (teammate spawning its own "
+            "helpers). In-session subagents for fire-and-forget specialist work."
+        ),
+    )
 
     @mcp.tool()
     async def spawn_teammate(
@@ -65,6 +94,15 @@ def make_server(
         permission_mode: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
+
+        Use this when you need a persistent agent that lives across multiple
+        lead-session turns, can be messaged mid-task (send_to / broadcast),
+        can itself spawn subagents (unlike in-session Agent/Task subagents,
+        which cannot recursively delegate), or accumulates project memory
+        across runs.
+
+        Do NOT use for one-shot work — prefer the in-session Agent/Task tool
+        for fire-and-forget delegation (lighter, faster, no teardown).
 
         Args:
             role: The teammate's role (e.g., "planner", "builder").
@@ -153,23 +191,46 @@ def make_server(
 
     @mcp.tool()
     async def get_messages(
+        wait_seconds: float,
         since_seq: int = 0,
         limit: int = 100,
-        wait_seconds: float = 0.0,
     ) -> dict[str, Any]:
         """Return messages addressed to the lead with seq > since_seq.
 
+        wait_seconds is REQUIRED and must be > 0. If the inbox is empty,
+        the call blocks up to this many seconds for a message to arrive.
+        This long-poll behavior is the whole point of the tool: one call
+        that returns as soon as a teammate replies, instead of repeated
+        immediate-return polls that waste lead-session turns and context.
+
+        Choosing wait_seconds:
+        - Awaiting a reply to something you just sent: 300 (5 min) is
+          a sensible default. Bump higher (up to 600, the server cap)
+          for slow Opus turns or long-running teammate tool calls.
+        - Doing other work in parallel and want to drain the inbox
+          before continuing: a short wait (5-30 s) is enough — you're
+          not waiting *for* anything, just giving in-flight messages a
+          moment to land.
+        - Never call this in a tight loop hoping to "check quickly" —
+          long-poll exists exactly so you don't have to. Set the wait
+          to however long you'd otherwise have spent calling repeatedly.
+
         Args:
+            wait_seconds: Required. Seconds to block when the inbox is
+                empty. Must be > 0. Capped at 600 s server-side.
             since_seq: Cursor; pass the largest seq you've already seen.
             limit: Maximum messages to return (default 100).
-            wait_seconds: If > 0 and no messages are waiting, block up to
-                this many seconds for one to arrive. Default 0 returns
-                immediately (existing behavior). Capped at 600 s server-side;
-                negative values treated as 0.
         """
+        if wait_seconds <= 0:
+            raise ToolError(
+                "wait_seconds must be > 0; long-poll is required. "
+                "Pass 300 if you're awaiting a reply, or a short value "
+                "(e.g. 5-30) if you're just draining the inbox between "
+                "other work."
+            )
         msgs = broker.get_messages(recipient=LEAD_ID, since_seq=since_seq, limit=limit)
-        if not msgs and wait_seconds > 0:
-            capped = min(max(wait_seconds, 0.0), MAX_WAIT_SECONDS)
+        if not msgs:
+            capped = min(wait_seconds, MAX_WAIT_SECONDS)
             await broker.wait_for_lead_message(capped)
             msgs = broker.get_messages(recipient=LEAD_ID, since_seq=since_seq, limit=limit)
         next_seq = msgs[-1].seq if msgs else since_seq

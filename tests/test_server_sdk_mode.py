@@ -63,7 +63,7 @@ class TestSDKModeIntegration:
             assert "message_id" in send
 
             for _ in range(50):
-                got = _content_json(await s.call_tool("get_messages", {}))
+                got = _content_json(await s.call_tool("get_messages", {"wait_seconds": 0.1}))
                 if got["messages"]:
                     break
                 await asyncio.sleep(0.02)
