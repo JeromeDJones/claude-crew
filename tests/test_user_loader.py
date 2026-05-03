@@ -1080,7 +1080,7 @@ class TestWarnShadowDrop:
         default = {"explorer": self._bundled_role(skills=["foo"])}
         user = {"explorer": self._bundled_role()}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any(
             "explorer" in m and "skills" in m and "user-level" in m
@@ -1094,7 +1094,7 @@ class TestWarnShadowDrop:
         default = {"explorer": self._bundled_role(mcpServers=["atlassian"])}
         project = {"explorer": self._bundled_role()}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, None, project)
+            _warn_shadow_drop([("default", default), ("project", project)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any(
             "explorer" in m and "mcpServers" in m and "project-level" in m
@@ -1109,7 +1109,7 @@ class TestWarnShadowDrop:
         user = {"explorer": self._bundled_role(memory="project")}
         project = {"explorer": self._bundled_role()}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, project)
+            _warn_shadow_drop([("default", default), ("user", user), ("project", project)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         # The project shadow drops memory that user set.
         assert any(
@@ -1132,7 +1132,7 @@ class TestWarnShadowDrop:
             f"construction; got {user['explorer'].disallowedTools!r}"
         )
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any(
             "disallowedTools" in m and "drops" in m for m in warn_msgs
@@ -1147,7 +1147,7 @@ class TestWarnShadowDrop:
         }
         user = {"explorer": self._bundled_role()}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         skills_warns = [m for m in warn_msgs if "skills" in m and "drops" in m]
         memory_warns = [m for m in warn_msgs if "memory" in m and "drops" in m]
@@ -1162,7 +1162,7 @@ class TestWarnShadowDrop:
         default = {"explorer": self._bundled_role(skills=["foo"])}
         user = {"different-role": self._bundled_role()}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any("drops" in m for m in warn_msgs)
 
@@ -1174,7 +1174,7 @@ class TestWarnShadowDrop:
         default = {"explorer": self._bundled_role(skills=["a"])}
         user = {"explorer": self._bundled_role(skills=["b"])}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any("drops" in m for m in warn_msgs)
 
@@ -1202,7 +1202,7 @@ class TestShadowDropOptionalModelAndTools:
         default = {"explorer": self._role(tools=["Read"], model="opus")}
         user = {"explorer": self._role(tools=["Read"])}  # model defaults to None
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any(
             "explorer" in m and "model" in m and "user-level" in m
@@ -1217,7 +1217,7 @@ class TestShadowDropOptionalModelAndTools:
         default = {"explorer": self._role(tools=["Read", "Write"])}
         user = {"explorer": self._role(tools=[])}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any(
             "explorer" in m and "tools" in m and ("Read" in m or "Write" in m)
@@ -1234,7 +1234,7 @@ class TestShadowDropOptionalModelAndTools:
         default = {"explorer": self._role(tools=["Read"], disallowedTools=["Bash"])}
         project = {"explorer": self._role(tools=["Read"], disallowedTools=[])}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, None, project)
+            _warn_shadow_drop([("default", default), ("project", project)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any(
             "disallowedTools" in m and "drops" in m for m in warn_msgs
@@ -1247,7 +1247,7 @@ class TestShadowDropOptionalModelAndTools:
         default = {"explorer": self._role(tools=["Read"])}
         user = {"explorer": self._role(tools=["Read"])}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any("drops" in m for m in warn_msgs)
 
@@ -1261,7 +1261,7 @@ class TestShadowDropOptionalModelAndTools:
         default = {"explorer": self._role(tools=["Read", "Write"])}
         user = {"explorer": self._role(tools=["Read"])}
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_shadow_drop(default, user, None)
+            _warn_shadow_drop([("default", default), ("user", user)])
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any(
             "drops collection field" in m for m in warn_msgs

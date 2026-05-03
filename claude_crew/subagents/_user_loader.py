@@ -38,6 +38,7 @@ from claude_crew.subagents._loader import (
 __all__ = [
     "build_merged_pack",
     "discover_dir",
+    "load_plugin_agents",
     "load_project_agents",
     "load_user_agents",
     "strict_parse",
@@ -223,6 +224,123 @@ def load_project_agents(
     return discover_dir(root / ".claude" / "agents")
 
 
+def _read_installed_plugins(
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> list[tuple[str, Path]]:
+    """Resolve installed-plugin agent dirs from ``~/.claude/plugins/installed_plugins.json``.
+
+    Returns a list of ``(plugin_key, agents_dir)`` tuples sorted by
+    ``plugin_key`` for deterministic iteration. ``plugin_key`` is the
+    top-level key in ``installed_plugins.json`` (e.g.,
+    ``"frontend-design@claude-plugins-official"``); ``agents_dir`` is
+    ``<installPath>/agents``.
+
+    Scope filter:
+
+    - ``scope: "user"`` installs are always included (apply across every
+      project the lead opens).
+    - ``scope: "local"`` installs are included only when their
+      ``projectPath`` equals ``project_root`` — local installs apply
+      only to the project they were installed in. ``project_root``
+      defaults to ``Path.cwd()``.
+
+    Best-effort: missing file, malformed JSON, missing/wrong-typed keys
+    all return ``[]`` silently. Mirrors :func:`_load_user_mcp_server_names`
+    (Feature #17 SC-7) — load-time validation only checks membership;
+    breaking on a malformed user config would block MCP server startup.
+    """
+    home = home_dir if home_dir is not None else Path.home()
+    project = project_root if project_root is not None else Path.cwd()
+    cfg_path = home / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        text = cfg_path.read_text()
+    except (OSError, FileNotFoundError):
+        return []
+    try:
+        cfg = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(cfg, dict):
+        return []
+    plugins = cfg.get("plugins")
+    if not isinstance(plugins, dict):
+        return []
+
+    project_resolved = project.resolve() if project.exists() else project
+    pairs: list[tuple[str, Path]] = []
+    for key in sorted(plugins.keys()):
+        installs = plugins.get(key)
+        if not isinstance(installs, list):
+            continue
+        for install in installs:
+            if not isinstance(install, dict):
+                continue
+            install_path_raw = install.get("installPath")
+            if not isinstance(install_path_raw, str) or not install_path_raw:
+                continue
+            scope = install.get("scope")
+            if scope == "local":
+                project_path_raw = install.get("projectPath")
+                if not isinstance(project_path_raw, str):
+                    continue
+                project_path = Path(project_path_raw)
+                resolved = (
+                    project_path.resolve() if project_path.exists() else project_path
+                )
+                if resolved != project_resolved:
+                    continue
+            elif scope != "user":
+                # Unknown scope: skip silently. Future-compat — an installer
+                # writing an unrecognized scope token shouldn't crash startup.
+                continue
+            pairs.append((key, Path(install_path_raw) / "agents"))
+    return pairs
+
+
+def load_plugin_agents(
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
+    """Load agents from every installed Claude Code plugin's ``agents/`` dir.
+
+    Walks ``installed_plugins.json`` (see :func:`_read_installed_plugins`
+    for scope filter), then calls :func:`discover_dir` on each install's
+    ``agents/`` directory. Plugins are processed in lexicographic
+    ``plugin_key`` order; on cross-plugin role-key collision the
+    later-sorted plugin wins, with a WARN naming both plugins and the
+    losing/winning files.
+
+    Returns ``(pack, role_ss, bodies)`` aggregated across all plugins.
+    Missing ``installed_plugins.json`` or zero plugins with an
+    ``agents/`` dir → ``({}, {}, {})``.
+    """
+    pairs = _read_installed_plugins(home_dir, project_root)
+    pack: dict[str, AgentDefinition] = {}
+    role_ss: dict[str, list[str] | None] = {}
+    bodies: dict[str, str] = {}
+    seen_plugin_for_key: dict[str, str] = {}
+
+    for plugin_key, agents_dir in pairs:
+        plugin_pack, plugin_ss, plugin_bodies = discover_dir(agents_dir)
+        for role_key, agent in plugin_pack.items():
+            if role_key in pack:
+                prior_plugin = seen_plugin_for_key[role_key]
+                logger.warning(
+                    "agent key %r appears in plugins %r and %r; %r wins "
+                    "(plugin lexicographic order)",
+                    role_key, prior_plugin, plugin_key, plugin_key,
+                )
+            pack[role_key] = agent
+            bodies[role_key] = plugin_bodies[role_key]
+            if role_key in plugin_ss:
+                role_ss[role_key] = plugin_ss[role_key]
+            else:
+                role_ss.pop(role_key, None)
+            seen_plugin_for_key[role_key] = plugin_key
+    return pack, role_ss, bodies
+
+
 def _discover_skill_names(
     home_dir: Path | None = None,
     project_root: Path | None = None,
@@ -384,40 +502,48 @@ def _check_drop(
 
 
 def _warn_shadow_drop(
-    default: dict[str, AgentDefinition],
-    user: dict[str, AgentDefinition] | None,
-    project: dict[str, AgentDefinition] | None,
+    layers: list[tuple[str, dict[str, AgentDefinition] | None]],
 ) -> None:
     """Emit a WARN when a higher-precedence pack drops an optional field a lower one set.
 
     Pack-merge does whole-AgentDefinition replacement at the role-key level
-    (``__init__.merge_packs``). A project-level shadow that doesn't mention
-    ``mcpServers`` silently *clears* the bundled value. Pre-existing footgun
-    for skills/disallowedTools/permissionMode; Feature #17 closes it uniformly
-    across all 9 optional AgentDefinition fields (D-9, D-10).
+    (``__init__.merge_packs``). A higher-precedence shadow that doesn't
+    mention ``mcpServers`` silently *clears* the lower value. Pre-existing
+    footgun for skills/disallowedTools/permissionMode; Feature #17 closes
+    it uniformly across all 9 optional AgentDefinition fields (D-9, D-10).
+
+    ``layers`` is a list of ``(label, pack)`` in *increasing* precedence
+    (lowest first). For each role appearing in a higher layer, the check
+    runs against whichever lower layer most-recently introduced that role
+    — i.e., the layer it actually shadows in the effective merged pack.
+    ``None`` packs are treated as empty.
     """
-    user = user or {}
-    project = project or {}
-    for role in user.keys() & default.keys():
-        _check_drop("user", role, default[role], user[role])
-    for role in project.keys():
-        if role in user:
-            _check_drop("project", role, user[role], project[role])
-        elif role in default:
-            _check_drop("project", role, default[role], project[role])
+    accumulated: dict[str, AgentDefinition] = {}
+    for label, pack in layers:
+        if not pack:
+            continue
+        for role, higher in pack.items():
+            if role in accumulated:
+                _check_drop(label, role, accumulated[role], higher)
+            accumulated[role] = higher
 
 
 def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
 ) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
-    """Compose default + user + project agents in precedence order.
+    """Compose default + plugin + user + project agents in precedence order.
 
-    Effective pack = ``merge_packs(merge_packs(default, user), project)``.
-    Project shadows user shadows default. Shadowing is observable via an
-    INFO log on the ``claude_crew.subagents.loader`` logger so a user
-    debugging "why does my user-level agent behave differently here"
-    can see the trail.
+    Effective pack = ``merge_packs(merge_packs(merge_packs(default, plugin), user), project)``.
+    Project shadows user shadows plugin shadows default. Shadowing is
+    observable via an INFO log on the ``claude_crew.subagents.loader``
+    logger so a user debugging "why does my user-level agent behave
+    differently here" can see the trail.
+
+    The plugin layer aggregates agents from every installed Claude Code
+    plugin's ``agents/`` directory (see :func:`load_plugin_agents`).
+    User-scope plugin installs are always included; local-scope installs
+    only apply to their owning ``projectPath``.
 
     ``home_dir`` and ``project_root`` default to ``Path.home()`` and
     ``Path.cwd()``. The MCP server resolves these once at startup and
@@ -426,11 +552,12 @@ def build_merged_pack(
     Returns ``(merged_agents, role_ss, bodies)`` where:
 
     - ``role_ss`` maps role keys to their ``settingSources`` list.
-      Precedence mirrors the agents dict: project > user > default.
+      Precedence mirrors the agents dict: project > user > plugin > default.
     - ``bodies`` maps role keys to raw body text (no substrate prefix).
-      Precedence mirrors the agents dict: project > user > default.
+      Precedence mirrors the agents dict: project > user > plugin > default.
     """
     default, default_ss, default_bodies = load_default_pack()
+    plugin, plugin_ss, plugin_bodies = load_plugin_agents(home_dir, project_root)
     user, user_ss, user_bodies = load_user_agents(home_dir)
     project, project_ss, project_bodies = load_project_agents(project_root)
 
@@ -444,6 +571,10 @@ def build_merged_pack(
         len(default), sorted(default.keys()),
     )
     logger.info(
+        "loaded %d pack(s) from plugins (%s/.claude/plugins/cache/.../agents): %s",
+        len(plugin), home, sorted(plugin.keys()),
+    )
+    logger.info(
         "loaded %d pack(s) from user (%s/.claude/agents): %s",
         len(user), home, sorted(user.keys()),
     )
@@ -452,23 +583,35 @@ def build_merged_pack(
         len(project), project_dir, sorted(project.keys()),
     )
 
-    for key in user:
+    for key in plugin:
         if key in default:
+            logger.info("agent %r from plugin shadows default pack", key)
+    for key in user:
+        if key in plugin:
+            logger.info("agent %r from user-level shadows plugin", key)
+        elif key in default:
             logger.info("agent %r from user-level shadows default pack", key)
     for key in project:
         if key in user:
             logger.info("agent %r from project-level shadows user-level", key)
+        elif key in plugin:
+            logger.info("agent %r from project-level shadows plugin", key)
         elif key in default:
             logger.info("agent %r from project-level shadows default pack", key)
 
-    role_ss = {**default_ss, **user_ss, **project_ss}
-    bodies = {**default_bodies, **user_bodies, **project_bodies}
+    role_ss = {**default_ss, **plugin_ss, **user_ss, **project_ss}
+    bodies = {**default_bodies, **plugin_bodies, **user_bodies, **project_bodies}
     # Skills cascade via AgentDefinition (unlike settingSources which uses
     # role_ss side-channel — see discover_dir). merge_packs whole-key
     # replacement of AgentDefinition handles list-over-list, "all"-over-list,
     # and list-over-"all" trivially. No role_skills dict needed (D-6).
-    merged = merge_packs(merge_packs(default, user), project)
+    merged = merge_packs(merge_packs(merge_packs(default, plugin), user), project)
     _warn_unknown_skills(merged, home_dir, project_root)
     _warn_unknown_mcp_servers(merged, home_dir)
-    _warn_shadow_drop(default, user, project)
+    _warn_shadow_drop([
+        ("default", default),
+        ("plugin", plugin),
+        ("user", user),
+        ("project", project),
+    ])
     return merged, role_ss, bodies
