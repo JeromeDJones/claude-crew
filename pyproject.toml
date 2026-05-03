@@ -27,8 +27,12 @@ dev = [
     "mcp>=1.27.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-playwright>=0.7.2",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "dashboard: Playwright headless-Chromium tests for the dashboard UI",
+]

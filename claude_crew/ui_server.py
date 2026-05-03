@@ -211,7 +211,7 @@ class UIServer:
                 # as-of-#22, no new consumers). current_tool = last-started scalar
                 # (legacy, retained for SC-9). current_tools[] = canonical structured
                 # list. oldest_in_flight = badge field; pair with instance.now_wallclock.
-                agents.append({
+                agent_entry: dict[str, Any] = {
                     "id": info.id,
                     "role": info.role,
                     "name": info.name,
@@ -226,17 +226,52 @@ class UIServer:
                     "oldest_in_flight": oldest_in_flight,
                     "in_flight_count": len(current_tools),
                     "last_tool_completed": snap.get("last_tool_completed"),
-                })
+                }
+                # ui-agent-transparency: embed config snapshot when present.
+                # Omit the key entirely (not null) when no AgentDef was resolved.
+                # live_entry can be None when snapshot.live does not include every alive
+                # teammate (e.g., test fixtures that construct BrokerSnapshot with live=()
+                # directly). Guard is load-bearing for those paths.
+                agent_config = live_entry.config if live_entry is not None else None
+                if agent_config is not None:
+                    agent_entry["config"] = agent_config
+                agents.append(agent_entry)
 
                 total_cost += agent_cost
                 total_in += agent_in
                 total_out += agent_out
             else:
-                # Dead teammates: excluded from agents (D-10) but contribute
-                # to the instance-level aggregate (D-6).
-                total_cost += float(info.total_cost_usd_at_death or 0.0)
-                total_in += int(info.total_input_tokens_at_death or 0)
-                total_out += int(info.total_output_tokens_at_death or 0)
+                # Dead teammates: contribute to instance-level aggregate (D-6)
+                # and — if a config snapshot was retained — appear in the agents
+                # list as dimmed rows so the dashboard can still show chips/panel.
+                agent_cost = float(info.total_cost_usd_at_death or 0.0)
+                agent_in = int(info.total_input_tokens_at_death or 0)
+                agent_out = int(info.total_output_tokens_at_death or 0)
+                total_cost += agent_cost
+                total_in += agent_in
+                total_out += agent_out
+
+                dead_config = snapshot.dead_configs.get(info.id)
+                if dead_config is not None:
+                    dead_entry: dict[str, Any] = {
+                        "id": info.id,
+                        "role": info.role,
+                        "name": info.name,
+                        "model": "sonnet",  # model unknown post-death; normalized default
+                        "status": "dead",
+                        "uptime": int((info.died_at_wallclock or now) - info.spawned_at),
+                        "lastMsg": _ts(info.last_activity_at_wallclock_at_death),
+                        "cost": agent_cost,
+                        "tokens": {"in": agent_in, "out": agent_out},
+                        "tools": [],
+                        "current_tool": None,
+                        "oldest_in_flight": None,
+                        "in_flight_count": 0,
+                        "last_tool_completed": info.last_tool_completed_at_death,
+                        "dead": True,
+                        "config": dead_config,
+                    }
+                    agents.append(dead_entry)
 
         # F19 D-8 + sentinel D1: build messages as (float_ts, record) tuples so we
         # sort on the RAW wallclock — _ts() truncates to whole seconds, sorting on
