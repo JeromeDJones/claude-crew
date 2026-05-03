@@ -193,7 +193,7 @@ class TestRoundTrip:
         captured = _patch_sdk(monkeypatch, fake)
 
         # Use a factory that respects model/effort/cwd/permission_mode kwargs from the broker.
-        def factory(id, name, role, *, model=None, effort=None, cwd=None, permission_mode=None):
+        def factory(id, name, role, *, model=None, effort=None, cwd=None, permission_mode=None, extra_tools=None, extra_skills=None):
             kwargs = {}
             if model is not None:
                 kwargs["model"] = model

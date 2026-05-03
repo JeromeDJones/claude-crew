@@ -15,6 +15,17 @@ from claude_crew.teammate import StubTeammate, Teammate
 
 logger = logging.getLogger(__name__)
 
+# Update this table when Anthropic releases new model generations.
+# These shorthands appear in pack frontmatter (e.g., `model: opus`) and are
+# resolved to full IDs when spawning top-level teammates. Packs used as subagents
+# have their model field interpreted by the Claude Code host, which resolves the
+# same shorthands independently — keep this table in sync with CLAUDE.md invariants.
+_PACK_MODEL_ALIASES: dict[str, str] = {
+    "opus": "claude-opus-4-7",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
 
 def stub_factory(
     id: str, name: str, role: str,
@@ -39,6 +50,8 @@ def sdk_factory(
     pack_bodies: "dict | None" = None,
     cwd: str | None = None, permission_mode: str | None = None,
     setting_sources: list[str] | None = None,
+    extra_tools: list[str] | None = None,
+    extra_skills: list[str] | None = None,
 ) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
@@ -141,8 +154,19 @@ def default_factory() -> TeammateFactory:
             else:
                 effective_agents = merged_pack
 
+            # If no explicit model override, apply the pack's declared model (with alias resolution).
+            # Pack frontmatter `model: opus` is otherwise only applied for subagent dispatch,
+            # not when the role is spawned as a top-level claude-crew teammate.
+            resolved_model = model
+            if resolved_model is None:
+                pack_def = merged_pack.get(role)
+                if pack_def is not None:
+                    pack_model = getattr(pack_def, "model", None)
+                    if pack_model:
+                        resolved_model = _PACK_MODEL_ALIASES.get(pack_model, pack_model)
+
             return sdk_factory(
-                id, name, role, model=model, effort=effort, agents=effective_agents,
+                id, name, role, model=resolved_model, effort=effort, agents=effective_agents,
                 pack_bodies=merged_bodies,
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),
@@ -153,6 +177,17 @@ def default_factory() -> TeammateFactory:
         # teammate's resolved AgentDefinition at spawn time. Without this,
         # production teammates have no `config` block and dashboard chips
         # render empty.
-        factory.agent_def_resolver = lambda role: merged_pack.get(role)  # type: ignore[attr-defined]
+        def _resolve_agent_def(role: str) -> "AgentDefinition | None":
+            agent_def = merged_pack.get(role)
+            if agent_def is None:
+                return None
+            pack_model = getattr(agent_def, "model", None)
+            if pack_model:
+                resolved = _PACK_MODEL_ALIASES.get(pack_model, pack_model)
+                if resolved != pack_model:
+                    return dataclasses.replace(agent_def, model=resolved)
+            return agent_def
+
+        factory.agent_def_resolver = _resolve_agent_def  # type: ignore[attr-defined]
         return factory
     return stub_factory

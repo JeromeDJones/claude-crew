@@ -102,7 +102,7 @@ def _make_factory_for(merged_pack, role_ss, captured: dict, monkeypatch):
     monkeypatch.setattr(sdk_module, "ClaudeSDKClient", FakeCaptureSDKClient)
 
     def factory(
-        id, name, role, *, model=None, effort=None, cwd=None, permission_mode=None
+        id, name, role, *, model=None, effort=None, cwd=None, permission_mode=None, extra_tools=None, extra_skills=None
     ):
         return SdkTeammate(
             id=id, name=name, role=role,
