@@ -257,7 +257,32 @@ def make_server(
 
     @mcp.tool()
     async def kill_teammate(teammate_id: str) -> dict[str, Any]:
-        """Terminate a teammate. Subsequent send_to calls will return teammate_dead."""
+        """Terminate a teammate. Subsequent send_to calls will return teammate_dead.
+
+        Use this for genuine teardown — the work is finished, the role is no
+        longer needed, or the teammate is wedged and unrecoverable.
+
+        Killing fully resets context. The teammate is a subprocess; when it
+        dies, its conversation history and all in-process accumulated state
+        die with it. A respawned teammate is a fresh process — it gets the
+        role's pack body and re-reads any project-level memory files in the
+        cwd, but it has no memory of the prior teammate's exchanges with you.
+
+        Do NOT kill-and-respawn as a way to redirect or correct a teammate's
+        work. claude-crew exists to support multi-turn conversation: if the
+        teammate went the wrong direction, send_to it with the correction.
+        Respawning loses everything you've built up together and burns the
+        spawn cost again. The whole point of a persistent teammate is that
+        you can talk to it like a colleague who remembers the last thing
+        you said. Use that.
+
+        Reach for kill_teammate when:
+        - The feature/task is genuinely done and the teammate is being torn
+          down (often paired with a final debrief send_to first).
+        - The teammate is in an unrecoverable state (looping, deadlocked,
+          repeatedly producing malformed output despite correction).
+        - You need to free resources and the teammate has no more work.
+        """
         try:
             await broker.kill_teammate(teammate_id)
         except UnknownTeammateError:
