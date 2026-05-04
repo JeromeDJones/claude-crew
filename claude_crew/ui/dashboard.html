@@ -926,7 +926,7 @@
           <div style={{
             display: "grid",
             gridTemplateColumns: `repeat(${agents.length}, minmax(220px, 1fr))`,
-            minWidth: 0, overflow: "hidden",
+            minWidth: 0, overflowX: "auto",
           }}>
             {agents.map(a => (
               <AgentStreamColumn
