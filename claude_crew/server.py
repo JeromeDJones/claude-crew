@@ -142,7 +142,9 @@ def make_server(
                 permissionMode when provided.
             extra_tools: Optional list of additional tool IDs to grant beyond
                 the pack's declared tools. Additive only — pack tools are
-                never removed. "Task" is explicitly disallowed.
+                never removed. "Task" is explicitly disallowed. MCP tool IDs
+                (mcp__<server>__<tool>) automatically wire the server
+                connection — no separate mcpServers configuration needed.
             extra_skills: Optional list of additional skill names to grant
                 beyond the pack's declared skills. Additive only.
         """
@@ -151,11 +153,16 @@ def make_server(
                 f"permission_mode {permission_mode!r} is not a valid PermissionMode; "
                 f"accepted: {sorted(_VALID_PERMISSION_MODES)}"
             )
-        # Guard: Task cannot be granted at spawn time (leaf-node invariant)
+        # Task is a Claude Code built-in that only exists inside a Claude Code
+        # session. SDK-spawned teammates run as standalone processes and the
+        # tool is simply absent at runtime (verified live: teammate reports
+        # TASK_TOOL_UNAVAILABLE). Block early with a clear message rather than
+        # silently granting a tool that will never fire.
         if "Task" in (extra_tools or []):
             raise ToolError(
-                "Task tool cannot be granted at spawn time — "
-                "claude-crew teammates are leaf nodes by design."
+                "Task tool is not available in SDK subprocess context — "
+                "teammates run as standalone processes outside Claude Code. "
+                "Use Agent instead to spawn subagents."
             )
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,

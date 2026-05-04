@@ -130,9 +130,9 @@ _VALID_MCP_DICT_TYPES = frozenset({"stdio", "sse", "http"})
 
 # Prepended to AgentDefinition.prompt for every subagent. Substrate-context
 # framing leads with what claude-crew is, what the dispatch model is, and what
-# the agent's leaf-node responsibilities are. The raw body (without this prefix)
+# the agent's responsibilities are. The raw body (without this prefix)
 # is returned as the 4th element of parse_pack_text so the teammate spawn path
-# can build its own substrate-context prompt without the leaf-specific framing.
+# can build its own substrate-context prompt without the subagent-specific framing.
 #
 # Model-agnostic by design (#15 X.2): post-#15 model is optional and resolves
 # at the SDK boundary. Guidance text must NOT mention specific models — it
@@ -142,9 +142,10 @@ SUBSTRATE_SUBAGENT_GUIDANCE = """\
 
 You are operating as a subagent within claude-crew, a multi-agent substrate
 coordinated via an MCP server. The crew lead has dispatched you to complete a
-focused task. You are a leaf node in this dispatch — your role definition fixes
-your tool surface, and you cannot spawn further subagents (no Task tool by
-design). Complete the assigned task, report your findings clearly, and exit.
+focused task. Your role definition fixes your tool surface. If your tools
+include Agent or Task, you may spawn specialist subagents one level deeper to
+complete your work — delegate freely when it helps. Complete the assigned task,
+report your findings clearly, and exit.
 
 ---
 

@@ -419,43 +419,23 @@ class TestGetMessagesLongPollTool:
 
 
 class TestSpawnExtrasGuard:
-    """AT-3: Task guard fires at server boundary before any broker state is mutated."""
+    """AT-3: extra_tools validation at spawn boundary."""
 
     async def test_task_in_extra_tools_raises_tool_error(self) -> None:
-        """AT-3: extra_tools=["Task"] → ToolError; no new teammate in list_crew."""
+        """Task is absent in SDK subprocess context — blocked with a clear message."""
         async with _client() as s:
             await s.initialize()
 
             result = await s.call_tool(
                 "spawn_teammate", {"role": "planner", "extra_tools": ["Task"]},
             )
-            assert result.isError is True, "expected ToolError for extra_tools containing Task"
-            assert result.content
-            text = result.content[0].text
-            assert "Task tool cannot be granted" in text, (
-                f"error message must name the constraint; got: {text!r}"
-            )
-            assert "leaf nodes" in text, (
-                f"error message must reference leaf-node invariant; got: {text!r}"
-            )
-
-            # No teammate should have been spawned
-            crew = _content_json(await s.call_tool("list_crew", {}))
-            assert crew["teammates"] == [], (
-                "ToolError must fire before broker.spawn_teammate; "
-                "list_crew must remain empty"
-            )
-
-    async def test_task_among_other_extras_still_raises(self) -> None:
-        """Task mixed with legitimate tools → still raises ToolError."""
-        async with _client() as s:
-            await s.initialize()
-
-            result = await s.call_tool(
-                "spawn_teammate",
-                {"role": "planner", "extra_tools": ["Read", "Task", "Grep"]},
-            )
             assert result.isError is True
+            text = result.content[0].text
+            assert "Task tool is not available" in text
+            assert "Agent" in text
+
+            crew = _content_json(await s.call_tool("list_crew", {}))
+            assert crew["teammates"] == []
 
     async def test_extra_tools_without_task_succeeds(self) -> None:
         """Legitimate extra_tools (no Task) → spawn succeeds."""

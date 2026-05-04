@@ -4,6 +4,9 @@ These tests cost real money and require working Claude credentials.
 SC-4 (UUID recall over 10+ turns) and the SC-5 spike (CLAUDE.md
 loading via setting_sources) live here.
 
+AT-13: Task tool granted via extra_tools — verifies whether the Task tool
+is functional in an SDK subprocess context (or fails informatively).
+
 AT-12: extra_tools merge reaches SDK subprocess (knowledge-graph probe).
 """
 
@@ -337,7 +340,8 @@ class TestExtraToolsReachSdkSubprocess:
     Gated by: CLAUDE_CREW_LIVE_TESTS=1 AND knowledge-graph in ~/.claude.json.
     """
 
-    async def test_extra_tools_reach_sdk_subprocess(self, broker: Broker) -> None:
+    async def test_extra_tools_reach_sdk_subprocess(self, broker: Broker, monkeypatch) -> None:
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
         from claude_crew.factories import default_factory
 
         factory = default_factory()
@@ -383,4 +387,64 @@ class TestExtraToolsReachSdkSubprocess:
             assert phrase not in lower_text, (
                 f"extra_tools merge appears to have NOT reached the SDK subprocess; "
                 f"tool-unavailable phrase {phrase!r} found in response: {text!r}"
+            )
+
+
+class TestTaskToolInSdkSubprocess:
+    """AT-13: Task tool granted via extra_tools — functional or informative failure.
+
+    The Task tool is Claude Code's built-in subagent primitive. SDK-spawned
+    teammates may or may not have it available. This test grants it and asks
+    the teammate to actually use it; we observe whether it works, is silently
+    absent, or produces a clear error. The result determines whether the guard
+    should be restored or permanently removed.
+    """
+
+    async def test_task_tool_functional_in_sdk_subprocess(self, broker: Broker, monkeypatch) -> None:
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+        from claude_crew.factories import default_factory
+
+        factory = default_factory()
+        tid = await broker.spawn_teammate(
+            role="rr-planner",
+            name=None,
+            factory=factory,
+            extra_tools=["Task"],
+        )
+
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0,
+            payload=(
+                "Use the Task tool to spawn a subagent with this exact prompt: "
+                "'Reply with only the word CONFIRMED and nothing else.' "
+                "Then report back what the subagent replied. "
+                "If you do not have the Task tool available, say exactly: "
+                "TASK_TOOL_UNAVAILABLE"
+            ),
+        ))
+        await _wait_for_lead(broker, 1, timeout=120.0)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        result = msgs[-1]
+        text = (
+            result.payload.get("text", "") if isinstance(result.payload, dict)
+            else str(result.payload)
+        )
+
+        assert text.strip(), f"empty response from teammate: {result.payload!r}"
+
+        if "TASK_TOOL_UNAVAILABLE" in text:
+            pytest.fail(
+                "Task tool is NOT available in SDK subprocess context — "
+                "restore the guard in server.py or document the limitation. "
+                f"Full response: {text!r}"
+            )
+        elif "CONFIRMED" in text:
+            # Task tool worked — guard can stay removed.
+            pass
+        else:
+            # Ambiguous — log the full response for manual inspection.
+            pytest.fail(
+                f"Unexpected response — could not determine Task tool status. "
+                f"Response: {text!r}"
             )
