@@ -215,6 +215,24 @@
       font-family: var(--font-mono); font-size: 11px; color: var(--fg-1);
     }
 
+    /* dead-teammate-ui-segregation */
+    .terminated-section { border-top: 1px solid var(--line); margin-top: 8px; flex-shrink: 0; }
+    .terminated-header {
+      width: 100%; text-align: left; background: none; border: none;
+      cursor: pointer; padding: 6px 12px;
+      color: var(--fg-3); font-size: 11px;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      display: flex; align-items: center; gap: 6px;
+      font-family: var(--font-sans);
+    }
+    .terminated-header:hover { color: var(--fg-1); }
+    .terminated-list { padding: 4px 0; }
+    .terminated-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px; cursor: pointer; opacity: 0.6;
+    }
+    .terminated-row:hover { opacity: 0.9; background: var(--bg-1); }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
@@ -539,14 +557,15 @@
     // --- MCTopBar ---
     function MCTopBar({ instances, connected }) {
       const totals = instances.reduce((acc, i) => {
-        acc.agents += i.agents.length;
+        const live = i.agents.filter(a => a.dead !== true);
+        acc.agents += live.length;
         acc.cost += i.cost;
         acc.in += i.tokens.in;
         acc.out += i.tokens.out;
-        acc.byStatus.thinking += i.agents.filter(a => a.status === "thinking").length;
-        acc.byStatus.tool += i.agents.filter(a => a.status === "tool-use").length;
-        acc.byStatus.idle += i.agents.filter(a => a.status === "idle").length;
-        acc.byStatus.waiting += i.agents.filter(a => a.status === "waiting").length;
+        acc.byStatus.thinking += live.filter(a => a.status === "thinking").length;
+        acc.byStatus.tool += live.filter(a => a.status === "tool-use").length;
+        acc.byStatus.idle += live.filter(a => a.status === "idle").length;
+        acc.byStatus.waiting += live.filter(a => a.status === "waiting").length;
         return acc;
       }, { agents: 0, cost: 0, in: 0, out: 0, byStatus: { thinking: 0, tool: 0, idle: 0, waiting: 0 } });
 
@@ -604,7 +623,8 @@
           {instances.map(cli => {
             const active = cli.id === activeId;
             const unreachable = cli.status === "unreachable";
-            const statuses = cli.agents.map(a => a.status);
+            const liveAgentsLocal = cli.agents.filter(a => a.dead !== true);
+            const statuses = liveAgentsLocal.map(a => a.status);
             const borderColor = unreachable ? "oklch(0.60 0.15 25 / 0.30)" : active ? "var(--accent-line)" : "var(--line)";
             return (
               <div key={cli.id} onClick={() => onSelect(cli.id)} style={{
@@ -643,7 +663,7 @@
                     : statuses.map((s, i) => <span key={i} className={`dot ${s}`}/>)
                   }
                   <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-2)" }}>
-                    <span className="mono" style={{ color: unreachable ? "var(--fg-3)" : "var(--fg-0)" }}>{cli.agents.length}</span>
+                    <span className="mono" style={{ color: unreachable ? "var(--fg-3)" : "var(--fg-0)" }}>{liveAgentsLocal.length}</span>
                     {" "}agents · <span className="mono" style={{ color: unreachable ? "var(--fg-3)" : "var(--fg-0)" }}>{fmtCost(cli.cost)}</span>
                   </span>
                 </div>
@@ -819,11 +839,9 @@
         );
       }
 
-      const isDead = agent.dead === true;
-
       return (
-        <div className={isDead ? "tm-row-dead" : undefined} style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
-          {!isDead && <div className={accentClass}/>}
+        <div style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
+          <div className={accentClass}/>
           <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", background: "var(--bg-1)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <AgentAvatar id={agent.id} role={agent.role} size={22}/>
@@ -851,7 +869,7 @@
             </div>
           </div>
 
-          {!isDead && <div style={{
+          <div style={{
             padding: "6px 14px", fontSize: 10.5, color: "var(--fg-2)",
             display: "flex", alignItems: "center", gap: 6,
             borderBottom: "1px solid var(--line-soft)", background: "var(--bg-0)",
@@ -860,12 +878,12 @@
             <span className={`dot ${agent.status}`}/>
             <span style={{ textTransform: "lowercase" }}>{agent.status}</span>
             <span style={{ marginLeft: "auto", flexShrink: 0 }}>{fmtAgo(agent.lastMsg)}</span>
-          </div>}
+          </div>
 
           {agent.config && <ConfigChips config={agent.config} onClick={() => onOpenPanel && onOpenPanel(agent)}/>}
 
-          {/* F22 D-2/D-10: dedicated tool-chip row — hidden for dead teammates. */}
-          {!isDead && <div className="tool-chip-row">{chipNode}</div>}
+          {/* F22 D-2/D-10: dedicated tool-chip row */}
+          <div className="tool-chip-row">{chipNode}</div>
 
           <div
             ref={scrollRef}
@@ -884,9 +902,47 @@
       );
     }
 
+    // --- TerminatedSection (TerminatedRow + TerminatedSection) ---
+    function TerminatedRow({ agent, onClick }) {
+      const uptime = agent.uptime != null ? fmtDuration(agent.uptime) : '—';
+      return (
+        <div className="terminated-row" onClick={onClick}>
+          <AgentAvatar id={agent.id} role={agent.role} size={18}/>
+          <span style={{ fontSize: 12, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {agent.name || agent.role}
+          </span>
+          {agent.name && agent.name !== agent.role && (
+            <span style={{ fontSize: 11, color: 'var(--fg-3)', flexShrink: 0 }}>{agent.role}</span>
+          )}
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, fontSize: 11, color: 'var(--fg-3)', flexShrink: 0 }}>
+            <span className="mono">{uptime}</span>
+            <span className="mono">{fmtCost(agent.cost)}</span>
+          </span>
+        </div>
+      );
+    }
+
+    function TerminatedSection({ agents, isOpen, onToggle, onAgentClick }) {
+      if (agents.length === 0) return null;
+      return (
+        <div className="terminated-section">
+          <button className="terminated-header" onClick={onToggle}>
+            <span>{isOpen ? '▼' : '▶'}</span>
+            <span>Terminated ({agents.length})</span>
+          </button>
+          {isOpen && (
+            <div className="terminated-list">
+              {agents.map(agent => (
+                <TerminatedRow key={agent.id} agent={agent} onClick={() => onAgentClick && onAgentClick(agent)}/>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // --- StreamColumns ---
-    function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival }) {
-      const [openPanel, setOpenPanel] = useState(null);
+    function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival, onOpenPanel }) {
       const byAgent = useMemo(() => {
         const out = {};
         agents.forEach(a => { out[a.id] = []; });
@@ -936,17 +992,10 @@
                 agentMap={agentMap}
                 serverNow={cli.now_wallclock}
                 perfAtArrival={perfAtArrival}
-                onOpenPanel={(agent) => setOpenPanel(agent)}
+                onOpenPanel={onOpenPanel}
               />
             ))}
           </div>
-          {openPanel && openPanel.config && (
-            <ConfigDetailPanel
-              config={openPanel.config}
-              agentRole={openPanel.role}
-              onClose={() => setOpenPanel(null)}
-            />
-          )}
         </>
       );
     }
@@ -955,6 +1004,8 @@
     function MissionControlLayout({ data, connected, perfAtArrival }) {
       const { instances, transcripts } = data;
       const [activeId, setActiveId] = useState(instances[0].id);
+      const [openPanel, setOpenPanel] = useState(null);
+      const [terminatedOpen, setTerminatedOpen] = useState({});
 
       const cli = instances.find(i => i.id === activeId) || instances[0];
       const agentMap = useMemo(
@@ -962,15 +1013,34 @@
         [cli],
       );
       const msgs = transcripts[cli.id] || [];
+      const liveAgents = (cli.agents || []).filter(a => a.dead !== true);
+      const deadAgents = (cli.agents || []).filter(a => a.dead === true);
 
       return (
         <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-0)", overflow: "hidden" }}>
           <MCTopBar instances={instances} connected={connected}/>
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId}/>
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: 0 }}>
-            <MiniGraph cli={cli} agents={cli.agents}/>
-            <StreamColumns cli={cli} agents={cli.agents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival}/>
+            <MiniGraph cli={cli} agents={liveAgents}/>
+            <div style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+              <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
+                <StreamColumns cli={cli} agents={liveAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel}/>
+              </div>
+              <TerminatedSection
+                agents={deadAgents}
+                isOpen={terminatedOpen[activeId] === true}
+                onToggle={() => setTerminatedOpen(o => ({...o, [activeId]: !(o[activeId] === true)}))}
+                onAgentClick={setOpenPanel}
+              />
+            </div>
           </div>
+          {openPanel && openPanel.config && (
+            <ConfigDetailPanel
+              config={openPanel.config}
+              agentRole={openPanel.role}
+              onClose={() => setOpenPanel(null)}
+            />
+          )}
         </div>
       );
     }
