@@ -256,6 +256,72 @@ def dead_server_url(dead_broker):
     t.join(timeout=3)
 
 
+def _start_server(broker: Broker) -> str:
+    """Spin up a UIServer on a free port; return base URL. Server runs as daemon thread."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer did not start within 10 seconds")
+
+    return f"http://127.0.0.1:{port}", server, t
+
+
+@pytest.fixture(scope="module")
+def mixed_server_url():
+    """UIServer with one alive and one dead teammate."""
+    broker = Broker()
+
+    live_id = f"t-live-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=live_id, name="live-builder", role="builder")
+    broker._teammates[live_id] = tm
+    broker._inboxes[live_id] = asyncio.Queue()
+    broker._info[live_id] = TeammateInfo(
+        id=live_id, name="live-builder", role="builder",
+        spawned_at=time.time(), alive=True,
+    )
+    broker._configs[live_id] = KNOWN_CONFIG
+
+    dead_id = f"t-dead-{uuid.uuid4().hex[:10]}"
+    broker._info[dead_id] = TeammateInfo(
+        id=dead_id, name="ex-builder", role="builder",
+        spawned_at=time.time() - 300, alive=False,
+        died_at_wallclock=time.time() - 10,
+        total_cost_usd_at_death=0.01,
+        total_input_tokens_at_death=100,
+        total_output_tokens_at_death=50,
+    )
+    broker._configs[dead_id] = DEAD_CONFIG
+
+    url, server, t = _start_server(broker)
+    yield url, live_id, dead_id
+    server.should_exit = True
+    t.join(timeout=3)
+
+
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 
@@ -333,26 +399,36 @@ def test_detail_panel_shows_mcp_servers_and_closes_on_esc(live_server_url, page)
 
 
 @pytest.mark.dashboard
-def test_dead_teammate_row_renders_dimmed_with_chips(dead_server_url, page):
-    """Edge case: dead-with-config teammate renders a dimmed row with config chips.
+def test_dead_teammate_in_terminated_section(dead_server_url, page):
+    """Dead agent appears in collapsed TerminatedSection; clicking row opens detail panel.
 
-    Spec § Edge Cases line 93: after kill_teammate, the dead row stays in the
-    dashboard dimmed and config chips/panel remain accessible.
+    SC-2/SC-3/SC-4/SC-8: terminated section is present but collapsed by default;
+    expanding it reveals the dead agent row; clicking the row opens the config
+    detail panel with the system prompt accessible.
     """
     page.goto(dead_server_url)
-    # Wait for WS data — chips must appear for the dead row
-    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    # Wait for WS data and React render — terminated header must appear
+    terminated_header = page.locator(".terminated-header")
+    terminated_header.wait_for(state="visible", timeout=15000)
 
-    # The dead row must carry the tm-row-dead CSS class (dimmed rendering)
-    dead_row = page.locator(".tm-row-dead")
+    # Section must show count and be collapsed (no .terminated-row visible)
+    header_text = terminated_header.inner_text()
+    assert "1" in header_text, f"Expected terminated count in header; got: {header_text}"
+    assert page.locator(".terminated-row").count() == 0, "Terminated section must be collapsed on load"
+
+    # Expand the section
+    terminated_header.click()
+    dead_row = page.locator(".terminated-row").first
     dead_row.wait_for(state="visible", timeout=5000)
 
-    # Chips must still be present (accessible)
-    chips_in_dead_row = dead_row.locator(".tm-config-chip").all()
-    assert len(chips_in_dead_row) > 0, "Expected config chips inside dead row"
+    # Row must show the agent name/role
+    row_text = dead_row.inner_text()
+    assert "ex-builder" in row_text or "builder" in row_text, (
+        f"Expected agent identity in terminated row; got: {row_text}"
+    )
 
-    # Panel must open on click
-    dead_row.locator(".tm-config-chips").click()
+    # Clicking the row opens the detail panel
+    dead_row.click()
     panel = page.locator(".tm-detail-panel")
     panel.wait_for(state="visible", timeout=5000)
 
@@ -422,3 +498,73 @@ def test_no_extras_chip_when_extra_tools_absent(live_server_url, page):
         f"Expected no extras chip for pre-feature config; got {len(extras_chips)}: "
         f"{[c.inner_text() for c in extras_chips]}"
     )
+
+
+@pytest.mark.dashboard
+def test_sc1_dead_agent_absent_from_stream_columns(mixed_server_url, page):
+    """SC-1: dead agent column does not appear in StreamColumns; only the live agent does."""
+    url, live_id, dead_id = mixed_server_url
+    page.goto(url)
+    # Wait for the live agent's config chips (WS data received)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+
+    # Live agent must appear in stream (its ID visible as a column header)
+    assert page.locator(f'text="{live_id[:8]}"').count() > 0 or page.get_by_text(live_id[:8]).count() > 0, \
+        "Expected live agent to appear in stream columns"
+
+    # Dead agent must NOT appear in stream columns (its ID not in any column header)
+    dead_id_short = dead_id[:8]
+    # Check the mono ID display inside agent columns specifically
+    column_ids = [el.inner_text() for el in page.locator(".mono").all() if dead_id in (el.inner_text() or "")]
+    # More targeted: count of elements containing the full dead agent ID in the stream area
+    assert page.locator(f'[class="mono"]').filter(has_text=dead_id).count() == 0, \
+        f"Dead agent ID {dead_id} must not appear in stream columns"
+
+
+@pytest.mark.dashboard
+def test_sc5_no_terminated_section_when_all_alive(live_server_url, page):
+    """SC-5: terminated section is absent from DOM when no dead agents exist."""
+    page.goto(live_server_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    assert page.locator(".terminated-section").count() == 0, \
+        "Terminated section must not render when there are no dead agents"
+
+
+@pytest.mark.dashboard
+def test_sc6_instance_strip_shows_live_count_only(mixed_server_url, page):
+    """SC-6: instance strip agent count reflects only live agents (1, not 2)."""
+    url, live_id, dead_id = mixed_server_url
+    page.goto(url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+
+    # The instance strip shows "N agents" — must be 1, not 2
+    agents_text = page.locator("text=agents").first.inner_text()
+    # The count is in the mono span immediately before "agents"
+    strip_text = page.locator(".terminated-header").count()  # ensure terminated section present
+    # Find the "N agents" label in the instance strip card
+    instance_card = page.locator("[style*='flex: 1 0 280px']").first
+    card_text = instance_card.inner_text()
+    assert "1" in card_text and "agents" in card_text, \
+        f"Expected '1 agents' in instance card; got: {card_text!r}"
+    assert "2 agents" not in card_text, \
+        f"Instance card must not show dead agent in count; got: {card_text!r}"
+
+
+@pytest.mark.dashboard
+def test_sc7_collapse_state_survives_poll(mixed_server_url, page):
+    """SC-7: expanding the terminated section persists across WS push cycles."""
+    url, _, _ = mixed_server_url
+    page.goto(url)
+    terminated_header = page.locator(".terminated-header")
+    terminated_header.wait_for(state="visible", timeout=15000)
+
+    # Expand it
+    terminated_header.click()
+    page.locator(".terminated-row").first.wait_for(state="visible", timeout=5000)
+
+    # Wait past a WS push cycle (server pushes ~every 2s)
+    time.sleep(3)
+
+    # Section must remain expanded
+    assert page.locator(".terminated-row").count() > 0, \
+        "Terminated section collapsed after poll cycle — state reset unexpectedly"
