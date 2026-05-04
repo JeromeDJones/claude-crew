@@ -182,6 +182,7 @@ class Broker:
             permission_mode=permission_mode,
             extra_tools=extra_tools,
             extra_skills=extra_skills,
+            system_prompt_override=getattr(teammate, "_system_prompt", None),
         )
 
         self._sink.write_lifecycle("spawn", {
@@ -201,6 +202,7 @@ class Broker:
         permission_mode: str | None,
         extra_tools: list[str] | None = None,
         extra_skills: list[str] | None = None,
+        system_prompt_override: str | None = None,
     ) -> "dict[str, Any] | None":
         """Build a config snapshot dict from a resolved AgentDefinition.
 
@@ -218,6 +220,10 @@ class Broker:
           any other dict field (that is where API keys live).
         - extra_tools/extra_skills: net-new tools/skills beyond the pack baseline.
           Always present as empty lists when no extras (consistent snapshot shape).
+        - system_prompt_override: the fully-assembled teammate prompt (body +
+          addendum) from SdkTeammate._system_prompt. Wins over agent_def.prompt,
+          which holds the subagent-context prompt (different ordering/framing).
+          None for StubTeammate (falls through to agent_def.prompt).
         """
         if agent_def is None:
             # No pack entry — return minimal snapshot if extras provided, else None.
@@ -231,7 +237,7 @@ class Broker:
                     "skills": effective_skills,
                     "permission_mode": permission_mode,
                     "mcp_servers": [],
-                    "system_prompt": None,
+                    "system_prompt": system_prompt_override,
                     "effort": effort,
                     # All extras are net-new (no pack baseline to compare against)
                     "extra_tools": effective_tools[:],
@@ -301,7 +307,7 @@ class Broker:
             "skills": effective_skills,
             "permission_mode": resolved_pm,
             "mcp_servers": mcp_names,
-            "system_prompt": getattr(agent_def, "prompt", None),
+            "system_prompt": system_prompt_override if system_prompt_override is not None else getattr(agent_def, "prompt", None),
             "effort": resolved_effort,
             # Extra fields: always present as lists (empty when no extras)
             "extra_tools": net_extra_tools,
