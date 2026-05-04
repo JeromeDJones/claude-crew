@@ -624,3 +624,155 @@ class TestExtraToolsFactoryClosure:
             )
         finally:
             await b.shutdown_all()
+
+
+# ---------- MCP server auto-wiring from extra_tools ----------
+
+
+class TestMcpServerNameFromToolId:
+    """Unit tests for the _mcp_server_name_from_tool_id helper."""
+
+    def test_extracts_server_from_mcp_tool(self) -> None:
+        from claude_crew.factories import _mcp_server_name_from_tool_id
+        assert _mcp_server_name_from_tool_id("mcp__knowledge-graph__repo_map") == "knowledge-graph"
+
+    def test_extracts_hyphenated_server(self) -> None:
+        from claude_crew.factories import _mcp_server_name_from_tool_id
+        assert _mcp_server_name_from_tool_id("mcp__claude-crew__spawn_teammate") == "claude-crew"
+
+    def test_returns_none_for_builtin_tool(self) -> None:
+        from claude_crew.factories import _mcp_server_name_from_tool_id
+        assert _mcp_server_name_from_tool_id("Read") is None
+        assert _mcp_server_name_from_tool_id("Bash") is None
+
+    def test_returns_none_for_non_mcp_prefix(self) -> None:
+        from claude_crew.factories import _mcp_server_name_from_tool_id
+        assert _mcp_server_name_from_tool_id("some__other__tool") is None
+
+    def test_returns_none_for_too_few_parts(self) -> None:
+        from claude_crew.factories import _mcp_server_name_from_tool_id
+        assert _mcp_server_name_from_tool_id("mcp__knowledge-graph") is None
+
+
+class TestMcpServerAutoWiring:
+    """extra_tools with MCP tool IDs must wire the corresponding server into mcpServers."""
+
+    def _make_factory(self, monkeypatch, tmp_path, pack_def):
+        """Build a default_factory with a controlled merged pack, capturing sdk_factory calls."""
+        import copy
+        from claude_crew.factories import default_factory
+
+        (tmp_path / "home").mkdir(exist_ok=True)
+        (tmp_path / "cwd").mkdir(exist_ok=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        def mock_build_merged_pack():
+            return {"explorer": pack_def}, {"explorer": []}, {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        captured: list[dict] = []
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            agents = kwargs.get("agents", {})
+            captured.append(copy.deepcopy(agents))
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        return default_factory(), captured
+
+    def test_mcp_tool_in_extra_tools_adds_server_to_mcp_servers(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Granting mcp__knowledge-graph__repo_map must add 'knowledge-graph' to mcpServers."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read", "Grep", "Glob"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "explorer", "explorer", extra_tools=["mcp__knowledge-graph__repo_map"])
+
+        agent_def = captured[0]["explorer"]
+        assert "mcp__knowledge-graph__repo_map" in (agent_def.tools or [])
+        assert "knowledge-graph" in (agent_def.mcpServers or []), (
+            f"expected 'knowledge-graph' in mcpServers; got {agent_def.mcpServers}"
+        )
+
+    def test_multiple_mcp_tools_same_server_deduplicated(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Two tools from the same server must produce exactly one mcpServers entry."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer", extra_tools=[
+            "mcp__knowledge-graph__repo_map",
+            "mcp__knowledge-graph__search_codebase_definitions",
+        ])
+
+        mcp_servers = captured[0]["explorer"].mcpServers or []
+        assert mcp_servers.count("knowledge-graph") == 1
+
+    def test_mcp_server_not_duplicated_when_already_in_pack(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """If the pack already declares the server, it must not be added twice."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+            mcpServers=["knowledge-graph"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer", extra_tools=["mcp__knowledge-graph__repo_map"])
+
+        mcp_servers = captured[0]["explorer"].mcpServers or []
+        assert mcp_servers.count("knowledge-graph") == 1
+
+    def test_builtin_extra_tools_do_not_add_mcp_servers(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Built-in tools like 'Write' must not add anything to mcpServers."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer", extra_tools=["Write", "Bash"])
+
+        agent_def = captured[0]["explorer"]
+        assert not (agent_def.mcpServers or []), (
+            f"expected empty mcpServers for builtin-only extras; got {agent_def.mcpServers}"
+        )
+
+    def test_mixed_builtin_and_mcp_extra_tools(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Mix of builtins and MCP tools: only MCP servers are auto-wired."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer", extra_tools=[
+            "Write",
+            "mcp__knowledge-graph__repo_map",
+            "mcp__claude-crew__list_crew",
+        ])
+
+        agent_def = captured[0]["explorer"]
+        mcp_servers = agent_def.mcpServers or []
+        assert "knowledge-graph" in mcp_servers
+        assert "claude-crew" in mcp_servers
+        assert len(mcp_servers) == 2

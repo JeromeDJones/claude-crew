@@ -27,6 +27,17 @@ _PACK_MODEL_ALIASES: dict[str, str] = {
 }
 
 
+def _mcp_server_name_from_tool_id(tool_id: str) -> str | None:
+    """Extract MCP server name from a tool ID like 'mcp__knowledge-graph__repo_map'.
+
+    Returns None for non-MCP tool IDs (e.g. 'Read', 'Bash').
+    """
+    parts = tool_id.split("__", 2)
+    if len(parts) == 3 and parts[0] == "mcp":
+        return parts[1]
+    return None
+
+
 def stub_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
@@ -149,6 +160,28 @@ def default_factory() -> TeammateFactory:
                         tools=list(dict.fromkeys(extra_tools or [])),
                         skills=list(dict.fromkeys(extra_skills or [])) or None,
                     )
+                # Auto-wire MCP servers for any MCP tool IDs in extra_tools.
+                # Granting the tool ID is necessary but not sufficient — the
+                # subprocess also needs the server name in AgentDefinition.mcpServers
+                # to establish the connection at spawn time.
+                if extra_tools:
+                    extra_servers = list(dict.fromkeys(
+                        s for t in extra_tools
+                        if (s := _mcp_server_name_from_tool_id(t)) is not None
+                    ))
+                    if extra_servers:
+                        existing_mcp = list(patched_def.mcpServers or [])
+                        existing_names = {
+                            e if isinstance(e, str) else e.get("name", "")
+                            for e in existing_mcp
+                        }
+                        new_servers = [s for s in extra_servers if s not in existing_names]
+                        if new_servers:
+                            patched_def = dataclasses.replace(
+                                patched_def,
+                                mcpServers=(existing_mcp + new_servers) or None,
+                            )
+
                 # Fresh dict per spawn — no shared mutable reference
                 effective_agents = {**merged_pack, role: patched_def}
             else:
