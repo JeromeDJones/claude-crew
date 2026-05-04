@@ -384,6 +384,7 @@ class SdkTeammate(Teammate):
         pack_bodies: "dict[str, str] | None" = None,
         cwd: str | None = None,
         permission_mode: str | None = None,
+        allowed_tools: "list[str] | None" = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -418,6 +419,7 @@ class SdkTeammate(Teammate):
         )
         self._cwd = cwd
         self._permission_mode = permission_mode
+        self._allowed_tools = allowed_tools
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
@@ -959,6 +961,10 @@ class SdkTeammate(Teammate):
 
         # Extract role-level fields from the agents pack.
         role_def = self._agents.get(self.role)
+
+        # allowed_tools: pre-approve specific tool IDs (e.g. MCP tools granted via extra_tools).
+        if self._allowed_tools:
+            opts_kwargs["allowed_tools"] = self._allowed_tools
 
         # permissionMode: spawn-time arg wins; falls back to role-pack; None → SDK default.
         effective_pm = self._permission_mode

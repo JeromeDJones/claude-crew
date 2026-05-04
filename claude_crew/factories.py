@@ -61,6 +61,7 @@ def sdk_factory(
     pack_bodies: "dict | None" = None,
     cwd: str | None = None, permission_mode: str | None = None,
     setting_sources: list[str] | None = None,
+    allowed_tools: list[str] | None = None,
     extra_tools: list[str] | None = None,
     extra_skills: list[str] | None = None,
 ) -> Teammate:
@@ -82,6 +83,8 @@ def sdk_factory(
     # None means "use SDK default"; [] means "no sources" — keep is-not-None, not truthiness.
     if setting_sources is not None:
         kwargs["setting_sources"] = setting_sources
+    if allowed_tools is not None:
+        kwargs["allowed_tools"] = allowed_tools
     return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
@@ -198,11 +201,16 @@ def default_factory() -> TeammateFactory:
                     if pack_model:
                         resolved_model = _PACK_MODEL_ALIASES.get(pack_model, pack_model)
 
+            # Pre-approve MCP tool IDs so the subprocess doesn't block on permission prompts.
+            # The lead has already authorized these tools by passing them as extra_tools.
+            mcp_extra = [t for t in (extra_tools or []) if _mcp_server_name_from_tool_id(t)]
+
             return sdk_factory(
                 id, name, role, model=resolved_model, effort=effort, agents=effective_agents,
                 pack_bodies=merged_bodies,
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),
+                allowed_tools=mcp_extra or None,
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]
