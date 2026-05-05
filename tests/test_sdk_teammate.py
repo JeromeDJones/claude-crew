@@ -3031,3 +3031,161 @@ class TestSdkTeammateMemoryWarn:
         assert any("unsafe characters" in m for m in warn_msgs), (
             f"Expected unsafe-character WARNING; got: {warn_msgs}"
         )
+
+
+class TestSdkTeammateMemoryWriteGuard:
+    """SC-1, SC-2, SC-3, SC-4, SC-5, SC-6 from FEATURE-teammate-memory-write-guard.md.
+
+    Hook-level integration: fires _on_pre_tool_use directly on the teammate
+    and verifies the deny payload is returned for blocked paths.
+    """
+
+    def _make_teammate(self, role: str = "any-role"):
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001", tools=["Write", "Edit"],
+        )
+        return SdkTeammate(
+            id="t-guard", name="g", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "b"},
+        )
+
+    async def test_write_to_lead_project_memory_blocked(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-1: Write to ~/.claude/projects/*/memory/** is blocked."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("sentinel")
+
+        evil_path = tmp_path / ".claude" / "projects" / "-foo" / "memory" / "x.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": str(evil_path), "content": "x"}},
+            "tu-w-1", {},
+        )
+
+        assert "hookSpecificOutput" in result
+        out = result["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert "blocked" in out["permissionDecisionReason"].lower()
+
+    async def test_edit_to_lead_project_memory_blocked(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-4: Edit tool is also guarded."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("sentinel")
+
+        evil_path = tmp_path / ".claude" / "projects" / "-foo" / "memory" / "MEMORY.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Edit",
+             "tool_input": {"file_path": str(evil_path), "old_string": "a", "new_string": "b"}},
+            "tu-e-1", {},
+        )
+
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    async def test_write_to_agent_memory_allowed(self, tmp_path, monkeypatch) -> None:
+        """SC-2: Writes to ~/.claude/agent-memory/<role>/ proceed normally."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("sentinel")
+
+        ok_path = tmp_path / ".claude" / "agent-memory" / "sentinel" / "x.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": str(ok_path), "content": "x"}},
+            "tu-w-2", {},
+        )
+
+        # No deny payload — allow path through.
+        assert "hookSpecificOutput" not in result or \
+            result["hookSpecificOutput"].get("permissionDecision") != "deny"
+
+    async def test_write_to_unrelated_path_allowed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-3: Writes outside memory paths are unaffected."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("sentinel")
+
+        ok_path = tmp_path / "src" / "my_module.py"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": str(ok_path), "content": "x"}},
+            "tu-w-3", {},
+        )
+
+        assert "hookSpecificOutput" not in result or \
+            result["hookSpecificOutput"].get("permissionDecision") != "deny"
+
+    async def test_bash_to_lead_project_memory_NOT_blocked(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Bash is out of scope for v1 — only Write/Edit are guarded."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("sentinel")
+
+        evil_path = tmp_path / ".claude" / "projects" / "-foo" / "memory" / "x.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash",
+             "tool_input": {"command": f"echo x > {evil_path}"}},
+            "tu-b-1", {},
+        )
+
+        # Bash is not guarded.
+        assert "hookSpecificOutput" not in result or \
+            result["hookSpecificOutput"].get("permissionDecision") != "deny"
+
+    async def test_block_message_names_role_and_destination(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-5: Block message tells the agent where to write instead."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tm = self._make_teammate("rr-planner")
+
+        evil_path = tmp_path / ".claude" / "projects" / "-foo" / "memory" / "x.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": str(evil_path), "content": "x"}},
+            "tu-msg", {},
+        )
+
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        # Names the right destination — the agent's own role-scoped dir.
+        assert "rr-planner" in reason
+        assert "agent-memory" in reason
+
+    async def test_guard_applies_without_memory_user_declared(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-6: Guard applies to ALL SDK teammates, not just memory: user ones."""
+        from pathlib import Path
+        from claude_agent_sdk.types import AgentDefinition
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Pack with NO memory: user declaration.
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001", tools=["Write"],
+        )
+        tm = SdkTeammate(
+            id="t-no-mem", name="nm", role="builder",
+            agents={"builder": agent_def},
+            pack_bodies={"builder": "b"},
+        )
+
+        evil_path = tmp_path / ".claude" / "projects" / "-foo" / "memory" / "x.md"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": str(evil_path), "content": "x"}},
+            "tu-no-mem", {},
+        )
+
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"

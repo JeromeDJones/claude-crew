@@ -508,9 +508,37 @@ class SdkTeammate(Teammate):
 
         Wraps in try/except; stamps activity; branches on subagent vs main-agent;
         updates _tool_uses dict; writes transcript line.
+
+        Also enforces the memory write guard: blocks Write/Edit calls whose
+        file_path resolves into ~/.claude/projects/*/memory/** (the lead's
+        project-scoped memory). See FEATURE-teammate-memory-write-guard.md.
         """
         try:
             self._stamp_activity()
+            # Memory write guard — runs first, before any tracking, since a
+            # denied call doesn't proceed to the tool dispatch path anyway.
+            tool_name = inp.get("tool_name")
+            if tool_name in ("Write", "Edit"):
+                tool_input = inp.get("tool_input") or {}
+                file_path = tool_input.get("file_path")
+                if isinstance(file_path, str) and file_path:
+                    from claude_crew.teammate_memory import (
+                        is_lead_project_memory_path,
+                        write_guard_deny_message,
+                    )
+                    if is_lead_project_memory_path(file_path):
+                        reason = write_guard_deny_message(self.role, file_path)
+                        logger.warning(
+                            "memory_write_guard: blocked %s to %r for teammate=%s role=%s",
+                            tool_name, file_path, self.id, self.role,
+                        )
+                        return {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": reason,
+                            }
+                        }
             # D3: subagent branch — activity stamped; spawn tracking path.
             if inp.get("agent_id") is not None:
                 agent_id = inp["agent_id"]

@@ -57,6 +57,55 @@ def memory_index_path(role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Write guard — protects the lead's project-scoped memory from teammate writes
+# ---------------------------------------------------------------------------
+
+
+def is_lead_project_memory_path(write_path: str) -> bool:
+    """True if the path resolves into ~/.claude/projects/*/memory/**.
+
+    Dual-checks the expanded path AND the resolved path so that both
+    symlink-in (caller-supplied path is a symlink into the protected zone)
+    and symlink-out (a path within the zone is itself a symlink to a safe
+    location) bypasses are caught.
+
+    Position-specific check on parts ensures we only block paths shaped as
+    <protected_root>/<project_slug>/memory/<...>, not paths that merely
+    contain "memory" elsewhere (e.g., ~/.claude/agent-memory/projects/memory/).
+    """
+    expanded = Path(write_path).expanduser()
+    protected_root = Path.home() / ".claude" / "projects"
+
+    candidates: list[Path] = [expanded]
+    try:
+        candidates.append(expanded.resolve(strict=False))
+    except (OSError, RuntimeError):
+        pass  # broken symlinks etc. — expanded check still applies
+
+    for candidate in candidates:
+        try:
+            rel = candidate.relative_to(protected_root)
+        except ValueError:
+            continue
+        # rel.parts must be (<project_slug>, "memory", ...).
+        if len(rel.parts) >= 2 and rel.parts[1] == "memory":
+            return True
+    return False
+
+
+def write_guard_deny_message(role: str, attempted_path: str) -> str:
+    """Return the deny reason text for a blocked write to lead project memory."""
+    target = memory_dir(role)
+    return (
+        f"Write blocked: `{attempted_path}` is under the lead's project memory "
+        f"(`~/.claude/projects/*/memory/`), which is the lead session's curated "
+        f"memory — not yours. SDK teammates write their memory to "
+        f"`{target}/` (your role-scoped agent memory). "
+        f"Retry with a path under that directory."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section builder
 # ---------------------------------------------------------------------------
 

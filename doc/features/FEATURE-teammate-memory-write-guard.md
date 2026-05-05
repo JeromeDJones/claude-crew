@@ -1,6 +1,6 @@
 # Feature: Teammate Memory Write Guard
 
-**Status**: Planning
+**Status**: Shipped (2026-05-04)
 **Created**: 2026-05-04
 **Depends on**: `FEATURE-teammate-memory-persistence.md` (merged)
 
@@ -18,16 +18,16 @@ The injected disambiguation note tells the agent not to do this. Instructions ar
 
 ### Success Criteria
 
-- [ ] **SC-1: Write to lead project memory blocked.** When an SDK teammate attempts to use the Write tool with a path under `~/.claude/projects/*/memory/**`, the call is blocked before reaching the filesystem. The teammate receives a clear error message explaining where it should write instead.
-- [ ] **SC-2: Write to own agent memory unaffected.** Writes to `~/.claude/agent-memory/<role>/**` proceed normally. The guard does not interfere with legitimate memory persistence.
-- [ ] **SC-3: Writes outside memory paths unaffected.** Writes to project source files, tmp paths, or anywhere not matching the lead-project-memory pattern proceed normally. The guard is narrowly scoped.
-- [ ] **SC-4: Edit tool also guarded.** The Edit tool (which can rewrite or replace file content) is subject to the same guard for the same paths. Otherwise the guard is trivially bypassed.
-- [ ] **SC-5: Block message names the right destination for the role.** The error tells the teammate exactly where its memory should go: `~/.claude/agent-memory/<role>/`. Generic "blocked" without redirection is unhelpful.
-- [ ] **SC-6: Guard applies to ALL SDK teammates, not just `memory: user` ones.** A teammate without `memory: user` declared still cannot write to the lead's project memory. The guard is a safety boundary, not a memory-feature opt-in.
-- [ ] **SC-7: No regression on existing 889-test suite.** Specifically, no false positives on existing Write/Edit tests.
-- [ ] **SC-8: Live verification — Write blocked.** A teammate explicitly told to write to `~/.claude/projects/<cwd>/memory/test.md` is blocked; the file is not created; the response contains the redirection message.
-- [ ] **SC-8b: Live verification — Edit blocked.** A teammate explicitly told to edit `~/.claude/projects/<cwd>/memory/MEMORY.md` is blocked; the file content is unchanged; the response contains the redirection message.
-- [ ] **SC-9: Symlink bypass closed.** A write to a path that resolves into the protected zone is blocked, regardless of which direction the symlink points (caller-supplied path is a symlink into the zone, OR a path within the zone is itself a symlink to a safe location). Both directions tested.
+- [x] **SC-1: Write to lead project memory blocked.** When an SDK teammate attempts to use the Write tool with a path under `~/.claude/projects/*/memory/**`, the call is blocked before reaching the filesystem. The teammate receives a clear error message explaining where it should write instead.
+- [x] **SC-2: Write to own agent memory unaffected.** Writes to `~/.claude/agent-memory/<role>/**` proceed normally. The guard does not interfere with legitimate memory persistence.
+- [x] **SC-3: Writes outside memory paths unaffected.** Writes to project source files, tmp paths, or anywhere not matching the lead-project-memory pattern proceed normally. The guard is narrowly scoped.
+- [x] **SC-4: Edit tool also guarded.** The Edit tool (which can rewrite or replace file content) is subject to the same guard for the same paths. Otherwise the guard is trivially bypassed.
+- [x] **SC-5: Block message names the right destination for the role.** The error tells the teammate exactly where its memory should go: `~/.claude/agent-memory/<role>/`. Generic "blocked" without redirection is unhelpful.
+- [x] **SC-6: Guard applies to ALL SDK teammates, not just `memory: user` ones.** A teammate without `memory: user` declared still cannot write to the lead's project memory. The guard is a safety boundary, not a memory-feature opt-in.
+- [x] **SC-7: No regression on existing 889-test suite.** (910 passing after, including 21 new tests) Specifically, no false positives on existing Write/Edit tests.
+- [x] **SC-8: Live verification — Write blocked.** A teammate explicitly told to write to `~/.claude/projects/<cwd>/memory/test.md` is blocked; the file is not created; the response contains the redirection message.
+- [x] **SC-8b: Live verification — Edit blocked.** A teammate explicitly told to edit `~/.claude/projects/<cwd>/memory/MEMORY.md` is blocked; the file content is unchanged; the response contains the redirection message.
+- [x] **SC-9: Symlink bypass closed.** (Both directions tested in unit tests) A write to a path that resolves into the protected zone is blocked, regardless of which direction the symlink points (caller-supplied path is a symlink into the zone, OR a path within the zone is itself a symlink to a safe location). Both directions tested.
 
 ### Questions
 

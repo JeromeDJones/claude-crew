@@ -12,8 +12,10 @@ import pytest
 from claude_crew.teammate_memory import (
     _sanitize_role,
     build_memory_section,
+    is_lead_project_memory_path,
     memory_dir,
     memory_index_path,
+    write_guard_deny_message,
 )
 from claude_crew.teammate_prompt import SENTINEL_MEMORY
 
@@ -210,3 +212,92 @@ class TestNoSpontaneousMutation:
         assert not index.exists()
         build_memory_section("never-spawned", ("Write",))
         assert not index.exists()
+
+
+# ---------------------------------------------------------------------------
+# Write guard
+# ---------------------------------------------------------------------------
+
+
+class TestIsLeadProjectMemoryPath:
+    def test_blocks_path_in_lead_project_memory(self, fake_home):
+        path = fake_home / ".claude" / "projects" / "-foo-bar" / "memory" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is True
+
+    def test_blocks_nested_path_in_lead_project_memory(self, fake_home):
+        path = fake_home / ".claude" / "projects" / "-foo" / "memory" / "sub" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is True
+
+    def test_allows_agent_memory_path(self, fake_home):
+        path = fake_home / ".claude" / "agent-memory" / "sentinel" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_allows_unrelated_path(self, fake_home):
+        path = fake_home / "some" / "project" / "memory" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_allows_projects_directory_without_memory(self, fake_home):
+        path = fake_home / ".claude" / "projects" / "-foo" / "todos" / "x.json"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_does_not_false_positive_on_role_named_projects(self, fake_home):
+        """Path with both 'projects' and 'memory' in parts but NOT under
+        ~/.claude/projects/ must not be blocked. This is the H-2 bug."""
+        path = fake_home / ".claude" / "agent-memory" / "projects" / "memory" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_does_not_false_positive_on_memory_in_wrong_position(self, fake_home):
+        """~/.claude/projects/<slug>/foo/memory/x.md — memory not at parts[1]."""
+        path = fake_home / ".claude" / "projects" / "-foo" / "subdir" / "memory" / "x.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_blocks_symlink_in_pointing_into_protected_zone(self, fake_home):
+        """Caller-supplied path is a symlink that resolves into the zone."""
+        target = fake_home / ".claude" / "projects" / "-foo" / "memory"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "real.md").write_text("x")
+        symlink = fake_home / "evil_link.md"
+        symlink.symlink_to(target / "real.md")
+        assert is_lead_project_memory_path(str(symlink)) is True
+
+    def test_blocks_symlink_out_protected_dir_pointing_to_safe(self, fake_home):
+        """The path within the zone is itself a symlink to a safe location.
+        The H-2 dual-check: expanded path is in the zone even if resolved escapes."""
+        # Make ~/.claude/projects/-foo/memory itself a symlink to /tmp/safe.
+        protected_parent = fake_home / ".claude" / "projects" / "-foo"
+        protected_parent.mkdir(parents=True, exist_ok=True)
+        safe_target = fake_home / "tmp_safe"
+        safe_target.mkdir(parents=True, exist_ok=True)
+        (protected_parent / "memory").symlink_to(safe_target)
+        # Now writing to "~/.claude/projects/-foo/memory/x.md" resolves to
+        # ~/tmp_safe/x.md — but the EXPANDED path is still in the protected zone.
+        attempted = protected_parent / "memory" / "x.md"
+        assert is_lead_project_memory_path(str(attempted)) is True
+
+    def test_handles_relative_path_resolving_into_zone(self, fake_home, monkeypatch):
+        """A relative path that resolves into the zone gets caught via .resolve()."""
+        target = fake_home / ".claude" / "projects" / "-foo" / "memory"
+        target.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(target)
+        # Relative path "x.md" resolves to <target>/x.md.
+        assert is_lead_project_memory_path("x.md") is True
+
+    def test_empty_string_does_not_match(self, fake_home):
+        # Defensive — empty string shouldn't crash or match.
+        assert is_lead_project_memory_path("") is False
+
+
+class TestWriteGuardDenyMessage:
+    def test_message_names_role_target(self, fake_home):
+        msg = write_guard_deny_message("sentinel", "/x/y/z.md")
+        assert "sentinel" in msg
+        assert str(memory_dir("sentinel")) in msg
+
+    def test_message_names_attempted_path(self, fake_home):
+        msg = write_guard_deny_message("sentinel", "/some/attempted/path.md")
+        assert "/some/attempted/path.md" in msg
+
+    def test_message_explains_why(self, fake_home):
+        msg = write_guard_deny_message("sentinel", "/x.md")
+        assert "lead" in msg.lower()
+        assert "blocked" in msg.lower()
