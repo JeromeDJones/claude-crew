@@ -97,6 +97,12 @@ class TestBuildMemorySectionNoIndex:
         result = build_memory_section("sentinel", ("Read", "Write"))
         assert "No prior memories yet" in result
 
+    def test_includes_disambiguation_from_project_memory(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "Disambiguation" in result
+        assert "project-scoped" in result
+        assert "lead session" in result.lower()
+
     def test_includes_what_to_save_section(self, fake_home):
         result = build_memory_section("sentinel", ("Write",))
         assert "What to save" in result

@@ -124,7 +124,9 @@ You have a persistent, file-based memory system at `{directory}`.
 
 Build this memory over time so future invocations of this role can pick up where prior ones left off — but be selective. Memory is for things that wouldn't be obvious from reading the code, the git history, or project documentation. The same role may be invoked across many projects; favor entries with cross-project value.
 
-The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant."""
+The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant.
+
+**Disambiguation:** You may also see a separate project-scoped MEMORY.md in your context (auto-loaded as a `system-reminder` from `~/.claude/projects/<encoded-cwd>/memory/MEMORY.md`). That belongs to the lead session — it is NOT yours. Your memory is exclusively at `{directory}`. Do not write to or modify the project-scoped memory; it is read-only context from the lead's perspective."""
 
 
 _INSTRUCTIONS_WHAT_TO_SAVE = """\
