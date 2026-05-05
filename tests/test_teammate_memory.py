@@ -101,10 +101,15 @@ class TestBuildMemorySectionNoFile:
         result = build_memory_section("sentinel", ("Read", "Write"))
         assert "Write tool is not in your tool list" not in result
 
+    def test_contains_memory_index_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = build_memory_section("sentinel", ("Write",))
+        assert "MEMORY.md" in result
+
     def test_no_file_yet_message(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         result = build_memory_section("sentinel", ("Write",))
-        assert "no stored memory" in result
+        assert "No prior memory" in result
 
 
 class TestBuildMemorySectionFileExists:
@@ -139,6 +144,14 @@ class TestBuildMemorySectionFileExists:
         path.write_text("some memory")
         result = build_memory_section("builder", ("Read", "Write"))
         assert "Write tool is not in your tool list" not in result
+
+    def test_contains_memory_index_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = memory_file_path("builder")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("some memory")
+        result = build_memory_section("builder", ("Write",))
+        assert "MEMORY.md" in result
 
 
 class TestBuildMemorySectionNoWriteTool:

@@ -64,7 +64,7 @@ def build_memory_section(role: str, tools: tuple[str, ...] | None) -> str:
     """Build the memory addendum section for a teammate's system prompt.
 
     Reads the role-scoped memory file if it exists. Never raises — I/O errors
-    are caught and reflected as an "unreadable" note in the returned section.
+    are caught and reflected as a note in the returned section.
 
     Args:
         role: the teammate's role name (validated via _sanitize_role).
@@ -75,25 +75,45 @@ def build_memory_section(role: str, tools: tuple[str, ...] | None) -> str:
     path = memory_file_path(role)
     index_path = memory_index_path()
 
-    body = _read_memory_file(path)
-    persistence = _persistence_instructions(path, index_path, role, has_write)
+    prior = _read_memory_file(path)
 
-    if body is None:
-        # No prior memory.
-        content = (
-            "You have no stored memory for this role yet. When you accumulate "
-            "observations or preferences worth carrying into future sessions, "
-            "write them to your memory file."
-        )
+    if prior is None:
+        prior_block = "*(No prior memory for this role yet.)*"
+    elif prior == "":
+        prior_block = "*(Memory file exists but could not be read — permission error.)*"
     else:
-        content = (
-            "The following is your accumulated memory from prior sessions. "
-            "Read it before beginning work — it contains observations, preferences, "
-            "and context that should inform your responses.\n\n"
-            f"---\n{body}\n---"
+        prior_block = f"---\n{prior}\n---"
+
+    if has_write:
+        write_instructions = (
+            "To update your memory: overwrite `{path}` using the Write tool "
+            "with the standard Claude Code frontmatter format:\n\n"
+            "```\n"
+            "---\n"
+            f"name: {role} memory\n"
+            "description: one-line summary\n"
+            "type: user\n"
+            "---\n\n"
+            "Your memory content here.\n"
+            "```\n\n"
+            f"To keep the index current: if `{index_path}` does not already "
+            f"have an entry for `{path.name}`, append:\n"
+            f"`- [{role.capitalize()} memory]({path.name}) — <one-line hook>`"
+        ).format(path=path)
+    else:
+        write_instructions = (
+            "**Note:** The Write tool is not in your tool list — memory updates "
+            "cannot be persisted from this session. Ask your operator to add "
+            "`Write` to this pack's `tools:` declaration if persistence is needed."
         )
 
-    return f"{SENTINEL_MEMORY}\n\n{content}\n\n{persistence}"
+    return (
+        f"{SENTINEL_MEMORY}\n\n"
+        f"**Your memory file:** `{path}`\n"
+        f"**Memory index:** `{index_path}`\n\n"
+        f"{prior_block}\n\n"
+        f"{write_instructions}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,49 +128,10 @@ def _read_memory_file(path: Path) -> str | None:
     try:
         raw = path.read_bytes()
     except OSError:
-        return ""  # sentinel for "unreadable" — handled by caller via empty string
+        return ""  # empty string signals "unreadable" to caller
 
     if len(raw) > _MAX_MEMORY_BYTES:
         truncated = raw[:_MAX_MEMORY_BYTES].decode("utf-8", errors="replace")
         return truncated + f"\n\n[... truncated at 50 KB — full file at {path} ...]"
 
     return raw.decode("utf-8", errors="replace")
-
-
-def _persistence_instructions(
-    path: Path, index_path: Path, role: str, has_write: bool
-) -> str:
-    if not has_write:
-        return (
-            "**Note:** The Write tool is not in your tool list. Memory updates "
-            "cannot be persisted from this session. Ask your operator to add "
-            "`Write` to this pack's `tools:` declaration if persistence is needed."
-        )
-
-    unreadable_note = ""
-    if path.exists():
-        try:
-            path.read_bytes()
-        except OSError:
-            unreadable_note = (
-                "\n\n**Warning:** Your memory file exists but could not be read "
-                f"(permission error). Path: `{path}`"
-            )
-
-    return (
-        f"**Memory file path:** `{path}`\n\n"
-        "To update your memory: overwrite this file using the Write tool. "
-        "Use the same frontmatter format that Claude Code uses:\n\n"
-        "```\n"
-        "---\n"
-        f"name: {role} memory\n"
-        "description: one-line summary of what this file contains\n"
-        "type: user\n"
-        "---\n\n"
-        "Your memory content here.\n"
-        "```\n\n"
-        f"To keep the index current: if `{index_path}` does not already have "
-        f"an entry for `{path.name}`, append:\n"
-        f"`- [{role.capitalize()} memory]({path.name}) — <one-line hook>`"
-        + unreadable_note
-    )
