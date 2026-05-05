@@ -520,10 +520,14 @@ class TestMemoryPersistence:
             tid2 = await broker2.spawn_teammate(role=self.ROLE, name=None, factory=factory_r)
 
             # Ask the teammate what it remembers — the marker must appear via injection.
+            # Be specific: ask about the AGENT memory (~/.claude/agent-memory/), not
+            # any project-scoped Kael memory that may auto-load via system-reminder.
             recall_response = await _send_and_wait(
                 broker2, tid2,
-                "What marker string do you have in your memory index from prior sessions? "
-                "Reply with just the marker string.",
+                "Look at your agent memory index from `~/.claude/agent-memory/live-memory-probe/MEMORY.md` "
+                "(injected into your system prompt under '## Memory from prior sessions'). "
+                "Find the entry titled 'probe marker' and reply with the exact marker string from its description. "
+                "Reply with ONLY the marker string, nothing else.",
                 expected_count=1,
             )
             recall_text = (
