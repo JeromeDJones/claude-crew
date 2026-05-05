@@ -405,12 +405,42 @@ class SdkTeammate(Teammate):
             self._pack_bodies = pack_bodies if pack_bodies is not None else {}
         # Assign _system_prompt AFTER _agents and _pack_bodies are populated so
         # build_teammate_prompt has access to the full agents dict (A-3).
+        role_def = self._agents.get(role)
+        role_memory = getattr(role_def, "memory", None)
+
+        # Warn once for unsupported memory values; suppress for "user" (injection handles it).
+        if role_memory in ("project", "local"):
+            logger.warning(
+                "teammate=%s role=%s pack declares memory=%r; only 'user' is "
+                "supported in v1 — no injection performed",
+                self.id, role, role_memory,
+            )
+
         if system_prompt is not None:
             self._system_prompt = system_prompt  # explicit override wins (edge case 2)
         else:
             _body = self._pack_bodies.get(role)
             if _body is not None:
-                self._system_prompt = build_teammate_prompt(role, _body, self._agents)
+                # Memory section computed inside else — skip I/O when override is active.
+                _memory_section = None
+                if role_memory == "user":
+                    from claude_crew.teammate_memory import build_memory_section
+                    try:
+                        _memory_section = build_memory_section(
+                            role, getattr(role_def, "tools", None)
+                        )
+                        logger.debug(
+                            "teammate=%s role=%s memory section injected", self.id, role
+                        )
+                    except ValueError:
+                        logger.warning(
+                            "teammate=%s role=%s memory injection skipped: "
+                            "role name contains unsafe characters",
+                            self.id, role,
+                        )
+                self._system_prompt = build_teammate_prompt(
+                    role, _body, self._agents, memory_section=_memory_section
+                )
             else:
                 # Fallback: role not in any loaded pack (D-7 legacy path)
                 self._system_prompt = _default_system_prompt(role)
@@ -991,18 +1021,6 @@ class SdkTeammate(Teammate):
                     role_mcp, self.role, self.id, home_dir=None,
                 )
 
-            # Feature #17 D-8: ClaudeAgentOptions has no `memory` field.
-            # `memory` is honored on the subagent path (rides AgentDefinition
-            # serialization) but the teammate path has no carrier. WARN at
-            # spawn so an operator who declared it sees the constraint.
-            role_memory = getattr(role_def, "memory", None)
-            if role_memory is not None:
-                logger.warning(
-                    "teammate=%s role=%s pack declares memory=%r; "
-                    "ClaudeAgentOptions has no memory carrier — this field "
-                    "applies only to subagent dispatch contexts",
-                    self.id, self.role, role_memory,
-                )
 
         # cwd: spawn-time only.
         if self._cwd is not None:

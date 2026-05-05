@@ -448,3 +448,99 @@ class TestTaskToolInSdkSubprocess:
                 f"Unexpected response — could not determine Task tool status. "
                 f"Response: {text!r}"
             )
+
+
+class TestMemoryPersistence:
+    """SC-5: memory written in session N appears injected in session N+1.
+
+    Also verifies the server does NOT mutate MEMORY.md at spawn time.
+    """
+
+    ROLE = "live-memory-probe"
+    MARKER = f"live-memory-marker-{uuid.uuid4().hex[:8]}"
+
+    def _make_factory(self, *, tools: list[str]) -> "Any":
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="Memory probe agent",
+            prompt="You are a memory probe. Follow instructions precisely.",
+            model="claude-haiku-4-5-20251001",
+            tools=tools,
+            memory="user",
+        )
+
+        def factory(id, name, role, **_kw):
+            from claude_crew.factories import sdk_factory
+            return sdk_factory(
+                id=id, name=name, role=role,
+                agents={self.ROLE: agent_def},
+            )
+
+        return factory
+
+    async def test_memory_persists_across_sessions(self, broker: Broker) -> None:
+        import shutil
+        from claude_crew.teammate_memory import memory_dir, memory_index_path
+
+        directory = memory_dir(self.ROLE)
+        index_path = memory_index_path(self.ROLE)
+
+        # Clean up any prior run.
+        if directory.exists():
+            shutil.rmtree(directory)
+
+        # --- Session N: write a marker to memory ---
+        factory_w = self._make_factory(tools=["Write"])
+        tid = await broker.spawn_teammate(role=self.ROLE, name=None, factory=factory_w)
+
+        marker_file = directory / "probe_marker.md"
+        write_prompt = (
+            f"Use the Write tool to remember this marker for future sessions.\n\n"
+            f"Create directory if needed and write to: {marker_file}\n\n"
+            f"Content:\n---\nname: probe marker\ndescription: live test marker\ntype: gotcha\n---\n\n"
+            f"Marker: {self.MARKER}\n\n"
+            f"Then write to {index_path} (create if needed):\n"
+            f"`- [probe marker](probe_marker.md) — live test marker {self.MARKER}`\n\n"
+            f"After both writes, reply 'WRITE_DONE'."
+        )
+        response = await _send_and_wait(broker, tid, write_prompt, expected_count=1)
+        text = response.payload.get("text", "") if isinstance(response.payload, dict) else str(response.payload)
+
+        assert marker_file.exists(), f"Marker file not created: {marker_file}. Response: {text!r}"
+        assert self.MARKER in marker_file.read_text(), "Marker not in written file"
+        assert index_path.exists(), f"MEMORY.md not created: {index_path}"
+        assert self.MARKER in index_path.read_text(), "Marker not in MEMORY.md index"
+
+        await broker.shutdown_all()
+
+        # --- Session N+1: spawn fresh broker, same role, verify injection ---
+        broker2 = Broker()
+        try:
+            factory_r = self._make_factory(tools=["Read", "Write"])
+            tid2 = await broker2.spawn_teammate(role=self.ROLE, name=None, factory=factory_r)
+
+            # Ask the teammate what it remembers — the marker must appear via injection.
+            # Be specific: ask about the AGENT memory (~/.claude/agent-memory/), not
+            # any project-scoped Kael memory that may auto-load via system-reminder.
+            recall_response = await _send_and_wait(
+                broker2, tid2,
+                "Look at your agent memory index from `~/.claude/agent-memory/live-memory-probe/MEMORY.md` "
+                "(injected into your system prompt under '## Memory from prior sessions'). "
+                "Find the entry titled 'probe marker' and reply with the exact marker string from its description. "
+                "Reply with ONLY the marker string, nothing else.",
+                expected_count=1,
+            )
+            recall_text = (
+                recall_response.payload.get("text", "")
+                if isinstance(recall_response.payload, dict)
+                else str(recall_response.payload)
+            )
+            assert self.MARKER in recall_text, (
+                f"SC-5 FAIL: marker {self.MARKER!r} not found in session N+1 response. "
+                f"Response: {recall_text!r}"
+            )
+        finally:
+            await broker2.shutdown_all()
+            # Clean up memory directory.
+            if directory.exists():
+                shutil.rmtree(directory)

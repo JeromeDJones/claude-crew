@@ -1,0 +1,209 @@
+"""Tests for claude_crew/teammate_memory.py — Feature: Teammate Memory Persistence.
+
+Memory location: ~/.claude/agent-memory/<role>/ (user-scoped, role-isolated).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from claude_crew.teammate_memory import (
+    _sanitize_role,
+    build_memory_section,
+    memory_dir,
+    memory_index_path,
+)
+from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryDir:
+    def test_returns_user_scoped_role_dir(self):
+        expected = Path.home() / ".claude" / "agent-memory" / "sentinel"
+        assert memory_dir("sentinel") == expected
+
+    def test_role_appears_as_directory_name(self):
+        assert memory_dir("rr-planner").name == "rr-planner"
+
+    def test_path_is_not_project_scoped(self):
+        # Critical: must NOT contain "projects" segment — that was the v1 bug.
+        result = memory_dir("sentinel")
+        assert "projects" not in result.parts
+
+    def test_rejects_unsafe_role(self):
+        with pytest.raises(ValueError, match="not allowed"):
+            memory_dir("../../etc/passwd")
+
+    def test_rejects_role_with_slash(self):
+        with pytest.raises(ValueError):
+            memory_dir("foo/bar")
+
+
+class TestSanitizeRole:
+    def test_accepts_kebab_case(self):
+        assert _sanitize_role("rr-planner") == "rr-planner"
+
+    def test_accepts_alphanumeric(self):
+        assert _sanitize_role("sentinel") == "sentinel"
+
+    def test_rejects_path_traversal(self):
+        with pytest.raises(ValueError):
+            _sanitize_role("../../etc/passwd")
+
+    def test_rejects_dot(self):
+        with pytest.raises(ValueError):
+            _sanitize_role("foo.bar")
+
+
+class TestMemoryIndexPath:
+    def test_returns_memory_md_inside_role_dir(self):
+        result = memory_index_path("sentinel")
+        assert result.name == "MEMORY.md"
+        assert result.parent == memory_dir("sentinel")
+
+
+# ---------------------------------------------------------------------------
+# build_memory_section
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """Redirect ~/.claude/agent-memory/ into tmp_path for isolation."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return tmp_path
+
+
+class TestBuildMemorySectionNoIndex:
+    def test_contains_sentinel(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Write"))
+        assert SENTINEL_MEMORY in result
+
+    def test_contains_role_directory_path(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Write"))
+        assert str(memory_dir("sentinel")) in result
+
+    def test_contains_index_path(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Write"))
+        assert "MEMORY.md" in result
+
+    def test_no_prior_memories_note(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Write"))
+        assert "No prior memories yet" in result
+
+    def test_includes_disambiguation_from_project_memory(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "Disambiguation" in result
+        assert "project-scoped" in result
+        assert "lead session" in result.lower()
+
+    def test_includes_what_to_save_section(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "What to save" in result
+        assert "across projects" in result
+
+    def test_includes_what_not_to_save_section(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "What NOT to save" in result
+        assert "git log" in result
+        assert "external" in result and "pointers" in result
+
+    def test_includes_when_not_to_save_section(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "When NOT to save" in result
+        assert "Default to no" in result
+
+    def test_includes_how_to_save_section(self, fake_home):
+        result = build_memory_section("sentinel", ("Write",))
+        assert "How to save" in result
+        assert "Two-step" in result
+        assert "type: principle | pattern | gotcha | reference" in result
+
+
+class TestBuildMemorySectionIndexExists:
+    def test_index_content_appears_in_section(self, fake_home):
+        index_path = memory_index_path("builder")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(
+            "# MEMORY.md\n\n- [Some lesson](some_lesson.md) — what I learned\n"
+        )
+        result = build_memory_section("builder", ("Write",))
+        assert "Some lesson" in result
+        assert "what I learned" in result
+
+    def test_index_truncated_at_200_lines(self, fake_home):
+        index_path = memory_index_path("builder")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        # Build a 250-line file, ensure last 50 lines aren't included.
+        lines = [f"- [entry-{i}](file-{i}.md) — line {i}" for i in range(250)]
+        index_path.write_text("\n".join(lines))
+        result = build_memory_section("builder", ("Write",))
+        assert "entry-199" in result
+        assert "entry-249" not in result
+        assert "truncated at 200 lines" in result
+
+    def test_no_prior_memories_note_absent_when_index_exists(self, fake_home):
+        index_path = memory_index_path("builder")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text("- [x](x.md) — y")
+        result = build_memory_section("builder", ("Write",))
+        assert "No prior memories yet" not in result
+
+
+class TestBuildMemorySectionWriteToolMissing:
+    def test_persistence_note_when_tools_empty(self, fake_home):
+        result = build_memory_section("sentinel", ())
+        assert "Write tool is not in your tool list" in result
+
+    def test_persistence_note_when_tools_none(self, fake_home):
+        result = build_memory_section("sentinel", None)
+        assert "Write tool is not in your tool list" in result
+
+    def test_persistence_note_when_tools_lacks_write(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Bash"))
+        assert "Write tool is not in your tool list" in result
+
+    def test_no_persistence_note_when_write_present(self, fake_home):
+        result = build_memory_section("sentinel", ("Read", "Write"))
+        assert "Write tool is not in your tool list" not in result
+
+    def test_instructions_still_included_without_write(self, fake_home):
+        # Even without Write, the agent should see the index and structure
+        # so it knows what's been remembered.
+        result = build_memory_section("sentinel", ())
+        assert SENTINEL_MEMORY in result
+        assert "What to save" in result
+
+
+class TestBuildMemorySectionIOError:
+    def test_unreadable_index_does_not_raise(self, fake_home):
+        index_path = memory_index_path("builder")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text("secret")
+        index_path.chmod(0o000)
+        try:
+            result = build_memory_section("builder", ("Write",))
+            assert SENTINEL_MEMORY in result
+            assert "could not be read" in result
+        finally:
+            index_path.chmod(0o644)
+
+
+class TestNoSpontaneousMutation:
+    def test_does_not_create_directory(self, fake_home):
+        directory = memory_dir("never-spawned")
+        assert not directory.exists()
+        build_memory_section("never-spawned", ("Write",))
+        assert not directory.exists()
+
+    def test_does_not_create_index(self, fake_home):
+        index = memory_index_path("never-spawned")
+        assert not index.exists()
+        build_memory_section("never-spawned", ("Write",))
+        assert not index.exists()
