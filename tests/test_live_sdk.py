@@ -459,11 +459,6 @@ class TestMemoryPersistence:
     ROLE = "live-memory-probe"
     MARKER = f"live-memory-marker-{uuid.uuid4().hex[:8]}"
 
-    def _memory_path(self) -> "Path":
-        from pathlib import Path
-        from claude_crew.teammate_memory import memory_file_path
-        return memory_file_path(self.ROLE)
-
     def _make_factory(self, *, tools: list[str]) -> "Any":
         from claude_agent_sdk.types import AgentDefinition
         agent_def = AgentDefinition(
@@ -484,43 +479,37 @@ class TestMemoryPersistence:
         return factory
 
     async def test_memory_persists_across_sessions(self, broker: Broker) -> None:
-        from pathlib import Path
-        from claude_crew.teammate_memory import memory_file_path, memory_index_path
-        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+        import shutil
+        from claude_crew.teammate_memory import memory_dir, memory_index_path
 
-        path = memory_file_path(self.ROLE)
-        index_path = memory_index_path()
+        directory = memory_dir(self.ROLE)
+        index_path = memory_index_path(self.ROLE)
 
         # Clean up any prior run.
-        if path.exists():
-            path.unlink()
-
-        index_before = index_path.read_text() if index_path.exists() else None
+        if directory.exists():
+            shutil.rmtree(directory)
 
         # --- Session N: write a marker to memory ---
         factory_w = self._make_factory(tools=["Write"])
         tid = await broker.spawn_teammate(role=self.ROLE, name=None, factory=factory_w)
 
+        marker_file = directory / "probe_marker.md"
         write_prompt = (
-            f"Write the following content to this exact file path using the Write tool:\n\n"
-            f"Path: {path}\n\n"
-            f"Content:\n---\nname: {self.ROLE} memory\ndescription: live probe memory\ntype: user\n---\n\n"
+            f"Use the Write tool to remember this marker for future sessions.\n\n"
+            f"Create directory if needed and write to: {marker_file}\n\n"
+            f"Content:\n---\nname: probe marker\ndescription: live test marker\ntype: gotcha\n---\n\n"
             f"Marker: {self.MARKER}\n\n"
-            f"After writing, confirm with 'WRITE_DONE'."
+            f"Then write to {index_path} (create if needed):\n"
+            f"`- [probe marker](probe_marker.md) — live test marker {self.MARKER}`\n\n"
+            f"After both writes, reply 'WRITE_DONE'."
         )
         response = await _send_and_wait(broker, tid, write_prompt, expected_count=1)
         text = response.payload.get("text", "") if isinstance(response.payload, dict) else str(response.payload)
-        assert "WRITE_DONE" in text or path.exists(), (
-            f"Session N: write not confirmed and file not found. Response: {text!r}"
-        )
-        assert path.exists(), f"Memory file not created: {path}"
-        assert self.MARKER in path.read_text(), "Marker not in written file"
 
-        # Verify server did NOT mutate MEMORY.md.
-        index_after = index_path.read_text() if index_path.exists() else None
-        assert index_before == index_after, (
-            "Server mutated MEMORY.md at spawn time — violates MEMORY.md mutation policy"
-        )
+        assert marker_file.exists(), f"Marker file not created: {marker_file}. Response: {text!r}"
+        assert self.MARKER in marker_file.read_text(), "Marker not in written file"
+        assert index_path.exists(), f"MEMORY.md not created: {index_path}"
+        assert self.MARKER in index_path.read_text(), "Marker not in MEMORY.md index"
 
         await broker.shutdown_all()
 
@@ -533,8 +522,8 @@ class TestMemoryPersistence:
             # Ask the teammate what it remembers — the marker must appear via injection.
             recall_response = await _send_and_wait(
                 broker2, tid2,
-                "What marker string do you have in your memory from prior sessions? "
-                "Reply with just the marker.",
+                "What marker string do you have in your memory index from prior sessions? "
+                "Reply with just the marker string.",
                 expected_count=1,
             )
             recall_text = (
@@ -548,6 +537,6 @@ class TestMemoryPersistence:
             )
         finally:
             await broker2.shutdown_all()
-            # Clean up memory file.
-            if path.exists():
-                path.unlink()
+            # Clean up memory directory.
+            if directory.exists():
+                shutil.rmtree(directory)

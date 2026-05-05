@@ -2971,12 +2971,14 @@ class TestSdkTeammateMemoryWarn:
         from claude_agent_sdk.types import AgentDefinition
         from claude_crew.teammate_prompt import SENTINEL_MEMORY
 
-        monkeypatch.chdir(tmp_path)
-        # Plant a memory file — if injection ran, SENTINEL_MEMORY would appear.
-        from claude_crew.teammate_memory import memory_file_path
-        path = memory_file_path("builder")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("should not appear")
+        # Redirect ~/.claude into tmp_path; plant a memory index — if injection
+        # ran, the index content would appear.
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        from claude_crew.teammate_memory import memory_index_path
+        idx = memory_index_path("builder")
+        idx.parent.mkdir(parents=True, exist_ok=True)
+        idx.write_text("- [should not appear](x.md) — should not appear")
 
         agent_def = AgentDefinition(
             description="test", prompt="be a thing",

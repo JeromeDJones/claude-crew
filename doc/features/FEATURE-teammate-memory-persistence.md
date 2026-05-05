@@ -19,14 +19,14 @@ The `memory: user` frontmatter declaration becomes the opt-in signal for this be
 
 ### Success Criteria
 
-- [ ] **SC-1: Memory file content injected at spawn.** When a pack declares `memory: user` and a role-scoped memory file exists on disk, the teammate's system prompt at spawn includes the file's content as a clearly-delimited "Memory from prior sessions" section.
-- [ ] **SC-2: Memory instructions injected when no file exists.** When a pack declares `memory: user` and no memory file exists yet, the teammate's system prompt includes a section explaining the role-scoped memory path and instructing the teammate to create and maintain the file.
-- [ ] **SC-3a: Teammate with Write tool can persist memory.** A teammate with `memory: user` and the Write tool available can write content to its role-scoped path; the file exists on disk after the write and its content matches what was written.
-- [ ] **SC-3b: Teammate without Write tool receives an honest acknowledgement.** When a pack declares `memory: user` but the teammate's tool list excludes Write, the injected memory section explicitly states that memory updates cannot be persisted (the teammate lacks the Write tool) — no silent no-op.
-- [ ] **SC-4: Memory is role-scoped and distinct within a project.** A `sentinel` teammate and a `builder` teammate have distinct memory file paths within the same project; writing to one cannot affect the other. Two different role names within the same project always produce two different paths. *(Note: the cwd encoding is not injective over all possible filesystem paths — projects whose paths differ only by hyphens vs. slashes would share a namespace. This is inherited from the CLI's own convention, not introduced here.)*
-- [ ] **SC-5: Memory persists across sessions (live test).** Content written by a teammate in session N appears in the injected memory section when the same role is spawned in session N+1. *Verification requires a live SDK test (`CLAUDE_CREW_LIVE_TESTS=1`); stub-mode tests cannot satisfy this criterion alone.*
-- [ ] **SC-6: No memory injection when `memory` not declared.** Packs without `memory: user` in frontmatter receive no memory section in their system prompt — no behavior change for existing packs.
-- [ ] **SC-7: No WARNING-level log emitted at spawn for `memory: user`.** A teammate spawned from a pack that declares `memory: user` produces no `WARNING`-level log entry related to the memory field. A `DEBUG`-level confirmation of injection is acceptable.
+- [x] **SC-1: Memory file content injected at spawn.** When a pack declares `memory: user` and a role-scoped memory file exists on disk, the teammate's system prompt at spawn includes the file's content as a clearly-delimited "Memory from prior sessions" section.
+- [x] **SC-2: Memory instructions injected when no file exists.** When a pack declares `memory: user` and no memory file exists yet, the teammate's system prompt includes a section explaining the role-scoped memory path and instructing the teammate to create and maintain the file.
+- [x] **SC-3a: Teammate with Write tool can persist memory.** A teammate with `memory: user` and the Write tool available can write content to its role-scoped path; the file exists on disk after the write and its content matches what was written.
+- [x] **SC-3b: Teammate without Write tool receives an honest acknowledgement.** When a pack declares `memory: user` but the teammate's tool list excludes Write, the injected memory section explicitly states that memory updates cannot be persisted (the teammate lacks the Write tool) — no silent no-op.
+- [x] **SC-4: Memory is role-scoped and distinct within a project.** A `sentinel` teammate and a `builder` teammate have distinct memory file paths within the same project; writing to one cannot affect the other. Two different role names within the same project always produce two different paths. *(Note: the cwd encoding is not injective over all possible filesystem paths — projects whose paths differ only by hyphens vs. slashes would share a namespace. This is inherited from the CLI's own convention, not introduced here.)*
+- [x] **SC-5: Memory persists across sessions (live test).** Content written by a teammate in session N appears in the injected memory section when the same role is spawned in session N+1. *Verification requires a live SDK test (`CLAUDE_CREW_LIVE_TESTS=1`); stub-mode tests cannot satisfy this criterion alone.*
+- [x] **SC-6: No memory injection when `memory` not declared.** Packs without `memory: user` in frontmatter receive no memory section in their system prompt — no behavior change for existing packs.
+- [x] **SC-7: No WARNING-level log emitted at spawn for `memory: user`.** A teammate spawned from a pack that declares `memory: user` produces no `WARNING`-level log entry related to the memory field. A `DEBUG`-level confirmation of injection is acceptable.
 
 ### Questions
 
@@ -40,21 +40,19 @@ The `memory: user` frontmatter declaration becomes the opt-in signal for this be
 - Pure internal change — no MCP tool surface changes, no API changes, no dashboard changes.
 - Injection happens in `claude_crew/teammate_prompt.py` (`build_teammate_prompt`) or its call site in `sdk_teammate.py`.
 
-**Memory path convention (empirically validated 2026-05-04):**
-- Role memory file: `~/.claude/projects/<encoded-cwd>/memory/<role>.md`
-- Index file: `~/.claude/projects/<encoded-cwd>/memory/MEMORY.md`
-- Encoded-cwd: `"-" + cwd.strip("/").replace("/", "-")`. Example: `/home/jerome/dev/claude-crew` → `-home-jerome-dev-claude-crew`
-- This is observed CLI behavior, not a stable SDK API — if the CLI changes the convention, the path diverges.
+**Memory path convention (empirically validated 2026-05-04, corrected after CLI subagent probe):**
+- Role memory directory: `~/.claude/agent-memory/<role>/` (user-scoped, NOT project-scoped)
+- Per-role index: `~/.claude/agent-memory/<role>/MEMORY.md`
+- Detail files: agent picks topic-named files inside the directory
+- Same path the CLI auto-loads when a subagent with `memory: user` is dispatched — parity ensures CLI subagent and SDK teammate share memory for the same role.
 
-**What auto-loads vs what requires injection (empirically validated 2026-05-04):**
-- `MEMORY.md` (the index) IS auto-loaded by the CLI into teammate context as a `system-reminder`
-- Detail files linked from `MEMORY.md` (e.g., `memory/sentinel.md`) are NOT auto-loaded — only the index is
-- Therefore: the role memory file content must be injected into the system prompt at spawn time; the MEMORY.md index entry is visible automatically but only shows the one-line summary
+**Earlier (wrong) assumption:** Phase 1 originally targeted `~/.claude/projects/<encoded-cwd>/memory/<role>.md` — that's Kael's project-scoped memory, a different system. A live probe (sentinel subagent asked to "remember" something with no path hint) wrote to `~/.claude/agent-memory/sentinel/`, confirming the correct path.
 
-**Alignment with existing memory convention:**
-- `memory/<role>.md` sits alongside Kael's memory files in the same directory and uses the same format (optional YAML frontmatter with `name`/`description`/`type`, then content)
-- `MEMORY.md` index entry format: `- [<Role> memory](<role>.md) — <one-line description>` — identical to existing entries
-- Teammates read injected content at spawn; write updates following the same convention Kael uses; the index entry keeps the summary visible to all
+**What auto-loads vs what requires injection (corrected):**
+- For CLI subagents with `memory: user`: the CLI provides scaffolding (location guidance, save/skip rules, format) AND auto-loads the first 200 lines of the role's MEMORY.md
+- For SDK teammates (this feature): the SDK provides nothing. We inject equivalent scaffolding + the first 200 lines of the role's MEMORY.md at spawn time.
+
+**Design principle: SDK teammate behavior must match CLI subagent behavior.** Same role, same memory, regardless of execution context.
 
 - **`memory: user` only for v1.** `project` and `local` are deferred. A pack declaring `memory: project` or `memory: local` continues to parse and validate but produces the existing WARN.
 - **Concurrent same-role spawns are out of scope for v1.** Last-write-wins, no protection. Operators who spawn multiple same-role teammates with `memory: user` do so at their own risk.
