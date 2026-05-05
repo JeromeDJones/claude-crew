@@ -544,3 +544,105 @@ class TestMemoryPersistence:
             # Clean up memory directory.
             if directory.exists():
                 shutil.rmtree(directory)
+
+
+class TestMemoryWriteGuardLive:
+    """SC-8 / SC-8b / SC-9 from FEATURE-teammate-memory-write-guard.md.
+
+    Live verification that the PreToolUse hook actually blocks the write
+    end-to-end through the SDK subprocess — not just at the hook callback level.
+    """
+
+    ROLE = "live-write-guard-probe"
+
+    def _make_factory(self, *, tools: list[str]):
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="Write guard probe",
+            prompt="You are a probe. Follow instructions precisely.",
+            model="claude-haiku-4-5-20251001",
+            tools=tools,
+        )
+
+        def factory(id, name, role, **_kw):
+            from claude_crew.factories import sdk_factory
+            return sdk_factory(
+                id=id, name=name, role=role,
+                agents={self.ROLE: agent_def},
+            )
+
+        return factory
+
+    async def test_write_to_lead_project_memory_blocked_live(
+        self, broker: Broker,
+    ) -> None:
+        """SC-8: Write to ~/.claude/projects/<cwd>/memory/test.md is blocked end-to-end."""
+        from pathlib import Path
+        import os
+
+        encoded_cwd = "-" + os.getcwd().strip("/").replace("/", "-")
+        # A path the agent should NOT be able to create.
+        target = Path.home() / ".claude" / "projects" / encoded_cwd / "memory" / "guard_probe_test.md"
+        # Pre-clean in case of leftover.
+        if target.exists():
+            target.unlink()
+
+        factory = self._make_factory(tools=["Write"])
+        tid = await broker.spawn_teammate(role=self.ROLE, name=None, factory=factory)
+
+        prompt = (
+            f"Use the Write tool to create the file at exactly this path with content 'evil':\n\n"
+            f"{target}\n\n"
+            f"Then reply with whatever happened — success message or error."
+        )
+        response = await _send_and_wait(broker, tid, prompt, expected_count=1)
+        text = (
+            response.payload.get("text", "")
+            if isinstance(response.payload, dict)
+            else str(response.payload)
+        )
+
+        # SC-8: file must NOT exist (write was blocked).
+        assert not target.exists(), (
+            f"Write guard FAIL: file created at protected path {target}. Response: {text!r}"
+        )
+        # SC-5 (block message): the redirection should appear in the agent's response.
+        assert "agent-memory" in text.lower() or "blocked" in text.lower(), (
+            f"Expected block reason or redirection in response. Got: {text!r}"
+        )
+
+    async def test_edit_to_lead_project_memory_blocked_live(
+        self, broker: Broker, tmp_path,
+    ) -> None:
+        """SC-8b: Edit to lead project memory is blocked end-to-end."""
+        from pathlib import Path
+        import os
+
+        encoded_cwd = "-" + os.getcwd().strip("/").replace("/", "-")
+        # We can't easily plant a file we don't want overwritten without
+        # interfering with real Kael memory. Instead, test that even a
+        # read-then-edit cycle on an existing-but-test-only file is blocked.
+        target_dir = Path.home() / ".claude" / "projects" / encoded_cwd / "memory"
+        target = target_dir / "guard_probe_edit.md"
+        original_content = "ORIGINAL_CONTENT_DO_NOT_CHANGE"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(original_content)
+
+        try:
+            factory = self._make_factory(tools=["Read", "Edit"])
+            tid = await broker.spawn_teammate(role=self.ROLE, name=None, factory=factory)
+
+            prompt = (
+                f"Use the Edit tool to change the content of {target}: "
+                f"replace 'ORIGINAL_CONTENT_DO_NOT_CHANGE' with 'MODIFIED'. "
+                f"Reply with what happened."
+            )
+            await _send_and_wait(broker, tid, prompt, expected_count=1)
+
+            # File content must be unchanged.
+            assert target.read_text() == original_content, (
+                "Write guard FAIL: Edit modified protected memory file"
+            )
+        finally:
+            if target.exists():
+                target.unlink()
