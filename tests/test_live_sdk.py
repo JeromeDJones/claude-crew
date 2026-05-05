@@ -448,3 +448,106 @@ class TestTaskToolInSdkSubprocess:
                 f"Unexpected response — could not determine Task tool status. "
                 f"Response: {text!r}"
             )
+
+
+class TestMemoryPersistence:
+    """SC-5: memory written in session N appears injected in session N+1.
+
+    Also verifies the server does NOT mutate MEMORY.md at spawn time.
+    """
+
+    ROLE = "live-memory-probe"
+    MARKER = f"live-memory-marker-{uuid.uuid4().hex[:8]}"
+
+    def _memory_path(self) -> "Path":
+        from pathlib import Path
+        from claude_crew.teammate_memory import memory_file_path
+        return memory_file_path(self.ROLE)
+
+    def _make_factory(self, *, tools: list[str]) -> "Any":
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="Memory probe agent",
+            prompt="You are a memory probe. Follow instructions precisely.",
+            model="claude-haiku-4-5-20251001",
+            tools=tools,
+            memory="user",
+        )
+
+        def factory(id, name, role, **_kw):
+            from claude_crew.factories import sdk_factory
+            return sdk_factory(
+                id=id, name=name, role=role,
+                agents={self.ROLE: agent_def},
+            )
+
+        return factory
+
+    async def test_memory_persists_across_sessions(self, broker: Broker) -> None:
+        from pathlib import Path
+        from claude_crew.teammate_memory import memory_file_path, memory_index_path
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        path = memory_file_path(self.ROLE)
+        index_path = memory_index_path()
+
+        # Clean up any prior run.
+        if path.exists():
+            path.unlink()
+
+        index_before = index_path.read_text() if index_path.exists() else None
+
+        # --- Session N: write a marker to memory ---
+        factory_w = self._make_factory(tools=["Write"])
+        tid = await broker.spawn_teammate(role=self.ROLE, name=None, factory=factory_w)
+
+        write_prompt = (
+            f"Write the following content to this exact file path using the Write tool:\n\n"
+            f"Path: {path}\n\n"
+            f"Content:\n---\nname: {self.ROLE} memory\ndescription: live probe memory\ntype: user\n---\n\n"
+            f"Marker: {self.MARKER}\n\n"
+            f"After writing, confirm with 'WRITE_DONE'."
+        )
+        response = await _send_and_wait(broker, tid, write_prompt, expected_count=1)
+        text = response.payload.get("text", "") if isinstance(response.payload, dict) else str(response.payload)
+        assert "WRITE_DONE" in text or path.exists(), (
+            f"Session N: write not confirmed and file not found. Response: {text!r}"
+        )
+        assert path.exists(), f"Memory file not created: {path}"
+        assert self.MARKER in path.read_text(), "Marker not in written file"
+
+        # Verify server did NOT mutate MEMORY.md.
+        index_after = index_path.read_text() if index_path.exists() else None
+        assert index_before == index_after, (
+            "Server mutated MEMORY.md at spawn time — violates MEMORY.md mutation policy"
+        )
+
+        await broker.shutdown_all()
+
+        # --- Session N+1: spawn fresh broker, same role, verify injection ---
+        broker2 = Broker()
+        try:
+            factory_r = self._make_factory(tools=["Read", "Write"])
+            tid2 = await broker2.spawn_teammate(role=self.ROLE, name=None, factory=factory_r)
+
+            # Ask the teammate what it remembers — the marker must appear via injection.
+            recall_response = await _send_and_wait(
+                broker2, tid2,
+                "What marker string do you have in your memory from prior sessions? "
+                "Reply with just the marker.",
+                expected_count=1,
+            )
+            recall_text = (
+                recall_response.payload.get("text", "")
+                if isinstance(recall_response.payload, dict)
+                else str(recall_response.payload)
+            )
+            assert self.MARKER in recall_text, (
+                f"SC-5 FAIL: marker {self.MARKER!r} not found in session N+1 response. "
+                f"Response: {recall_text!r}"
+            )
+        finally:
+            await broker2.shutdown_all()
+            # Clean up memory file.
+            if path.exists():
+                path.unlink()

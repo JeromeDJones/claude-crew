@@ -45,6 +45,7 @@ SENTINEL_CONTEXT = "## Operating context"
 SENTINEL_PEERS = "## Available teammates"
 SENTINEL_DELEGATION = "## Delegation"
 SENTINEL_ANTIPATTERNS = "## Anti-patterns"
+SENTINEL_MEMORY = "## Memory from prior sessions"
 
 
 # ---------------------------------------------------------------------------
@@ -88,17 +89,23 @@ _ANTIPATTERNS = SENTINEL_ANTIPATTERNS + """
 # ---------------------------------------------------------------------------
 
 
-def build_teammate_prompt(role: str, pack_body: str, agents: dict[str, Any]) -> str:
+def build_teammate_prompt(
+    role: str,
+    pack_body: str,
+    agents: dict[str, Any],
+    memory_section: str | None = None,
+) -> str:
     """Assemble the system prompt for a top-level teammate.
 
     Returns: pack_body + "\\n\\n" + addendum
 
     The addendum contains four ordered sections delimited by SENTINEL_*
-    constants:
+    constants, plus an optional fifth when memory_section is provided:
       1. SENTINEL_CONTEXT  — corrects leaf-context language for teammate use
       2. SENTINEL_PEERS    — sorted peer list, self excluded (R-1, R-2)
       3. SENTINEL_DELEGATION — delegation framework with conditional explorer hint
       4. SENTINEL_ANTIPATTERNS — what not to do
+      5. SENTINEL_MEMORY  — injected when pack declares memory: user (optional)
 
     Args:
         role: the teammate's own role key; filtered out of the peer list
@@ -107,10 +114,15 @@ def build_teammate_prompt(role: str, pack_body: str, agents: dict[str, Any]) -> 
         agents: the agents dict (role-key → AgentDefinition); used for the
                 peer list and the explorer-hint conditional. Defensive on
                 missing or malformed description fields (R-3).
+        memory_section: pre-built memory section string from
+                        teammate_memory.build_memory_section, or None.
     """
     peer_section = _build_peer_list(role, agents)
     delegation = _DELEGATION_TEMPLATE.format(explorer_hint=_explorer_hint(agents))
-    addendum = "\n\n".join([_CONTEXT_OVERRIDE, peer_section, delegation, _ANTIPATTERNS])
+    parts = [_CONTEXT_OVERRIDE, peer_section, delegation, _ANTIPATTERNS]
+    if memory_section is not None:
+        parts.append(memory_section)
+    addendum = "\n\n".join(parts)
     return f"{pack_body.rstrip()}\n\n{addendum}"
 
 

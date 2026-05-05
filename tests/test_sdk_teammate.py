@@ -2913,3 +2913,114 @@ class TestSdkTeammateMemoryWarn:
         assert not any(
             "pack declares memory" in m for m in warn_msgs
         ), f"expected no memory-pack-WARN; got {warn_msgs}"
+
+    def test_memory_user_injects_sentinel_in_system_prompt(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """SC-1: memory=user → SENTINEL_MEMORY in _system_prompt."""
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        monkeypatch.chdir(tmp_path)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a sentinel agent",
+            model="claude-haiku-4-5-20251001", tools=["Read", "Write"],
+            memory="user",
+        )
+
+        tm = SdkTeammate(
+            id="t-mem-test", name="mem", role="sentinel",
+            agents={"sentinel": agent_def},
+            pack_bodies={"sentinel": "be a sentinel agent"},
+        )
+
+        assert SENTINEL_MEMORY in tm._system_prompt, (
+            f"SENTINEL_MEMORY missing from _system_prompt. "
+            f"Prompt tail: {tm._system_prompt[-300:]!r}"
+        )
+
+    def test_memory_user_no_warning_emitted(self, tmp_path, monkeypatch, caplog) -> None:
+        """SC-7: memory=user must not produce a WARNING-level log."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        monkeypatch.chdir(tmp_path)
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Write"],
+            memory="user",
+        )
+
+        with caplog.at_level(_logging.WARNING, logger="claude_crew.sdk_teammate"):
+            SdkTeammate(
+                id="t-nowarn", name="nw", role="builder",
+                agents={"builder": agent_def},
+                pack_bodies={"builder": "be a thing"},
+            )
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("memory" in m for m in warn_msgs), (
+            f"memory='user' must not emit WARNING; got: {warn_msgs}"
+        )
+
+    def test_memory_user_system_prompt_override_suppresses_injection(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Explicit system_prompt override wins; memory injection skipped (no I/O)."""
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        monkeypatch.chdir(tmp_path)
+        # Plant a memory file — if injection ran, SENTINEL_MEMORY would appear.
+        from claude_crew.teammate_memory import memory_file_path
+        path = memory_file_path("builder")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("should not appear")
+
+        agent_def = AgentDefinition(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=["Write"],
+            memory="user",
+        )
+
+        tm = SdkTeammate(
+            id="t-override", name="ov", role="builder",
+            agents={"builder": agent_def},
+            pack_bodies={"builder": "be a thing"},
+            system_prompt="explicit override",
+        )
+
+        assert tm._system_prompt == "explicit override"
+        assert SENTINEL_MEMORY not in tm._system_prompt
+
+    def test_memory_user_unsafe_role_warns_no_injection(
+        self, tmp_path, monkeypatch, caplog,
+    ) -> None:
+        """Role name with unsafe chars → WARNING about unsafe characters, no injection."""
+        import types
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        monkeypatch.chdir(tmp_path)
+
+        # Build a minimal agent def using SimpleNamespace (pack bodies keyed by role).
+        agent_def = types.SimpleNamespace(
+            description="test", prompt="be a thing",
+            model="claude-haiku-4-5-20251001", tools=("Write",),
+            memory="user",
+        )
+        # Role name with slash — would be rejected by _sanitize_role.
+        unsafe_role = "foo/bar"
+
+        with caplog.at_level(_logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tm = SdkTeammate(
+                id="t-unsafe", name="unsafe", role=unsafe_role,
+                agents={unsafe_role: agent_def},
+                pack_bodies={unsafe_role: "be a thing"},
+            )
+
+        assert SENTINEL_MEMORY not in tm._system_prompt
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("unsafe characters" in m for m in warn_msgs), (
+            f"Expected unsafe-character WARNING; got: {warn_msgs}"
+        )
