@@ -25,13 +25,17 @@ The injected disambiguation note tells the agent not to do this. Instructions ar
 - [ ] **SC-5: Block message names the right destination for the role.** The error tells the teammate exactly where its memory should go: `~/.claude/agent-memory/<role>/`. Generic "blocked" without redirection is unhelpful.
 - [ ] **SC-6: Guard applies to ALL SDK teammates, not just `memory: user` ones.** A teammate without `memory: user` declared still cannot write to the lead's project memory. The guard is a safety boundary, not a memory-feature opt-in.
 - [ ] **SC-7: No regression on existing 889-test suite.** Specifically, no false positives on existing Write/Edit tests.
-- [ ] **SC-8: Live verification.** A teammate explicitly told to write to `~/.claude/projects/<cwd>/memory/test.md` is blocked; the file is not created; the response contains the redirection message.
+- [ ] **SC-8: Live verification — Write blocked.** A teammate explicitly told to write to `~/.claude/projects/<cwd>/memory/test.md` is blocked; the file is not created; the response contains the redirection message.
+- [ ] **SC-8b: Live verification — Edit blocked.** A teammate explicitly told to edit `~/.claude/projects/<cwd>/memory/MEMORY.md` is blocked; the file content is unchanged; the response contains the redirection message.
+- [ ] **SC-9: Symlink bypass closed.** A write to a path that resolves into the protected zone is blocked, regardless of which direction the symlink points (caller-supplied path is a symlink into the zone, OR a path within the zone is itself a symlink to a safe location). Both directions tested.
 
 ### Questions
 
-- [ ] **Should reads be guarded too?** Decision deferred from parent feature: reads are NOT guarded in v1. An agent reading the lead's project memory (e.g., to look up a referenced detail file from the auto-loaded index) is legitimate-ish — it's information access, not pollution. Block-on-write is the asymmetric protection that matters.
-- [ ] **What about Bash with `cp`/`echo > file`/etc.?** Out of scope for v1. The guard covers Write and Edit tools — the canonical file-modification surface. Bash-based writes bypass the guard. If teammates start using Bash to circumvent, revisit. (Most SDK teammates don't have Bash anyway.)
-- [ ] **What about the MCP filesystem server, if loaded?** Out of scope for v1. The guard is a hook on the SDK's tool dispatch path. MCP-mediated writes would need their own guard. Defer until we see a concrete use case.
+- [x] **Should reads be guarded too?** No (v1). An agent reading the lead's project memory (e.g., to look up a referenced detail file from the auto-loaded index) is legitimate — it's information access, not pollution. Block-on-write is the asymmetric protection that matters.
+- [x] **What about Bash with `cp`/`echo > file`/etc.?** Out of scope (v1). The guard covers Write and Edit — the canonical file-modification surface. Bash-based writes bypass the guard. If teammates start using Bash to circumvent, revisit. (Most SDK teammates don't have Bash anyway.)
+- [x] **What about the MCP filesystem server, if loaded?** Out of scope (v1). The guard is a hook on the SDK's tool dispatch path. MCP-mediated writes would need their own guard. Defer until we see a concrete use case.
+- [x] **What about teammates spawned with `cwd=` overrides into a different project?** Out of scope (v1). The guard protects the SERVER process's encoded cwd, not whatever cwd the teammate was spawned with. A teammate spawned with `cwd=/other-project` could still write to `/other-project`'s project memory if it knew the path. Accepted limitation; document it in the constraints. In practice all teammates run in the server's project.
+- [x] **NotebookEdit and other write-capable tools?** Out of scope (v1). Cover only Write and Edit by name. Add others as we encounter them.
 
 ### Constraints & Dependencies
 
@@ -41,12 +45,44 @@ The injected disambiguation note tells the agent not to do this. Instructions ar
 - Must not break the 889-test suite. Existing PreToolUse tests will need updating only if they exercise Write/Edit on disallowed paths (unlikely — most tests target other tool names).
 - Must not interfere with the live SC-5 from the parent feature: a teammate writing to its OWN `~/.claude/agent-memory/<role>/` must succeed. Re-running that test is the regression check.
 
-**Path-matching convention:**
-- Block: any `Path(write_path).expanduser().resolve()` whose parts include both `projects` and `memory` AND is under `~/.claude/projects/`. Specifically: matches `~/.claude/projects/*/memory/**`.
-- Allow: anything else, including `~/.claude/agent-memory/**` (the right place) and all unrelated paths.
-- Use `Path.resolve()` to defeat symlink/relative-path bypasses.
+**Path-matching algorithm (revised after Sentinel review — H-2 fix):**
 
-**Gate**: Questions resolved, success criteria measurable, scope tightened to write-only.
+The naive `"projects" in path.parts and "memory" in path.parts` check has TWO bugs:
+1. False positive on roles like `~/.claude/agent-memory/projects/memory/notes.md` (no project segment after `projects`)
+2. Symlink-out bypass: if `~/.claude/projects/x/memory/` is itself a symlink to `/tmp/safe`, `Path(...).resolve()` returns `/tmp/safe/...` and the guard passes silently.
+
+Correct algorithm — **dual-check both expanded and resolved paths**:
+
+```python
+def _is_lead_project_memory(write_path: str) -> bool:
+    expanded = Path(write_path).expanduser()
+    protected_root = Path.home() / ".claude" / "projects"
+    candidates = [expanded]
+    try:
+        candidates.append(expanded.resolve(strict=False))
+    except (OSError, RuntimeError):
+        pass  # resolve() can fail on broken symlinks; expanded check still applies
+    for candidate in candidates:
+        try:
+            rel = candidate.relative_to(protected_root)
+        except ValueError:
+            continue  # not under ~/.claude/projects/ at all
+        # rel.parts must be: (<project_slug>, "memory", ...)
+        if len(rel.parts) >= 2 and rel.parts[1] == "memory":
+            return True
+    return False
+```
+
+This:
+- Uses `relative_to(protected_root)` instead of `"projects" in parts` — eliminates the false positive
+- Checks `rel.parts[1] == "memory"` (position-specific) instead of `"memory" in parts` — defends against `~/.claude/projects/foo/bar/memory/` non-matches
+- Checks BOTH expanded and resolved variants — defends against symlink-out (in addition to the standard symlink-in defense from `resolve()`)
+
+**Guarded tool names:** `Write`, `Edit`. Apply guard when `tool_name in ("Write", "Edit")` and `tool_input.get("file_path")` matches the algorithm above.
+
+**Path exposure note (M-6):** The guard's error message and the parent feature's disambiguation note both expose `~/.claude/projects/<encoded-cwd>/memory/` to the teammate. The teammate could derive this anyway via `os.getcwd()` + the encoding rule, so the exposure isn't novel. Accept.
+
+**Gate**: Questions resolved, success criteria measurable, scope tightened to write-only, algorithm corrected against symlink/parts-check bypasses, Edit tool explicitly in scope.
 
 ---
 

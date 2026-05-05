@@ -65,6 +65,16 @@ The `memory: user` frontmatter declaration becomes the opt-in signal for this be
 
 ## Phase 2: Design & Specification
 
+> **Retraction notice (2026-05-04):** The Phase 2 text below was written against the original (wrong) design assumption that agent memory lives at `~/.claude/projects/<encoded-cwd>/memory/<role>.md`. A live probe revealed the correct path is `~/.claude/agent-memory/<role>/` (user-scoped, role-isolated). The shipped implementation matches the corrected design described in the Phase 1 Constraints section, NOT the Phase 2 text below. The 50 KB byte cap proposed below was also replaced with a 200-line cap that mirrors the CLI's MEMORY.md auto-load truncation. **Read Phase 1 Constraints + the source code as the canonical record.** This Phase 2 section is preserved as a design-history artifact.
+>
+> Specifically the following Phase 2 elements DO NOT match what shipped:
+> - `_encode_cwd()`, `memory_file_path()` — replaced by `memory_dir()`, `memory_index_path()`
+> - `_MAX_MEMORY_BYTES = 51_200` (byte cap) — replaced by `_MAX_INDEX_LINES = 200` (line cap on MEMORY.md only)
+> - Path templates referencing `~/.claude/projects/<encoded-cwd>/memory/<role>.md` — corrected to `~/.claude/agent-memory/<role>/`
+> - Content contracts referencing the role-as-filename model — agents now pick topic-named files inside the role directory
+>
+> The shipped implementation is documented in `claude_crew/teammate_memory.py` and validated by `tests/test_teammate_memory.py`. The corrected Phase 1 Constraints section above is the design contract.
+
 ### Architecture
 
 **Injection point:** `SdkTeammate.__init__` in `sdk_teammate.py`, in the block that assembles `self._system_prompt` (lines ~409–417). Before calling `build_teammate_prompt`, it computes a `memory_section` string and passes it through.

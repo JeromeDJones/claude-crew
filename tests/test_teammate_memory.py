@@ -102,6 +102,9 @@ class TestBuildMemorySectionNoIndex:
         assert "Disambiguation" in result
         assert "project-scoped" in result
         assert "lead session" in result.lower()
+        # Path string the agent sees — guards against drift if someone refactors
+        # the encoded-cwd convention without updating the disambiguation text.
+        assert "~/.claude/projects/<encoded-cwd>/memory/MEMORY.md" in result
 
     def test_includes_what_to_save_section(self, fake_home):
         result = build_memory_section("sentinel", ("Write",))

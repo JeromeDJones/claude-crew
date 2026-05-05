@@ -2918,10 +2918,13 @@ class TestSdkTeammateMemoryWarn:
         self, tmp_path, monkeypatch,
     ) -> None:
         """SC-1: memory=user → SENTINEL_MEMORY in _system_prompt."""
+        from pathlib import Path
         from claude_agent_sdk.types import AgentDefinition
         from claude_crew.teammate_prompt import SENTINEL_MEMORY
 
-        monkeypatch.chdir(tmp_path)
+        # Isolate ~/.claude into tmp_path so the test doesn't depend on
+        # whether the real ~/.claude/agent-memory/sentinel/ exists.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         agent_def = AgentDefinition(
             description="test", prompt="be a sentinel agent",
@@ -2942,9 +2945,10 @@ class TestSdkTeammateMemoryWarn:
 
     def test_memory_user_no_warning_emitted(self, tmp_path, monkeypatch, caplog) -> None:
         """SC-7: memory=user must not produce a WARNING-level log."""
+        from pathlib import Path
         from claude_agent_sdk.types import AgentDefinition
 
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         agent_def = AgentDefinition(
             description="test", prompt="be a thing",
@@ -3001,9 +3005,10 @@ class TestSdkTeammateMemoryWarn:
     ) -> None:
         """Role name with unsafe chars → WARNING about unsafe characters, no injection."""
         import types
+        from pathlib import Path
         from claude_crew.teammate_prompt import SENTINEL_MEMORY
 
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Build a minimal agent def using SimpleNamespace (pack bodies keyed by role).
         agent_def = types.SimpleNamespace(
