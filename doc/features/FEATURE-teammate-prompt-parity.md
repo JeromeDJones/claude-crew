@@ -1,7 +1,28 @@
 # Feature: Teammate Prompt Parity (#21)
 
-**Status**: In Progress (Phase 1)
+**Status**: Shipped (superseded in part — see Post-ship amendments)
 **Created**: 2026-04-30
+**Last amended**: 2026-05-05
+
+> **Post-ship amendments (2026-05-05).** The addendum was compressed and one
+> section renamed after observing it was misleading in practice:
+>
+> - `SENTINEL_PEERS = "## Available teammates"` → **`SENTINEL_SUBAGENTS = "## Available subagents"`**
+>   (the `agents` dict passed in is the teammate's dispatchable subagent
+>   roster, not a peer list of other top-level teammates — the old name
+>   invited the wrong mental model).
+> - `_build_peer_list` → **`_build_subagent_list`**.
+> - **`SENTINEL_ANTIPATTERNS` removed.** The three bullets were either
+>   impossible-by-tools (no spawn tool exists), redundant with Operating
+>   Context, or folded into Delegation.
+> - `## Operating context` and `## Delegation` prose compressed.
+>
+> The four-section addendum design described below (Context / Peers /
+> Delegation / Anti-patterns) is now a **three-section addendum**
+> (Context / Subagents / Delegation), plus an optional Memory section
+> when the pack declares `memory: user`. Net token reduction ≈ 50% of
+> the addendum. See `claude_crew/teammate_prompt.py` for current
+> definitions; the prose below is preserved for historical context.
 **Scope**: Light SDD (Phase 1 brief + Phase 2 mini-spec, 1-2 implementation tasks). Co-architect-recommended scope; skip the Phase 3 deep breakdown and Phase 5 retrospective ceremony unless the implementation surfaces unexpected complexity.
 
 ---
