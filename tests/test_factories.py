@@ -104,6 +104,275 @@ class TestSdkFactoryAgentInjection:
         assert "planner" in teammate._agents  # bundled
         assert "general-purpose" in teammate._agents  # bundled
 
+    def test_default_factory_resolves_namespaced_plugin_role(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """A lead spawning by the Claude Code plugin surface form
+        (``<plugin>:<role>``) gets the plugin's AgentDefinition resolved
+        through the merged pack: model, tools, and prompt come from the
+        plugin file, not from the synthetic empty fallback in
+        factories.py:158-165 that fires on unknown roles."""
+        import json
+        from textwrap import dedent
+
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        home = tmp_path / "home"
+        plugins_root = home / ".claude" / "plugins"
+        install = plugins_root / "cache" / "rr"
+        agents_dir = install / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "rr-planner.md").write_text(dedent("""\
+            ---
+            description: Plugin-shipped planner.
+            model: haiku
+            tools: [Read, Grep]
+            ---
+
+            You are the rr-planner.
+            """))
+        plugins_root.mkdir(parents=True, exist_ok=True)
+        (plugins_root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "repo-reactor@m": [
+                    {"scope": "user", "installPath": str(install)},
+                ],
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = factories.default_factory()
+        # Happy path: namespaced role resolves to the plugin's AgentDef.
+        teammate = f("t-ns", "alice", "repo-reactor:rr-planner")
+        assert isinstance(teammate, SdkTeammate)
+        assert "repo-reactor:rr-planner" in teammate._agents
+        agent_def = teammate._agents["repo-reactor:rr-planner"]
+        assert agent_def.description == "Plugin-shipped planner."
+        assert "Read" in (agent_def.tools or [])
+        # The bare role name from the plugin file does NOT leak into the
+        # merged pack — that would be the pre-fix bug.
+        assert "rr-planner" not in teammate._agents
+
+    def test_default_factory_auto_resolves_bare_role_to_plugin_namespace(
+        self, monkeypatch, tmp_path, caplog,
+    ) -> None:
+        """A lead spawning by the bare role name (e.g. ``rr-planner``) when
+        only ``repo-reactor:rr-planner`` exists in the pack auto-promotes
+        to the namespaced key, logs INFO, and the AgentDef flows through.
+        Mitigates the silent-empty-AgentDef regression for legacy callers."""
+        import json
+        import logging
+        from textwrap import dedent
+
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        home = tmp_path / "home"
+        plugins_root = home / ".claude" / "plugins"
+        install = plugins_root / "cache" / "rr"
+        agents_dir = install / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "rr-planner.md").write_text(dedent("""\
+            ---
+            description: Plugin-shipped planner.
+            model: haiku
+            tools: [Read]
+            ---
+
+            You are the rr-planner.
+            """))
+        plugins_root.mkdir(parents=True, exist_ok=True)
+        (plugins_root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "repo-reactor@m": [
+                    {"scope": "user", "installPath": str(install)},
+                ],
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        caplog.set_level(logging.INFO, logger="claude_crew.factories")
+        f = factories.default_factory()
+        teammate = f("t-bare", "alice", "rr-planner")
+
+        assert isinstance(teammate, SdkTeammate)
+        # The teammate's role was rewritten to the namespaced form so the
+        # SDK's lookup of agents[role] hits the correct AgentDefinition.
+        assert teammate.role == "repo-reactor:rr-planner"
+        assert teammate._agents["repo-reactor:rr-planner"].description == (
+            "Plugin-shipped planner."
+        )
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "auto-resolving" in m and "rr-planner" in m
+            and "repo-reactor:rr-planner" in m
+            for m in msgs
+        ), f"auto-resolve INFO missing; got: {msgs}"
+
+    def test_default_factory_resolver_for_broker_promotes_bare_role(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """The resolver attached to ``factory.agent_def_resolver`` (used by
+        the broker for the dashboard config snapshot) must apply the same
+        bare-name → namespaced promotion as the spawn path. Otherwise a
+        lead spawning ``rr-planner`` gets a correct SDK process but an
+        empty dashboard config chip."""
+        import json
+        from textwrap import dedent
+
+        home = tmp_path / "home"
+        plugins_root = home / ".claude" / "plugins"
+        install = plugins_root / "cache" / "rr"
+        agents_dir = install / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "rr-planner.md").write_text(dedent("""\
+            ---
+            description: Plugin-shipped planner.
+            model: haiku
+            tools: [Read]
+            ---
+
+            You are the rr-planner.
+            """))
+        (plugins_root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "repo-reactor@m": [
+                    {"scope": "user", "installPath": str(install)},
+                ],
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = factories.default_factory()
+        resolver = f.agent_def_resolver  # type: ignore[attr-defined]
+        # Bare name → AgentDef from the namespaced plugin entry.
+        agent_def = resolver("rr-planner")
+        assert agent_def is not None
+        assert agent_def.description == "Plugin-shipped planner."
+        # Already-namespaced still works.
+        assert resolver("repo-reactor:rr-planner") is agent_def or (
+            resolver("repo-reactor:rr-planner").description
+            == "Plugin-shipped planner."
+        )
+        # Unrelated bare names still return None.
+        assert resolver("does-not-exist") is None
+
+    def test_default_factory_resolver_does_not_match_partial_suffix(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """`endswith(":<role>")` is a boundary anchor: a plugin shipping
+        ``foo:my-planner`` must NOT auto-resolve a request for bare
+        ``planner``. Verifies the colon prefix prevents substring leaks."""
+        import json
+        from textwrap import dedent
+
+        home = tmp_path / "home"
+        plugins_root = home / ".claude" / "plugins"
+        install = plugins_root / "cache" / "foo"
+        agents_dir = install / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "my-planner.md").write_text(dedent("""\
+            ---
+            description: Foo's my-planner.
+            model: haiku
+            tools: [Read]
+            ---
+
+            Foo body.
+            """))
+        (plugins_root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "foo@m": [{"scope": "user", "installPath": str(install)}],
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = factories.default_factory()
+        resolver = f.agent_def_resolver  # type: ignore[attr-defined]
+        # Bundled `planner` exists in the default pack — bare lookup hits
+        # it directly, no promotion to `foo:my-planner`.
+        bundled = resolver("planner")
+        assert bundled is not None
+        assert "Foo" not in (bundled.description or "")
+        # `my-planner` (the bare role from the plugin file) auto-promotes.
+        assert resolver("my-planner").description == "Foo's my-planner."
+
+    def test_default_factory_ambiguous_bare_role_warns_and_does_not_promote(
+        self, monkeypatch, tmp_path, caplog,
+    ) -> None:
+        """Two plugins shipping the same bare role name — bare lookup is
+        ambiguous, so resolver WARNs with both candidates and falls
+        through. The teammate spawns with the original (bare) role,
+        which won't match the pack and lands on the synthetic empty
+        AgentDef path. The WARN is the operator's signal to spawn the
+        namespaced form."""
+        import json
+        import logging
+        from textwrap import dedent
+
+        from claude_crew.sdk_teammate import SdkTeammate
+
+        home = tmp_path / "home"
+        plugins_root = home / ".claude" / "plugins"
+        a = plugins_root / "a"
+        b = plugins_root / "b"
+        for d, label in ((a, "from-a"), (b, "from-b")):
+            (d / "agents").mkdir(parents=True)
+            (d / "agents" / "shared.md").write_text(dedent(f"""\
+                ---
+                description: {label}
+                model: haiku
+                tools: [Read]
+                ---
+
+                Body {label}.
+                """))
+        (plugins_root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "alpha@m": [{"scope": "user", "installPath": str(a)}],
+                "beta@m": [{"scope": "user", "installPath": str(b)}],
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        caplog.set_level(logging.WARNING, logger="claude_crew.factories")
+        f = factories.default_factory()
+        teammate = f("t-ambig", "alice", "shared")
+
+        assert isinstance(teammate, SdkTeammate)
+        # Original bare role kept — no silent promotion to one or the other.
+        assert teammate.role == "shared"
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "shared" in m and "alpha:shared" in m and "beta:shared" in m
+            and "disambiguate" in m
+            for m in msgs
+        ), f"ambiguous-resolve WARN missing; got: {msgs}"
+
 
 class TestSpawnChainParams:
     """Feature #10-T3: cwd and permission_mode thread through the spawn chain

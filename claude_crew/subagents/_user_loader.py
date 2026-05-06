@@ -347,6 +347,15 @@ def load_plugin_agents(
     later-sorted plugin wins, with a WARN naming both plugins and the
     losing/winning files.
 
+    Plugin-sourced agents are keyed as ``<plugin_short>:<role>`` to match
+    Claude Code's own surface form (the lead's agent list shows plugin
+    agents as ``repo-reactor:rr-planner``, not bare ``rr-planner``).
+    ``plugin_short`` is the part of ``plugin_key`` before ``@`` — for
+    ``"repo-reactor@repo-reactor"`` that's ``"repo-reactor"``. Without
+    this prefix, a lead spawning by the namespaced name would get
+    ``unknown role`` and two plugins shipping the same bare role name
+    would silently collide.
+
     Returns ``(pack, role_ss, bodies)`` aggregated across all plugins.
     Missing ``installed_plugins.json`` or zero plugins with an
     ``agents/`` dir → ``({}, {}, {})``.
@@ -362,23 +371,25 @@ def load_plugin_agents(
     seen_for_key: dict[str, tuple[str, Path]] = {}
 
     for plugin_key, agents_dir in pairs:
+        plugin_short = plugin_key.split("@", 1)[0]
         plugin_pack, plugin_ss, plugin_bodies = discover_dir(agents_dir)
         for role_key, agent in plugin_pack.items():
-            if role_key in pack:
-                prior_plugin, prior_dir = seen_for_key[role_key]
+            namespaced_key = f"{plugin_short}:{role_key}"
+            if namespaced_key in pack:
+                prior_plugin, prior_dir = seen_for_key[namespaced_key]
                 logger.warning(
                     "agent key %r appears in plugin %r at %s and plugin %r at %s; "
                     "%s wins (later in plugin/install iteration order)",
-                    role_key, prior_plugin, prior_dir,
+                    namespaced_key, prior_plugin, prior_dir,
                     plugin_key, agents_dir, agents_dir,
                 )
-            pack[role_key] = agent
-            bodies[role_key] = plugin_bodies[role_key]
+            pack[namespaced_key] = agent
+            bodies[namespaced_key] = plugin_bodies[role_key]
             if role_key in plugin_ss:
-                role_ss[role_key] = plugin_ss[role_key]
+                role_ss[namespaced_key] = plugin_ss[role_key]
             else:
-                role_ss.pop(role_key, None)
-            seen_for_key[role_key] = (plugin_key, agents_dir)
+                role_ss.pop(namespaced_key, None)
+            seen_for_key[namespaced_key] = (plugin_key, agents_dir)
     return pack, role_ss, bodies
 
 
@@ -573,13 +584,21 @@ def build_merged_pack(
     home_dir: Path | None = None,
     project_root: Path | None = None,
 ) -> tuple[dict[str, AgentDefinition], dict[str, list[str] | None], dict[str, str]]:
-    """Compose default + plugin + user + project agents in precedence order.
+    """Compose default + plugin + user + project agents.
 
     Effective pack = ``merge_packs(merge_packs(merge_packs(default, plugin), user), project)``.
-    Project shadows user shadows plugin shadows default. Shadowing is
+
+    The bare-key cascade — project shadows user shadows default — is
     observable via an INFO log on the ``claude_crew.subagents.loader``
     logger so a user debugging "why does my user-level agent behave
     differently here" can see the trail.
+
+    Plugin agents are keyed as ``<plugin_short>:<role>`` to match Claude
+    Code's surface form, so they coexist alongside any bare-keyed default
+    or user/project agent of the same ``<role>`` rather than shadowing it.
+    To override a plugin agent, ship a project/user agent file with the
+    same namespaced name (filename stem ``rr-planner`` and frontmatter
+    ``name: repo-reactor:rr-planner``).
 
     The plugin layer aggregates agents from every installed Claude Code
     plugin's ``agents/`` directory (see :func:`load_plugin_agents`).
@@ -624,6 +643,10 @@ def build_merged_pack(
         len(project), project_dir, sorted(project.keys()),
     )
 
+    # Shadowing trail. Plugin keys are namespaced (`<plugin>:<role>`) so
+    # they only collide with project/user files that opt into the
+    # namespaced name; bare-keyed default/user/project layers cascade
+    # among themselves as before.
     for key in plugin:
         if key in default:
             logger.info("agent %r from plugin shadows default pack", key)

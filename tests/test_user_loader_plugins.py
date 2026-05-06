@@ -215,9 +215,12 @@ class TestLoadPluginAgents:
             "repo-reactor@m": [{"scope": "user", "installPath": str(install)}],
         })
         pack, _, bodies = load_plugin_agents(tmp_path, tmp_path)
-        assert set(pack.keys()) == {"rr-planner"}
-        assert pack["rr-planner"].description == "RR planner"
-        assert "rr-planner" in bodies
+        # Plugin agents are namespaced as "<plugin_short>:<role>" to match
+        # Claude Code's surface form (e.g. the lead's agent list shows
+        # "repo-reactor:rr-planner", not bare "rr-planner").
+        assert set(pack.keys()) == {"repo-reactor:rr-planner"}
+        assert pack["repo-reactor:rr-planner"].description == "RR planner"
+        assert "repo-reactor:rr-planner" in bodies
 
     def test_missing_agents_dir_does_not_raise(self, tmp_path: Path) -> None:
         install = _plugin_install(tmp_path, "cache", "p")
@@ -239,11 +242,14 @@ class TestLoadPluginAgents:
             "b@m": [{"scope": "user", "installPath": str(b)}],
         })
         pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
-        assert set(pack.keys()) == {"alice", "bob"}
+        assert set(pack.keys()) == {"a:alice", "b:bob"}
 
-    def test_cross_plugin_collision_lex_later_wins_with_warning(
+    def test_different_plugins_same_role_name_no_collision(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Two distinct plugins shipping the same bare role name no longer
+        collide — namespacing gives them distinct keys
+        ``<plugin_short>:<role>``. Both load; no WARN."""
         plugins_root = tmp_path / ".claude" / "plugins"
         a = plugins_root / "a"
         b = plugins_root / "b"
@@ -255,14 +261,35 @@ class TestLoadPluginAgents:
         })
         caplog.set_level(logging.WARNING, logger=LOGGER)
         pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
-        # Lex-later "beta@m" wins.
-        assert pack["shared"].description == "from-b"
-        # H2: the WARN names both plugin keys AND the agents_dir paths so
-        # same-plugin-multiple-install collisions don't render as
-        # "'p@m' and 'p@m'" (meaningless) — they render with distinct paths.
+        assert pack["alpha:shared"].description == "from-a"
+        assert pack["beta:shared"].description == "from-b"
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any("appears in plugin" in m for m in msgs), (
+            f"unexpected collision WARN; got: {msgs}"
+        )
+
+    def test_same_plugin_short_collision_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Same ``plugin_short`` from two different marketplaces collides —
+        keys both render as ``p:role`` since the marketplace suffix is
+        stripped. Lex-later wins, WARN names both plugin_keys and dirs."""
+        plugins_root = tmp_path / ".claude" / "plugins"
+        a = plugins_root / "a"
+        b = plugins_root / "b"
+        _write_agent(a / "agents", "shared.md", description="from-a")
+        _write_agent(b / "agents", "shared.md", description="from-b")
+        _write_plugin_manifest(tmp_path, {
+            "p@alpha-mkt": [{"scope": "user", "installPath": str(a)}],
+            "p@beta-mkt": [{"scope": "user", "installPath": str(b)}],
+        })
+        caplog.set_level(logging.WARNING, logger=LOGGER)
+        pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
+        # Lex-later "p@beta-mkt" wins.
+        assert pack["p:shared"].description == "from-b"
         msgs = [r.getMessage() for r in caplog.records]
         assert any(
-            "alpha@m" in m and "beta@m" in m and "agents" in m
+            "p@alpha-mkt" in m and "p@beta-mkt" in m and "agents" in m
             for m in msgs
         ), f"collision WARN missing plugin keys + paths; got: {msgs}"
 
@@ -334,7 +361,7 @@ class TestInstallPathEscapeGuard:
             "ok@m": [{"scope": "user", "installPath": str(good)}],
         })
         pack, _, _ = load_plugin_agents(tmp_path, tmp_path)
-        assert "ok" in pack
+        assert "ok:ok" in pack
 
     def test_install_path_with_traversal_segments_is_rejected(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -376,12 +403,13 @@ class TestSentinelCoverageGaps:
         # No WARN records — silent empty result.
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    def test_plugin_to_project_drop_with_no_user(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    def test_plugin_and_project_bare_role_coexist(
+        self, tmp_path: Path,
     ) -> None:
-        """M2 — plugin sets a field, no user-level role exists, project
-        drops the field. Verifies _warn_shadow_drop fires the project-vs-
-        plugin check, not just project-vs-user."""
+        """Plugin agents are namespaced (`<plugin>:<role>`); a project
+        agent file with the same bare role does NOT shadow the plugin —
+        both are independently spawnable. Mirrors Claude Code: plugin
+        agents and user/project agents are distinct namespaces."""
         install = _plugin_install(tmp_path, "cache", "rr")
         project = tmp_path / "proj"
         _write_agent(
@@ -390,18 +418,14 @@ class TestSentinelCoverageGaps:
         )
         _write_agent(
             project / ".claude" / "agents", "rr-planner.md",
-            description="project override",  # no skills declared → drops
+            description="project override",
         )
         _write_plugin_manifest(tmp_path, {
             "rr@m": [{"scope": "user", "installPath": str(install)}],
         })
-        caplog.set_level(logging.WARNING, logger=LOGGER)
-        build_merged_pack(home_dir=tmp_path, project_root=project)
-        msgs = [r.getMessage() for r in caplog.records]
-        assert any(
-            "project-level agent 'rr-planner'" in m and "skills" in m
-            for m in msgs
-        ), f"plugin→project shadow-drop WARN missing; got: {msgs}"
+        merged, _, _ = build_merged_pack(home_dir=tmp_path, project_root=project)
+        assert merged["rr:rr-planner"].description == "plugin"
+        assert merged["rr-planner"].description == "project override"
 
     def test_plugin_agent_with_unknown_skill_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -420,7 +444,7 @@ class TestSentinelCoverageGaps:
         build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
         msgs = [r.getMessage() for r in caplog.records]
         assert any(
-            "rr-planner" in m and "definitely-not-a-real-skill" in m
+            "rr:rr-planner" in m and "definitely-not-a-real-skill" in m
             for m in msgs
         ), f"unknown-skill WARN didn't surface plugin agent; got: {msgs}"
 
@@ -440,7 +464,7 @@ class TestSentinelCoverageGaps:
         build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
         msgs = [r.getMessage() for r in caplog.records]
         assert any(
-            "rr-planner" in m and "not-a-registered-server" in m
+            "rr:rr-planner" in m and "not-a-registered-server" in m
             for m in msgs
         ), f"unknown-mcpServers WARN didn't surface plugin agent; got: {msgs}"
 
@@ -451,9 +475,13 @@ class TestSentinelCoverageGaps:
 
 
 class TestBuildMergedPackPluginLayer:
-    """Precedence: project > user > plugin > default."""
+    """Plugin agents are namespaced (`<plugin>:<role>`) and coexist with
+    bare-keyed default/user/project entries. To override a plugin agent,
+    a user/project file must opt in to the namespaced filename + name."""
 
-    def test_plugin_agents_appear_in_merged(self, tmp_path: Path) -> None:
+    def test_plugin_agents_appear_in_merged_namespaced(
+        self, tmp_path: Path,
+    ) -> None:
         install = _plugin_install(tmp_path, "cache", "rr")
         _write_agent(
             install / "agents", "rr-planner.md",
@@ -465,11 +493,17 @@ class TestBuildMergedPackPluginLayer:
         merged, _, bodies = build_merged_pack(
             home_dir=tmp_path, project_root=tmp_path,
         )
-        assert "rr-planner" in merged
-        assert merged["rr-planner"].description == "from plugin"
-        assert "rr-planner" in bodies
+        # Plugin entries are namespaced; bare role name absent.
+        assert "rr:rr-planner" in merged
+        assert "rr-planner" not in merged
+        assert merged["rr:rr-planner"].description == "from plugin"
+        assert "rr:rr-planner" in bodies
 
-    def test_user_overrides_plugin(self, tmp_path: Path) -> None:
+    def test_user_bare_does_not_shadow_plugin_namespaced(
+        self, tmp_path: Path,
+    ) -> None:
+        """A user file at `~/.claude/agents/rr-planner.md` and a plugin
+        agent both exist independently — distinct keys, both spawnable."""
         install = _plugin_install(tmp_path, "cache", "rr")
         _write_agent(install / "agents", "rr-planner.md", description="from plugin")
         _write_agent(
@@ -482,27 +516,16 @@ class TestBuildMergedPackPluginLayer:
         merged, _, _ = build_merged_pack(
             home_dir=tmp_path, project_root=tmp_path / "no-project",
         )
+        assert merged["rr:rr-planner"].description == "from plugin"
         assert merged["rr-planner"].description == "from user"
 
-    def test_project_overrides_plugin_when_no_user(self, tmp_path: Path) -> None:
-        install = _plugin_install(tmp_path, "cache", "rr")
-        project = tmp_path / "proj"
-        _write_agent(install / "agents", "rr-planner.md", description="from plugin")
-        _write_agent(
-            project / ".claude" / "agents", "rr-planner.md",
-            description="from project",
-        )
-        _write_plugin_manifest(tmp_path, {
-            "rr@m": [{"scope": "user", "installPath": str(install)}],
-        })
-        merged, _, _ = build_merged_pack(home_dir=tmp_path, project_root=project)
-        assert merged["rr-planner"].description == "from project"
-
-    def test_plugin_shadowing_default_logs_info(
+    def test_plugin_does_not_shadow_default_bare_role(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """A plugin shipping `explorer.md` produces key `rr:explorer`,
+        which does NOT collide with the bundled bare `explorer` — so
+        the default keeps its slot and no shadow-INFO fires."""
         install = _plugin_install(tmp_path, "cache", "rr")
-        # Shadow the bundled "explorer" role.
         _write_agent(
             install / "agents", "explorer.md",
             description="plugin's explorer",
@@ -511,37 +534,43 @@ class TestBuildMergedPackPluginLayer:
             "rr@m": [{"scope": "user", "installPath": str(install)}],
         })
         caplog.set_level(logging.INFO, logger=LOGGER)
-        build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
-        assert any(
-            "plugin shadows default" in r.getMessage()
-            and "'explorer'" in r.getMessage()
-            for r in caplog.records
+        merged, _, _ = build_merged_pack(
+            home_dir=tmp_path, project_root=tmp_path / "x",
         )
+        # Default 'explorer' still bundled; plugin's lives at namespaced key.
+        assert "explorer" in merged
+        assert "rr:explorer" in merged
+        assert merged["rr:explorer"].description == "plugin's explorer"
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any("plugin shadows default" in m for m in msgs)
 
-    def test_user_shadowing_plugin_warns_on_dropped_field(
+    def test_user_cannot_override_plugin_via_name_frontmatter(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """User-level redefinition that drops a field set by the plugin
-        emits the same shadow-drop WARN as user-shadowing-default."""
+        """The name validator (``[a-z0-9][a-z0-9-]*``) rejects colons in
+        user/project agent ``name`` frontmatter. Plugin agents are
+        therefore not overridable from user/project layers — matches
+        Claude Code's model, where plugin agents are first-class and
+        uninstall is the override path."""
         install = _plugin_install(tmp_path, "cache", "rr")
+        _write_agent(install / "agents", "rr-planner.md", description="from plugin")
         _write_agent(
-            install / "agents", "rr-planner.md",
-            description="plugin", extra="skills: [plan-feature]",
-        )
-        _write_agent(
-            tmp_path / ".claude" / "agents", "rr-planner.md",
-            description="user override",  # no skills declared → drops
+            tmp_path / ".claude" / "agents", "rr-planner-override.md",
+            description="from user",
+            extra="name: rr:rr-planner",
         )
         _write_plugin_manifest(tmp_path, {
             "rr@m": [{"scope": "user", "installPath": str(install)}],
         })
         caplog.set_level(logging.WARNING, logger=LOGGER)
-        build_merged_pack(home_dir=tmp_path, project_root=tmp_path / "x")
-        # The WARN names the higher layer ("user"), the role, and the
-        # dropped field ("skills").
-        msgs = [r.getMessage() for r in caplog.records]
+        merged, _, _ = build_merged_pack(
+            home_dir=tmp_path, project_root=tmp_path / "no-project",
+        )
+        assert merged["rr:rr-planner"].description == "from plugin"
+        warn_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING
+        ]
         assert any(
-            "user-level agent 'rr-planner'" in m
-            and "skills" in m
-            for m in msgs
-        ), f"shadow-drop WARN missing; got: {msgs}"
+            "invalid name" in m and "rr:rr-planner" in m for m in warn_msgs
+        ), f"name-validator rejection WARN missing at >=WARNING; got: {warn_msgs}"

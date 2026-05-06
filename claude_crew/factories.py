@@ -114,6 +114,41 @@ def default_factory() -> TeammateFactory:
 
         merged_pack, role_ss, merged_bodies = build_merged_pack()
 
+        def _resolve_role(requested: str) -> str:
+            """Promote a bare role name to a namespaced plugin key when the
+            promotion is unambiguous.
+
+            Plugin agents are keyed ``<plugin>:<role>`` to match Claude Code's
+            surface form. A lead may still spawn by the bare role name (legacy
+            usage, or matching a name they saw in another tool). We resolve:
+
+            - Exact match in merged_pack → use as-is.
+            - No exact match, and exactly one ``*:requested`` exists → promote,
+              log INFO so the operator sees the trail.
+            - Multiple ``*:requested`` candidates → WARN listing them; fall
+              through with the original (which will hit the synthetic empty
+              AgentDef path). The lead has to disambiguate.
+            - Zero candidates → fall through; existing unknown-role behavior.
+            """
+            if requested in merged_pack:
+                return requested
+            candidates = sorted(
+                k for k in merged_pack if k.endswith(f":{requested}")
+            )
+            if len(candidates) == 1:
+                logger.info(
+                    "role %r not in pack; auto-resolving to plugin-namespaced %r",
+                    requested, candidates[0],
+                )
+                return candidates[0]
+            if len(candidates) > 1:
+                logger.warning(
+                    "role %r not in pack; multiple plugin candidates %r — "
+                    "spawn the namespaced form to disambiguate",
+                    requested, candidates,
+                )
+            return requested
+
         def factory(
             id: str, name: str, role: str,
             *, model: str | None = None, effort: str | None = None,
@@ -121,6 +156,7 @@ def default_factory() -> TeammateFactory:
             extra_tools: list[str] | None = None,
             extra_skills: list[str] | None = None,
         ) -> Teammate:
+            role = _resolve_role(role)
             # Warn about unknown extra skills at spawn time.
             if extra_skills:
                 discovered = _discover_skill_names()
@@ -219,6 +255,11 @@ def default_factory() -> TeammateFactory:
         # production teammates have no `config` block and dashboard chips
         # render empty.
         def _resolve_agent_def(role: str) -> "AgentDefinition | None":
+            # Mirror the spawn-path promotion so the broker's config snapshot
+            # finds the same AgentDefinition that the teammate is running on.
+            # Without this, a lead spawning by bare name (auto-promoted at
+            # factory()) gets a correct teammate but an empty dashboard chip.
+            role = _resolve_role(role)
             agent_def = merged_pack.get(role)
             if agent_def is None:
                 return None
