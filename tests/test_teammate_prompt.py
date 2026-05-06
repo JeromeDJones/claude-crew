@@ -23,11 +23,10 @@ from claude_crew.subagents import load_default_pack
 from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
 from claude_crew.teammate_prompt import (
     NEGATIVE_PATTERNS,
-    SENTINEL_ANTIPATTERNS,
     SENTINEL_CONTEXT,
     SENTINEL_DELEGATION,
-    SENTINEL_PEERS,
-    _build_peer_list,
+    SENTINEL_SUBAGENTS,
+    _build_subagent_list,
     _explorer_hint,
     build_teammate_prompt,
 )
@@ -104,18 +103,17 @@ class TestStaticContradictionLint:
 
 
 class TestSentinelOrdering:
-    """SC-2 — all four sentinels appear in the documented order."""
+    """SC-2 — all sentinels appear in the documented order."""
 
-    def test_assembled_prompt_contains_all_four_sentinels(
+    def test_assembled_prompt_contains_all_sentinels(
         self, default_pack_agents, default_pack_bodies
     ) -> None:
         body = default_pack_bodies["planner"]
         assembled = build_teammate_prompt("planner", body, default_pack_agents)
         for sentinel in (
             SENTINEL_CONTEXT,
-            SENTINEL_PEERS,
+            SENTINEL_SUBAGENTS,
             SENTINEL_DELEGATION,
-            SENTINEL_ANTIPATTERNS,
         ):
             assert sentinel in assembled, f"Sentinel {sentinel!r} missing from assembled prompt"
 
@@ -125,12 +123,11 @@ class TestSentinelOrdering:
         body = default_pack_bodies["planner"]
         assembled = build_teammate_prompt("planner", body, default_pack_agents)
         ctx_idx = assembled.index(SENTINEL_CONTEXT)
-        peers_idx = assembled.index(SENTINEL_PEERS)
+        sub_idx = assembled.index(SENTINEL_SUBAGENTS)
         deleg_idx = assembled.index(SENTINEL_DELEGATION)
-        anti_idx = assembled.index(SENTINEL_ANTIPATTERNS)
-        assert ctx_idx < peers_idx < deleg_idx < anti_idx, (
-            f"Sentinel order wrong: CONTEXT={ctx_idx}, PEERS={peers_idx}, "
-            f"DELEGATION={deleg_idx}, ANTIPATTERNS={anti_idx}"
+        assert ctx_idx < sub_idx < deleg_idx, (
+            f"Sentinel order wrong: CONTEXT={ctx_idx}, SUBAGENTS={sub_idx}, "
+            f"DELEGATION={deleg_idx}"
         )
 
 
@@ -139,19 +136,19 @@ class TestSentinelOrdering:
 # ---------------------------------------------------------------------------
 
 
-class TestPeerList:
-    """Tests for _build_peer_list: self-exclusion, sort order, description handling."""
+class TestSubagentList:
+    """Tests for _build_subagent_list: self-exclusion, sort order, description handling."""
 
-    def test_peer_list_excludes_self(self, default_pack_agents) -> None:
-        result = _build_peer_list("planner", default_pack_agents)
+    def test_subagent_list_excludes_self(self, default_pack_agents) -> None:
+        result = _build_subagent_list("planner", default_pack_agents)
         # Should not appear as a peer list entry
         assert "- **planner**" not in result, (
             "planner must not list itself as a peer"
         )
 
-    def test_peer_list_sorted_by_name(self, default_pack_agents) -> None:
+    def test_subagent_list_sorted_by_name(self, default_pack_agents) -> None:
         # Use a role not in the pack so all agents appear as peers.
-        result = _build_peer_list("nonexistent-role", default_pack_agents)
+        result = _build_subagent_list("nonexistent-role", default_pack_agents)
         # Extract names from lines matching "- **<name>**"
         names = [
             line.split("**")[1]
@@ -162,34 +159,34 @@ class TestPeerList:
             f"Peer list is not sorted alphabetically: {names}"
         )
 
-    def test_peer_list_includes_description_when_present(
+    def test_subagent_list_includes_description_when_present(
         self, default_pack_agents
     ) -> None:
         # explorer has a known description; exclude it from self so it appears
-        result = _build_peer_list("nonexistent-role", default_pack_agents)
+        result = _build_subagent_list("nonexistent-role", default_pack_agents)
         explorer_defn = default_pack_agents["explorer"]
         expected_line = f"- **explorer** — {explorer_defn.description.strip()}"
         assert expected_line in result, (
             f"Expected description line {expected_line!r} not found in peer list:\n{result}"
         )
 
-    def test_peer_list_falls_back_to_name_only_when_description_missing(self) -> None:
+    def test_subagent_list_falls_back_to_name_only_when_description_missing(self) -> None:
         ns = types.SimpleNamespace(description=None)
         fake_agents: dict[str, Any] = {"alpha": ns}
-        result = _build_peer_list("nonexistent-role", fake_agents)
+        result = _build_subagent_list("nonexistent-role", fake_agents)
         assert "- **alpha**" in result
         assert "—" not in result, "Name-only entry must not contain em-dash"
 
-    def test_peer_list_falls_back_to_name_only_when_description_is_non_string(
+    def test_subagent_list_falls_back_to_name_only_when_description_is_non_string(
         self,
     ) -> None:
         ns = types.SimpleNamespace(description=123)
         fake_agents: dict[str, Any] = {"beta": ns}
-        result = _build_peer_list("nonexistent-role", fake_agents)
+        result = _build_subagent_list("nonexistent-role", fake_agents)
         assert "- **beta**" in result
         assert "—" not in result, "Non-string description must be treated as missing"
 
-    def test_peer_list_includes_tools_sub_bullet(self, default_pack_agents) -> None:
+    def test_subagent_list_includes_tools_sub_bullet(self, default_pack_agents) -> None:
         """Each peer entry lists its tool surface as an indented sub-bullet.
 
         Surfacing tools to the parent prevents mis-routing tasks to subagents
@@ -199,7 +196,7 @@ class TestPeerList:
         separate hook-based fix — but it gives the parent the data to route
         correctly and the operator a way to see what each peer can do.
         """
-        result = _build_peer_list("nonexistent-role", default_pack_agents)
+        result = _build_subagent_list("nonexistent-role", default_pack_agents)
         gp_tools = ", ".join(default_pack_agents["general-purpose"].tools)
         assert f"  - tools: {gp_tools}" in result, (
             f"general-purpose peer entry missing tools sub-bullet. Got:\n{result}"
@@ -209,12 +206,12 @@ class TestPeerList:
             f"explorer peer entry missing tools sub-bullet. Got:\n{result}"
         )
 
-    def test_peer_list_omits_tools_sub_bullet_when_tools_missing(self) -> None:
+    def test_subagent_list_omits_tools_sub_bullet_when_tools_missing(self) -> None:
         """Malformed user packs without a tools attribute fall back to
         name-and-description-only, no sub-bullet, no crash."""
         ns = types.SimpleNamespace(description="thing", tools=None)
         fake_agents: dict[str, Any] = {"gamma": ns}
-        result = _build_peer_list("nonexistent-role", fake_agents)
+        result = _build_subagent_list("nonexistent-role", fake_agents)
         assert "- **gamma** — thing" in result
         assert "tools:" not in result, (
             f"tools sub-bullet rendered despite tools=None: {result!r}"
@@ -300,12 +297,11 @@ class TestSdkTeammateIntegration:
             f"Pack body content {first_content!r} not found in system prompt"
         )
 
-        # All four sentinels appear
+        # All sentinels appear
         for sentinel in (
             SENTINEL_CONTEXT,
-            SENTINEL_PEERS,
+            SENTINEL_SUBAGENTS,
             SENTINEL_DELEGATION,
-            SENTINEL_ANTIPATTERNS,
         ):
             assert sentinel in prompt, (
                 f"Sentinel {sentinel!r} missing from general-purpose teammate prompt"

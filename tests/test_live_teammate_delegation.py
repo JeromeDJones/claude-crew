@@ -28,10 +28,9 @@ from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.factories import sdk_factory
 from claude_crew.teammate_prompt import (
-    SENTINEL_ANTIPATTERNS,
     SENTINEL_CONTEXT,
     SENTINEL_DELEGATION,
-    SENTINEL_PEERS,
+    SENTINEL_SUBAGENTS,
 )
 
 
@@ -96,14 +95,14 @@ class TestGeneralPurposeTeammateDelegation:
             role="general-purpose", name=None, factory=sdk_factory,
         )
 
-        # Deterministic pre-check: the assembled prompt must contain all four
+        # Deterministic pre-check: the assembled prompt must contain all
         # SENTINEL_* headings. If a future #21-related regression breaks the
         # prompt assembly, this catches it before paying for a live API call.
         teammate_pre = broker._teammates.get(tid)
         assert teammate_pre is not None
         sys_prompt = getattr(teammate_pre, "_system_prompt", "") or ""
         for sentinel in (
-            SENTINEL_CONTEXT, SENTINEL_PEERS, SENTINEL_DELEGATION, SENTINEL_ANTIPATTERNS,
+            SENTINEL_CONTEXT, SENTINEL_SUBAGENTS, SENTINEL_DELEGATION,
         ):
             assert sentinel in sys_prompt, (
                 f"#21 prompt assembly regression: SENTINEL_{sentinel!r} missing from "

@@ -7,14 +7,14 @@ When a teammate is spawned, its system prompt is:
     <pack_body> + "\\n\\n" + <addendum>
 
 The addendum corrects any leaf-context language in the pack body and
-provides peer-awareness and delegation guidance appropriate for a
+provides delegation guidance and a subagent roster appropriate for a
 top-level teammate (one that *can* dispatch subagents).
 
 The subagent path's substrate framing (SUBSTRATE_SUBAGENT_GUIDANCE +
 build_subagent_prompt in _loader.py) is composed separately for Task/
 subagent invocations and is NOT part of this module. The teammate path
 deliberately retains body-first ordering (the addendum injects late-bound
-peer-list context that may reference roles named in the body).
+subagent-roster context that may reference roles named in the body).
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ from typing import Any
 # Public test surface
 # ---------------------------------------------------------------------------
 
-# Curated negative-pattern list for the SC-6 contradiction-lint test.
+# Curated negative-pattern list for the contradiction-lint test.
 # Strings in this tuple MUST NOT appear in any assembled teammate prompt.
-# Tighten this list to add future contradiction guards.
 NEGATIVE_PATTERNS: tuple[str, ...] = (
     "you have no Task tool",
     "no Task tool by design",
@@ -37,14 +36,11 @@ NEGATIVE_PATTERNS: tuple[str, ...] = (
     "use the Task tool",
 )
 
-# Section sentinels (Markdown headings) for SC-2 ordering assertions.
+# Section sentinels (Markdown headings) for ordering assertions.
 # Tests assert these appear in the assembled prompt in this order.
-# Sentinel text is part of the public test contract; do not change without
-# updating tests.
 SENTINEL_CONTEXT = "## Operating context"
-SENTINEL_PEERS = "## Available teammates"
+SENTINEL_SUBAGENTS = "## Available subagents"
 SENTINEL_DELEGATION = "## Delegation"
-SENTINEL_ANTIPATTERNS = "## Anti-patterns"
 SENTINEL_MEMORY = "## Memory from prior sessions"
 
 
@@ -54,33 +50,19 @@ SENTINEL_MEMORY = "## Memory from prior sessions"
 
 _CONTEXT_OVERRIDE = SENTINEL_CONTEXT + """
 
-You are running as a top-level **teammate** in the claude-crew system, not
-as a leaf subagent. Any leaf-context constraints in your role definition
-above (such as restrictions on delegation) apply to YOUR subagents, not to
-you. You DO have the ability to dispatch subagents for delegated work.
+You are a top-level **teammate** in claude-crew, not a leaf. Any delegation
+constraints in your role above apply to your subagents, not to you — you
+can dispatch subagents via Task.
 """
 
 _DELEGATION_TEMPLATE = SENTINEL_DELEGATION + """
 
-When you need to read files, run searches, or do bounded "go look at this
-and report" work, dispatch a subagent rather than reading directly. Reserve
-your context for synthesis and judgment.
-
-If the read's content will appear in your response (a quoted line, a cited
-path, a small file you are showing the lead), read it yourself. If the
-read is research that informs your synthesis but won't appear verbatim,
-delegate.
+Delegate bounded "go look and report" work to subagents to preserve your
+context for synthesis. Read directly only when the content will appear
+verbatim in your response (a quoted line, cited path, file you're showing
+the lead). Don't ask the lead to load files a subagent could fetch.
 
 {explorer_hint}
-"""
-
-_ANTIPATTERNS = SENTINEL_ANTIPATTERNS + """
-
-- Do not spawn other top-level teammates (only subagents).
-- Do not ask the lead to load files into your context that a subagent could
-  fetch on your behalf.
-- Do not retain leaf-context constraints from your role's pack body —
-  those apply to your subagents, not to you.
 """
 
 
@@ -99,27 +81,26 @@ def build_teammate_prompt(
 
     Returns: pack_body + "\\n\\n" + addendum
 
-    The addendum contains four ordered sections delimited by SENTINEL_*
-    constants, plus an optional fifth when memory_section is provided:
-      1. SENTINEL_CONTEXT  — corrects leaf-context language for teammate use
-      2. SENTINEL_PEERS    — sorted peer list, self excluded (R-1, R-2)
-      3. SENTINEL_DELEGATION — delegation framework with conditional explorer hint
-      4. SENTINEL_ANTIPATTERNS — what not to do
-      5. SENTINEL_MEMORY  — injected when pack declares memory: user (optional)
+    The addendum contains three ordered sections delimited by SENTINEL_*
+    constants, plus an optional fourth when memory_section is provided:
+      1. SENTINEL_CONTEXT    — corrects leaf-context language for teammate use
+      2. SENTINEL_SUBAGENTS  — sorted subagent roster, self excluded
+      3. SENTINEL_DELEGATION — delegation heuristic + conditional explorer hint
+      4. SENTINEL_MEMORY     — injected when pack declares memory: user (optional)
 
     Args:
-        role: the teammate's own role key; filtered out of the peer list
-              per OQ-6 / R-2 (a teammate cannot delegate to itself).
+        role: the teammate's own role key; filtered out of the subagent list
+              (a teammate cannot delegate to itself).
         pack_body: raw pack body text, no substrate framing, no frontmatter.
         agents: the agents dict (role-key → AgentDefinition); used for the
-                peer list and the explorer-hint conditional. Defensive on
-                missing or malformed description fields (R-3).
+                subagent list and the explorer-hint conditional. Defensive on
+                missing or malformed description fields.
         memory_section: pre-built memory section string from
                         teammate_memory.build_memory_section, or None.
     """
-    peer_section = _build_peer_list(role, agents)
+    subagent_section = _build_subagent_list(role, agents)
     delegation = _DELEGATION_TEMPLATE.format(explorer_hint=_explorer_hint(agents))
-    parts = [_CONTEXT_OVERRIDE, peer_section, delegation, _ANTIPATTERNS]
+    parts = [_CONTEXT_OVERRIDE, subagent_section, delegation]
     if memory_section is not None:
         parts.append(memory_section)
     addendum = "\n\n".join(parts)
@@ -131,19 +112,19 @@ def build_teammate_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _build_peer_list(self_role: str, agents: dict[str, Any]) -> str:
-    """Build the ## Available teammates section.
+def _build_subagent_list(self_role: str, agents: dict[str, Any]) -> str:
+    """Build the ## Available subagents section.
 
-    - Sorted by name (R-1: stable ordering across Python versions and envs).
-    - Excludes self_role (R-2: a teammate cannot delegate to itself).
-    - Defensive on missing / non-string description (R-3: user packs may be
+    - Sorted by name (stable ordering across Python versions and envs).
+    - Excludes self_role (a teammate cannot delegate to itself).
+    - Defensive on missing / non-string description (user packs may be
       malformed; fall back to name-only, never raise).
-    - Lists each peer's available tools as an indented sub-bullet so the
+    - Lists each subagent's available tools as an indented sub-bullet so the
       teammate can route work correctly (BACKLOG 2026-05-01: parents were
-      mis-routing shell tasks to subagents that lack Bash because the peer
-      list didn't surface tool surfaces). Defensive on missing tools field.
+      mis-routing shell tasks to subagents that lack Bash because the list
+      didn't surface tool surfaces). Defensive on missing tools field.
     """
-    lines = [SENTINEL_PEERS, ""]
+    lines = [SENTINEL_SUBAGENTS, ""]
     for name in sorted(agents.keys()):
         if name == self_role:
             continue
@@ -161,7 +142,7 @@ def _build_peer_list(self_role: str, agents: dict[str, Any]) -> str:
 
 
 def _explorer_hint(agents: dict[str, Any]) -> str:
-    """Return delegation phrasing that names explorer when present (EC-11 / R-7).
+    """Return delegation phrasing that names explorer when present.
 
     Avoids referring to a subagent the teammate doesn't actually have
     (edge case: custom agents dict without explorer). Falls back to
