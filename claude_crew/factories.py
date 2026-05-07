@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from claude_crew.broker import TeammateFactory
+from claude_crew.diagnostics import (
+    StartupDiagCollector,
+    collect_startup_diagnostics,
+)
 from claude_crew.teammate import StubTeammate, Teammate
 
 logger = logging.getLogger(__name__)
@@ -91,7 +96,65 @@ def sdk_factory(
 sdk_factory.requires_auth = True  # type: ignore[attr-defined]
 
 
-def default_factory() -> TeammateFactory:
+# Source loggers we want startup-diagnostics capture to cover. The
+# collector attaches at the root logger (assumption A-2); these loggers
+# are explicitly probed for propagation (OQ-1) and direct-attached as
+# fallback if any of them is silenced upstream by a propagate=False on
+# their ancestor chain.
+_STARTUP_SOURCE_LOGGERS: tuple[str, ...] = (
+    "claude_crew.subagents.loader",
+    "claude_crew.subagents._user_loader",
+    "claude_crew.factories",
+)
+
+
+def _propagates_to_root(logger_name: str) -> bool:
+    """Return True iff records on ``logger_name`` reach the root logger.
+
+    Walks the ancestor chain. A propagate=False anywhere between the
+    source logger and the root breaks propagation; we cannot rely on
+    a root-only handler in that case. Pure inspection — no records
+    are emitted.
+    """
+    cur = logging.getLogger(logger_name)
+    root = logging.getLogger()
+    if cur is root:
+        return True
+    while cur is not None and cur is not root:
+        if not cur.propagate:
+            return False
+        cur = cur.parent
+    return True
+
+
+def _direct_attach_fallbacks(
+    handler: StartupDiagCollector,
+) -> list[logging.Logger]:
+    """Direct-attach ``handler`` to any source logger that fails the
+    propagation probe. Returns the list of loggers we attached to so the
+    caller can detach symmetrically on context exit.
+    """
+    attached: list[logging.Logger] = []
+    for name in _STARTUP_SOURCE_LOGGERS:
+        if _propagates_to_root(name):
+            continue
+        src = logging.getLogger(name)
+        src.addHandler(handler)
+        # Ensure the source logger's effective level lets INFO through;
+        # otherwise the handler never gets called even with direct attach.
+        if src.level == logging.NOTSET or src.level > logging.INFO:
+            # Don't permanently lower — record original and restore later.
+            handler._restore_levels.append((src, src.level))  # type: ignore[attr-defined]
+            src.setLevel(logging.INFO)
+        attached.append(src)
+    return attached
+
+
+def default_factory(
+    *,
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> TeammateFactory:
     """Return the factory selected by CLAUDE_CREW_TEAMMATE_MODE.
 
     - "sdk" (default in production) → SdkTeammate, requires auth.
@@ -101,6 +164,15 @@ def default_factory() -> TeammateFactory:
       resolved at MCP-server startup, not per-spawn).
     - "stub"                        → StubTeammate
     - anything else                 → StubTeammate (conservative)
+
+    In sdk mode the call to ``build_merged_pack()`` is wrapped in a
+    :func:`collect_startup_diagnostics` context. The frozen tuple is
+    attached to the returned factory as ``factory.startup_diagnostics``
+    so :func:`make_server` can thread it into the
+    :class:`~claude_crew.broker.Broker` constructor. Stub mode skips
+    capture entirely (acceptance test #10): the stub factory carries no
+    diagnostics attribute and ``getattr(stub_factory, 'startup_diagnostics', ())``
+    yields ``()``.
     """
     mode = os.environ.get("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
     if mode == "sdk":
@@ -112,7 +184,35 @@ def default_factory() -> TeammateFactory:
             build_merged_pack,
         )
 
-        merged_pack, role_ss, merged_bodies = build_merged_pack()
+        # Capture window: every record propagated by source loggers
+        # during pack-load lands in the collector. Direct-attach
+        # fallbacks cover any source logger that was silenced upstream.
+        collector_handler: StartupDiagCollector
+        with collect_startup_diagnostics() as collector_handler:
+            # Initialize the per-handler restore list used by the
+            # direct-attach helper. The context manager restores the
+            # *root* logger's level on exit; source-logger levels we
+            # touched here are restored manually below.
+            collector_handler._restore_levels = []  # type: ignore[attr-defined]
+            extra_attached = _direct_attach_fallbacks(collector_handler)
+            try:
+                # Pass home_dir/project_root only when explicitly provided so
+                # existing tests that monkeypatch build_merged_pack with a
+                # zero-arg stand-in continue to work.
+                _bmp_kwargs: dict = {}
+                if home_dir is not None:
+                    _bmp_kwargs["home_dir"] = home_dir
+                if project_root is not None:
+                    _bmp_kwargs["project_root"] = project_root
+                merged_pack, role_ss, merged_bodies = build_merged_pack(
+                    **_bmp_kwargs
+                )
+            finally:
+                for src in extra_attached:
+                    src.removeHandler(collector_handler)
+                for src, prev in collector_handler._restore_levels:  # type: ignore[attr-defined]
+                    src.setLevel(prev)
+        startup_diagnostics = collector_handler.freeze()
 
         def _resolve_role(requested: str) -> str:
             """Promote a bare role name to a namespaced plugin key when the
@@ -271,5 +371,8 @@ def default_factory() -> TeammateFactory:
             return agent_def
 
         factory.agent_def_resolver = _resolve_agent_def  # type: ignore[attr-defined]
+        # Frozen startup diagnostics tuple; consumed by make_server() when it
+        # constructs the default Broker (Broker(startup_diagnostics=...)).
+        factory.startup_diagnostics = startup_diagnostics  # type: ignore[attr-defined]
         return factory
     return stub_factory
