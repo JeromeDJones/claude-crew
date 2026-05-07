@@ -233,6 +233,59 @@
     }
     .terminated-row:hover { opacity: 0.9; background: var(--bg-1); }
 
+    /* startup-diagnostics-dashboard: reuses terminated-section visual idiom */
+    .startup-notices-section { border-bottom: 1px solid var(--line); flex-shrink: 0; background: var(--bg-1); }
+    .startup-notices-header {
+      width: 100%; text-align: left; background: none; border: none;
+      cursor: pointer; padding: 6px 12px;
+      color: var(--fg-2); font-size: 11px;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      display: flex; align-items: center; gap: 6px;
+      font-family: var(--font-sans);
+    }
+    .startup-notices-header:hover { color: var(--fg-1); }
+    .startup-notices-list { padding: 4px 0; }
+    .startup-notice-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px;
+      font-family: var(--font-mono); font-size: 11px; color: var(--fg-1);
+    }
+    .startup-notice-row.startup-notice-info { opacity: 0.7; }
+    .startup-notice-badge {
+      display: inline-block;
+      padding: 0 6px; border-radius: 3px;
+      font-family: var(--font-sans); font-weight: 600; font-size: 10px;
+      letter-spacing: 0.05em;
+      flex-shrink: 0; min-width: 44px; text-align: center;
+    }
+    .startup-notice-badge-info {
+      background: var(--bg-2); color: var(--fg-2);
+    }
+    .startup-notice-badge-warning {
+      background: oklch(0.62 0.15 75 / 0.20); color: oklch(0.40 0.15 75);
+    }
+    .startup-notice-badge-error {
+      background: oklch(0.53 0.18 25 / 0.20); color: oklch(0.40 0.18 25);
+    }
+    .startup-notice-source {
+      color: var(--fg-3); flex-shrink: 0;
+    }
+    .startup-notice-category {
+      color: var(--fg-3); flex-shrink: 0;
+    }
+    .startup-notice-message {
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .startup-notice-message:hover { white-space: normal; word-break: break-word; }
+    .startup-notices-toggle {
+      margin-left: auto; background: none; border: 1px solid var(--line);
+      cursor: pointer; padding: 2px 8px; border-radius: 3px;
+      font-family: var(--font-sans); font-size: 10px; color: var(--fg-2);
+      text-transform: none; letter-spacing: 0;
+    }
+    .startup-notices-toggle:hover { color: var(--fg-1); background: var(--bg-2); }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
@@ -941,6 +994,72 @@
       );
     }
 
+    // --- StartupNoticesSection (StartupNoticeRow + StartupNoticesSection) ---
+    function StartupNoticeRow({ diagnostic }) {
+      const level = (diagnostic.level || "INFO").toUpperCase();
+      const badgeClass =
+        level === "ERROR" ? "startup-notice-badge-error" :
+        level === "WARNING" ? "startup-notice-badge-warning" :
+        "startup-notice-badge-info";
+      const rowClass = level === "INFO"
+        ? "startup-notice-row startup-notice-info"
+        : "startup-notice-row";
+      // source short-name: trim "claude_crew." prefix for compactness
+      const source = (diagnostic.source || "").replace(/^claude_crew\./, "");
+      return (
+        <div className={rowClass}>
+          <span className={`startup-notice-badge ${badgeClass}`}>{level}</span>
+          <span className="startup-notice-category">[{diagnostic.category}]</span>
+          <span className="startup-notice-source">{source}</span>
+          <span className="startup-notice-message" title={diagnostic.message}>
+            {diagnostic.message}
+          </span>
+        </div>
+      );
+    }
+
+    function StartupNoticesSection({ diagnostics }) {
+      const [isOpen, setIsOpen] = useState(true);
+      const [showInfo, setShowInfo] = useState(false);
+      const list = diagnostics || [];
+      // WARN+ visible by default (A-3); INFO behind toggle.
+      const visible = showInfo
+        ? list
+        : list.filter(d => (d.level || "INFO").toUpperCase() !== "INFO");
+      // Empty list (or only INFOs hidden behind toggle and no warn/error) →
+      // panel hidden when nothing the user is asking to see.
+      // Spec edge case: empty list ⇒ panel not rendered.
+      if (list.length === 0) return null;
+      // If everything is INFO and user hasn't toggled, still render the
+      // header so the user knows there are notices and can opt in.
+      const infoCount = list.filter(d => (d.level || "INFO").toUpperCase() === "INFO").length;
+      const warnCount = list.length - infoCount;
+      return (
+        <div className="startup-notices-section">
+          <button className="startup-notices-header" onClick={() => setIsOpen(!isOpen)}>
+            <span>{isOpen ? '▼' : '▶'}</span>
+            <span>Startup Notices ({list.length})</span>
+            {infoCount > 0 && (
+              <span
+                role="button"
+                className="startup-notices-toggle"
+                onClick={(e) => { e.stopPropagation(); setShowInfo(s => !s); }}
+              >
+                {showInfo ? `Hide INFO (${infoCount})` : `Show INFO (${infoCount})`}
+              </span>
+            )}
+          </button>
+          {isOpen && (
+            <div className="startup-notices-list">
+              {visible.map((d, i) => (
+                <StartupNoticeRow key={i} diagnostic={d}/>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // --- StreamColumns ---
     function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival, onOpenPanel }) {
       const byAgent = useMemo(() => {
@@ -1023,6 +1142,7 @@
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: 0 }}>
             <MiniGraph cli={cli} agents={liveAgents}/>
             <div style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+              <StartupNoticesSection diagnostics={cli.startup_diagnostics || []}/>
               <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
                 <StreamColumns cli={cli} agents={liveAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel}/>
               </div>

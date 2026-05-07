@@ -332,6 +332,22 @@ class UIServer:
             # per-agent: _build_state runs synchronously, one stamp covers all.
             "now_wallclock": now,
             "agents": agents,
+            # startup-diagnostics-dashboard: surface frozen startup-time
+            # log records (pack-shadow trail, unknown skills, frontmatter
+            # rejections, etc.) on the instance payload. Always present —
+            # empty list when the collector captured nothing or capture
+            # was skipped (stub mode). Each entry is a flat dict with
+            # keys {level, message, source, timestamp, category}.
+            "startup_diagnostics": [
+                {
+                    "level": diag.level,
+                    "message": diag.message,
+                    "source": diag.source,
+                    "timestamp": diag.timestamp,
+                    "category": diag.category,
+                }
+                for diag in snapshot.startup_diagnostics
+            ],
         }
         return instance, messages
 
