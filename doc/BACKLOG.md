@@ -6,6 +6,40 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-06] Feature: startup-diagnostics-dashboard (#25)
+
+### Style ERROR-tier startup-diagnostic badge in the dashboard
+- **What**: `StartupNoticeRow` assigns class `startup-notice-badge-error` for ERROR-level diagnostics, but `claude_crew/ui/dashboard.html` defines CSS only for `.startup-notice-badge-info` and `.startup-notice-badge-warning`. ERROR badges render the `<span>` with the correct class but no background or color — they fall back to inherited text only.
+- **Where**: `claude_crew/ui/dashboard.html` style block.
+- **Why it matters**: Spec edge case "logger emits an ERROR" prescribed "WARN-style badge but tinted red." No owned AT exercises ERROR-tier rendering, so the gap fell through both slice-review (Low) and feature-review (Low). Captured ERROR records still appear with level text and message, only visual differentiation is missing — non-blocking.
+- **Suggested action**: Add `.startup-notice-badge-error` rule mirroring `.startup-notice-badge-warning` with error-tier oklch colors. Add a fixture-based unit test that plants an ERROR-level record via the source logger and asserts the rendered class + CSS rule resolves.
+
+### Drop redundant catch-and-reraise around `record.getMessage()` in `StartupDiagCollector.emit`
+- **What**: `claude_crew/diagnostics.py::StartupDiagCollector.emit` contains a nested `try: raw = record.getMessage() except Exception: raise` block. The inner `try/except` is a no-op — it catches and unconditionally re-raises, which is identical to no try/except at all. The outer `except Exception: self.handleError(record)` already covers `getMessage()` failures.
+- **Where**: `claude_crew/diagnostics.py::StartupDiagCollector.emit`.
+- **Why it matters**: Readability smell flagged Medium in slice 1's review. Cruft from an earlier draft where the implementor was about to wrap `getMessage()` specifically before deciding the outer `except` covered it. Doesn't affect correctness or tests; Medium findings don't trigger REQUEST-CHANGES.
+- **Suggested action**: Delete the inner `try/except` block. Keep the outer `except Exception: self.handleError(record)` per `logging.Handler` convention.
+
+### Refactor `_direct_attach_fallbacks` to return restore pairs explicitly
+- **What**: `claude_crew/factories.py::_direct_attach_fallbacks` passes level-restore state back via `collector_handler._restore_levels = []` — a dynamically-set attribute on the `StartupDiagCollector` instance that's not declared in `__init__`. The pattern works (functions have `__dict__`) but creates implicit coupling between the factory module and the handler's internals.
+- **Where**: `claude_crew/factories.py::_direct_attach_fallbacks` and its caller in `default_factory()`'s `finally` block.
+- **Why it matters**: Surprising on inspection. Reviewer flagged Medium in slice 3. Scope is contained within `default_factory()` so blast radius is small, but a future reader will not know to look on the handler for the restore list.
+- **Suggested action**: Change `_direct_attach_fallbacks` to return `tuple[list[Logger], list[tuple[Logger, int]]]` (attached loggers + restore pairs). Caller stores both as locals, uses the second in `finally` to restore. Drops the handler-attribute coupling entirely.
+
+### Planner heuristic: include `claude_crew/server.py` in `taskTouches` when slice introduces factory→broker wiring
+- **What**: The `factory-capture-wire` slice in #25 needed an edit to `make_server()` to thread `factory.startup_diagnostics` into `Broker(startup_diagnostics=...)`. The breakout's `taskTouches` listed only `claude_crew/factories.py` — `server.py` was not declared. Slice-touches-check fired; reviewer adjudicated as breakout planning gap (edit was necessary, correct, minimal).
+- **Where**: RepoReactor `breakout-feature` planner heuristic / template guidance.
+- **Why it matters**: Pattern recurs whenever a slice produces output that must reach the broker — `make_server()` is always the wiring point. The `taskTouches` enforcement is a correct safety net, but the planner should anticipate this so the violation doesn't fire on every factory→broker feature.
+- **Suggested action**: Update the breakout-feature planner skill (or template comments) to call out: "if a slice changes `claude_crew/factories.py` in a way that produces data the broker consumes, include `claude_crew/server.py` in that slice's `taskTouches`." Optional: add a synthetic check in `breakout-schema-check.sh` that flags factory-touching slices missing `server.py`.
+
+### Reconcile `unknown_skill` category scope-mismatch in startup-diagnostics-dashboard spec
+- **What**: Spec includes `unknown_skill` in the six-category classifier table, AT #3 asserts capture of an `extra_skills` validation WARN (unit-form), but **Out of Scope** explicitly excludes per-spawn `extra_skills` warnings. The implemented v1 capture window covers `_warn_unknown_skills` calls inside `build_merged_pack` — confirm whether any production path actually emits a record matching `category=unknown_skill` at startup time, or whether the category is dead at runtime today.
+- **Where**: `claude_crew/diagnostics.py::classify` (category table), `claude_crew/subagents/_user_loader.py::_warn_unknown_skills` (potential emit site).
+- **Why it matters**: Plan-review MED-01 raised this 2026-05-06. The category and AT both ship; if `_warn_unknown_skills` is only invoked on per-spawn `extra_skills`, then `unknown_skill` is unreachable at startup and the unit test in `test_diagnostics.py` is a synthetic-only path. Either (a) confirm a startup-time emit site exists and document it, (b) remove the category from v1 and update AT #3, or (c) widen the capture surface to include per-spawn `extra_skills` warnings (changes scope).
+- **Suggested action**: Phase 1: trace `_warn_unknown_skills` callers to confirm whether any startup-only invocation exists today. If yes, document the trigger in the feature doc. If no, choose between dropping the category (less code) or expanding the capture surface in a follow-up feature (more value, more scope).
+
+---
+
 ## [2026-05-01] Feature: agent-definition-parity (#17)
 
 ### Existing user-level packs declaring `memory: user` now emit spawn-time WARN

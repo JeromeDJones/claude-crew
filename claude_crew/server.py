@@ -60,7 +60,6 @@ def make_server(
     home_dir: Path | None = None,
     project_root: Path | None = None,
 ) -> FastMCP:
-    broker = broker if broker is not None else Broker()
     # Capture project_root once at server creation time so list_available_tools
     # returns a stable value for the process lifetime.
     _project_root: Path = project_root if project_root is not None else Path.cwd()
@@ -68,7 +67,16 @@ def make_server(
     if factory is None:
         # Lazy import to avoid circular: factories imports server's siblings.
         from claude_crew.factories import default_factory
+        # default_factory uses Path.home()/Path.cwd() internally for pack
+        # discovery; tests inject via monkeypatch on those primitives.
         factory = default_factory()
+    # Thread the factory's captured startup diagnostics (sdk mode) into the
+    # default Broker. Stub mode and externally-supplied factories that do not
+    # set the attribute fall through to the empty-tuple default.
+    if broker is None:
+        broker = Broker(
+            startup_diagnostics=getattr(factory, "startup_diagnostics", ()),
+        )
     if getattr(factory, "requires_auth", False):
         validate_auth_or_exit()
     mcp = FastMCP(

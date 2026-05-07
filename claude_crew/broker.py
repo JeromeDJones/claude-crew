@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
+from claude_crew.diagnostics import StartupDiagnostic
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import Teammate, ToolEvent
 from claude_crew.transcript import TranscriptSink
@@ -106,6 +107,14 @@ class BrokerSnapshot:
     # dashboard can render dimmed rows with accessible chips/panel post-kill.
     # Mapping: teammate_id → config_dict (only entries with non-None config included).
     dead_configs: "dict[str, dict[str, Any]]" = dataclasses.field(default_factory=dict)
+    # Startup-time diagnostics captured during default_factory()'s pack-load
+    # window (spec: startup-diagnostics-dashboard). Frozen by construction —
+    # populated once at Broker init from the StartupDiagCollector tuple and
+    # never mutated thereafter. Empty tuple when capture is skipped (stub
+    # mode) or when no diagnostics were emitted (clean config). Documented
+    # as startup-only by contract: a future feature wanting runtime
+    # diagnostics must introduce a new field, not redefine this one.
+    startup_diagnostics: "tuple[StartupDiagnostic, ...]" = ()
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -119,7 +128,10 @@ AgentDefResolver = Callable[[str], "AgentDefinition | None"]
 
 
 class Broker:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        startup_diagnostics: "tuple[StartupDiagnostic, ...]" = (),
+    ) -> None:
         self.crew_id: str = uuid4().hex[:8]
         self._teammates: dict[str, Teammate] = {}
         self._info: dict[str, TeammateInfo] = {}
@@ -131,6 +143,12 @@ class Broker:
         # Per-teammate config snapshots keyed by teammate_id. Value is None when
         # no AgentDefinition was resolved for the role at spawn time.
         self._configs: dict[str, dict[str, Any] | None] = {}
+        # Startup diagnostics tuple — frozen at construction (see field doc on
+        # BrokerSnapshot). Coerced to tuple defensively so callers passing a
+        # list still get an immutable internal record.
+        self._startup_diagnostics: tuple[StartupDiagnostic, ...] = tuple(
+            startup_diagnostics
+        )
         self._sink = TranscriptSink(crew_id=self.crew_id)
         self._sink.write_lifecycle("started", {})
 
@@ -741,6 +759,7 @@ class Broker:
             log=log_tuple,
             tool_events=tuple(all_tool_events),
             dead_configs=dead_configs,
+            startup_diagnostics=self._startup_diagnostics,
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
