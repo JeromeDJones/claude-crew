@@ -45,6 +45,8 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 **`redaction.py`** — Tool telemetry redaction (v1 allowlist: Bash, Task, WebFetch). Extracts and redacts secrets from tool args before storage; caps at 256 bytes.
 
+**`diagnostics.py`** — Startup-time diagnostic capture. `StartupDiagnostic` frozen dataclass + `StartupDiagCollector` `logging.Handler` subclass + `collect_startup_diagnostics()` context manager. `factories.default_factory()` wraps `build_merged_pack()` with the collector; the frozen tuple is threaded through `Broker(startup_diagnostics=...)` to `BrokerSnapshot.startup_diagnostics` and surfaced on the dashboard via the Startup Notices panel. Six-category classifier (shadow / unknown_skill / unknown_mcp_server / frontmatter / plugin / other). Stderr propagation preserved — additive handler, never silences.
+
 **`subagents/`** — Default subagent pack. Three agents (`explorer`, `planner`, `general-purpose`) defined as markdown files with YAML frontmatter (model, tools, effort, maxTurns). No Bash or Task tool — leaf nodes that cannot recurse further.
 
 ### Test conventions

@@ -127,6 +127,7 @@ Open **http://127.0.0.1:7821** while claude-crew is running. The dashboard shows
 - All alive teammates with role, status (idle / thinking / tool-use), and uptime
 - Mini topology graph with animated pulses for active agents
 - Live message stream (last 200 envelopes, auto-scrolling)
+- Startup Notices panel — pack-load WARNs/INFOs (shadow events, unknown skills, frontmatter typos, plugin issues) captured during MCP-server startup; hidden when empty, INFO rows behind a "Show INFO" toggle
 
 Status and message data refresh every 1.5 seconds via WebSocket. A connection dot in the top bar turns amber if the WebSocket drops and reconnects automatically after 3 seconds.
 
@@ -195,7 +196,7 @@ You are a code reviewer...
 WARNING claude_crew.subagents.loader: agent 'reviewer' declares unknown skills ['foo'] — not found in user or project skill dirs at startup; teammate will fail to invoke them at runtime
 ```
 
-Grep stderr for `declares unknown skills` to find these. The loader does NOT raise — operators may add the SKILL.md after server startup, or skills may live in a search path the loader doesn't traverse. The teammate will surface the missing-skill error if/when it tries to invoke.
+Grep stderr for `declares unknown skills` to find these, or open the dashboard — Mission Control's Startup Notices panel surfaces the same WARN under category `unknown_skill`. The loader does NOT raise — operators may add the SKILL.md after server startup, or skills may live in a search path the loader doesn't traverse. The teammate will surface the missing-skill error if/when it tries to invoke.
 
 **Project-skill cwd trap.** Project skills resolve from the cwd at MCP-server startup. Launch claude-crew from your project root for `<project>/.claude/skills/` to be discovered.
 
