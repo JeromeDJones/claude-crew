@@ -304,7 +304,17 @@ def _read_installed_plugins(
                 project_path_raw = install.get("projectPath")
                 if not isinstance(project_path_raw, str):
                     continue
-                if _normalize_path(Path(project_path_raw)) != project_resolved:
+                plugin_project = _normalize_path(Path(project_path_raw))
+                try:
+                    within = project_resolved.is_relative_to(plugin_project)
+                except ValueError:
+                    within = False
+                if not within:
+                    logger.warning(
+                        "project-scope plugin %r is scoped to %s but claude-crew cwd %s "
+                        "is not under that path; agents not loaded",
+                        key, plugin_project, project_resolved,
+                    )
                     continue
             elif scope != "user":
                 # Unknown scope: skip silently. Future-compat — an installer

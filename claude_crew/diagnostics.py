@@ -47,6 +47,7 @@ DiagCategory = Literal[
     "unknown_mcp_server",
     "frontmatter",
     "plugin",
+    "plugin_scope_miss",
     "other",
 ]
 
@@ -87,6 +88,7 @@ _FACTORIES_LOGGER_PREFIX = "claude_crew.factories"
 
 # (substring, category) — checked in declaration order.
 _MESSAGE_RULES: Tuple[Tuple[str, DiagCategory], ...] = (
+    ("project-scope plugin", "plugin_scope_miss"),
     ("installPath", "plugin"),
     ("appears in plugin", "plugin"),
     ("declares unknown skills", "unknown_skill"),
