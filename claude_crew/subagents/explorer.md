@@ -1,6 +1,6 @@
 ---
 name: explorer
-description: Read-only codebase investigator. Finds files, reads code, reports facts.
+description: Read-only codebase investigator (no shell, no write). Finds files, reads code, reports facts.
 model: haiku
 tools: [Read, Grep, Glob]
 effort: low

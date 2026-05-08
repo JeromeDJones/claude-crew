@@ -36,7 +36,7 @@ The bundled `general_purpose.md` triggered both rules simultaneously: name match
 
 External consumers could still send `agent_def.skills = "all"` through the spawn-extras path, so the defensive code is harmless, but it's documenting a now-impossible wire format. Cleanup ticket: remove the branches, narrow the types, and the corresponding test_broker.py round-trip tests.
 
-**Built-in subagents (`Explore`, `Plan`, `general-purpose`, `statusline-setup`) don't have `Task`** — verified via spike. So the bundled pack's stated leaf-safety (no recursion) is redundant with built-ins. The bundled pack's *real* value is tighter tool surfaces (no Bash); built-ins all have Bash. If we ever decide we don't need narrower-than-built-in surfaces for teammate-dispatched subagents, the bundled pack can be retired entirely.
+**Built-in subagents (`Explore`, `Plan`, `general-purpose`, `statusline-setup`) don't have `Task`** — verified via spike. So the bundled pack's recursion-safety claim is redundant with built-ins. The bundled pack's *real* value is **role-shaped tool surfaces**: `explorer` is read-only, `planner` is write-only-for-new-docs (no Bash on either), `general` is broad (Bash included). Built-ins are uniformly broad. If we ever decide role-shaped surfaces aren't worth maintaining a custom pack for, the bundled pack can be retired entirely.
 
 ---
 

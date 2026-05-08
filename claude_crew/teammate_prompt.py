@@ -63,6 +63,10 @@ verbatim in your response (a quoted line, cited path, file you're showing
 the lead). Don't ask the lead to load files a subagent could fetch.
 
 {explorer_hint}
+
+Route work by reading each subagent's description above. If a dispatched
+subagent reports it can't complete the work because it lacks a tool,
+switch to a different subagent or handle that step directly.
 """
 
 
@@ -119,10 +123,9 @@ def _build_subagent_list(self_role: str, agents: dict[str, Any]) -> str:
     - Excludes self_role (a teammate cannot delegate to itself).
     - Defensive on missing / non-string description (user packs may be
       malformed; fall back to name-only, never raise).
-    - Lists each subagent's available tools as an indented sub-bullet so the
-      teammate can route work correctly (BACKLOG 2026-05-01: parents were
-      mis-routing shell tasks to subagents that lack Bash because the list
-      didn't surface tool surfaces). Defensive on missing tools field.
+    - Name + description only. Tool surfaces are not enumerated; routing
+      follows from the description, with the delegation section's
+      tool-surface-error fallback for mis-routes.
     """
     lines = [SENTINEL_SUBAGENTS, ""]
     for name in sorted(agents.keys()):
@@ -134,10 +137,6 @@ def _build_subagent_list(self_role: str, agents: dict[str, Any]) -> str:
             lines.append(f"- **{name}** — {desc.strip()}")
         else:
             lines.append(f"- **{name}**")
-        tools = getattr(defn, "tools", None)
-        if isinstance(tools, (list, tuple)) and tools:
-            tool_str = ", ".join(str(t) for t in tools)
-            lines.append(f"  - tools: {tool_str}")
     return "\n".join(lines)
 
 
