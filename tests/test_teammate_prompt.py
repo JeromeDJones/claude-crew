@@ -186,36 +186,25 @@ class TestSubagentList:
         assert "- **beta**" in result
         assert "—" not in result, "Non-string description must be treated as missing"
 
-    def test_subagent_list_includes_tools_sub_bullet(self, default_pack_agents) -> None:
-        """Each peer entry lists its tool surface as an indented sub-bullet.
+    def test_subagent_list_omits_tools_sub_bullet(self, default_pack_agents) -> None:
+        """Per-agent tool surfaces are intentionally NOT listed (2026-05-08).
 
-        Surfacing tools to the parent prevents mis-routing tasks to subagents
-        that lack the required tool (BACKLOG 2026-05-01: parent dispatched a
-        Bash task to general, which has no Bash, and the subagent
-        fabricated). The sub-bullet alone doesn't enforce routing — that's a
-        separate hook-based fix — but it gives the parent the data to route
-        correctly and the operator a way to see what each peer can do.
+        The tools sub-bullet was added 2026-05-01 to prevent mis-routing
+        (BACKLOG: parent dispatched a Bash task to a no-Bash subagent and
+        got a fail-soft fabrication). Removed because the per-agent context
+        cost outweighed the routing benefit. Mis-routing is mitigated by
+        a combination of (a) capability hints embedded in the descriptions
+        themselves ("read-only, no shell" etc.), (b) `general` carrying a
+        broad tool surface so shell work has a correct destination, and
+        (c) a tool-surface-error recovery hint in the delegation section.
         """
         result = _build_subagent_list("nonexistent-role", default_pack_agents)
-        gp_tools = ", ".join(default_pack_agents["general"].tools)
-        assert f"  - tools: {gp_tools}" in result, (
-            f"general peer entry missing tools sub-bullet. Got:\n{result}"
-        )
-        explorer_tools = ", ".join(default_pack_agents["explorer"].tools)
-        assert f"  - tools: {explorer_tools}" in result, (
-            f"explorer peer entry missing tools sub-bullet. Got:\n{result}"
-        )
-
-    def test_subagent_list_omits_tools_sub_bullet_when_tools_missing(self) -> None:
-        """Malformed user packs without a tools attribute fall back to
-        name-and-description-only, no sub-bullet, no crash."""
-        ns = types.SimpleNamespace(description="thing", tools=None)
-        fake_agents: dict[str, Any] = {"gamma": ns}
-        result = _build_subagent_list("nonexistent-role", fake_agents)
-        assert "- **gamma** — thing" in result
         assert "tools:" not in result, (
-            f"tools sub-bullet rendered despite tools=None: {result!r}"
+            f"tools sub-bullet should not be rendered. Got:\n{result}"
         )
+        # name + description still present
+        assert "- **explorer**" in result
+        assert "- **general**" in result
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +233,54 @@ class TestExplorerHint:
         hint = _explorer_hint(agents_without_explorer)
         assert "explorer" not in hint.lower(), (
             "explorer must not appear in hint when explorer is absent from agents dict"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-08  Tool-surface-error recovery hint
+# ---------------------------------------------------------------------------
+
+
+class TestToolSurfaceErrorRecoveryHint:
+    """The delegation section advises the parent how to recover when a
+    dispatched subagent reports it can't complete the work because of a
+    missing tool. Replaces the upfront tools sub-bullet (removed 2026-05-08
+    to save context)."""
+
+    def test_recovery_hint_lives_inside_delegation_section(
+        self, default_pack_agents
+    ) -> None:
+        from claude_crew.teammate_prompt import (
+            SENTINEL_DELEGATION,
+            SENTINEL_MEMORY,
+        )
+        result = build_teammate_prompt(
+            role="some-role",
+            pack_body="role body",
+            agents=default_pack_agents,
+        )
+        # Locate the delegation section's text region.
+        deleg_start = result.index(SENTINEL_DELEGATION)
+        # Memory section may or may not be present; if absent, the
+        # delegation region runs to end-of-prompt.
+        deleg_end = (
+            result.index(SENTINEL_MEMORY, deleg_start)
+            if SENTINEL_MEMORY in result[deleg_start:]
+            else len(result)
+        )
+        delegation_section = result[deleg_start:deleg_end]
+        # The recovery instruction must appear inside the delegation region,
+        # not anywhere else in the assembled prompt.
+        assert "lacks a tool" in delegation_section, (
+            "Recovery hint missing the failure-mode signal "
+            f"(expected 'lacks a tool'). Section:\n{delegation_section}"
+        )
+        assert (
+            "switch to a different subagent" in delegation_section
+            or "handle that step directly" in delegation_section
+        ), (
+            "Recovery hint must name the action the parent should take. "
+            f"Section:\n{delegation_section}"
         )
 
 

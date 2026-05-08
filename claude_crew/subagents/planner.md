@@ -1,6 +1,6 @@
 ---
 name: planner
-description: Spec writer. Restates the task, names acceptance criteria, produces a spec doc.
+description: Spec writer (no shell, write-only for new docs). Restates the task, names acceptance criteria, produces a spec doc.
 model: sonnet
 tools: [Read, Grep, Glob, Write]
 effort: high

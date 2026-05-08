@@ -78,10 +78,11 @@ class TestPackContents:
         assert gp.model == "sonnet"
         assert gp.effort == "medium"
         assert gp.maxTurns == 20
-        # Network access yes, shell and recursion no.
+        # Broad tool surface — read/write/edit/shell/web. Recursion (Task)
+        # is the only excluded primitive: bundled agents are leaves.
         assert "WebFetch" in gp.tools
         assert "WebSearch" in gp.tools
-        assert "Bash" not in gp.tools
+        assert "Bash" in gp.tools
         assert "Task" not in gp.tools
 
     def test_general_has_no_skills_override(self) -> None:
@@ -337,7 +338,7 @@ class TestSecurityDoc:
     def test_readme_names_network_capable_member(self) -> None:
         readme = PACK_DIR / "README.md"
         text = readme.read_text()
-        assert "general-purpose" in text
+        assert "general" in text
         # Both network tools must be named — either alone is incomplete.
         assert "WebFetch" in text
         assert "WebSearch" in text

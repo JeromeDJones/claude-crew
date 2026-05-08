@@ -1,7 +1,7 @@
 # Default Subagent Pack
 
 claude-crew teammates ship with three default subagents available via the
-SDK's Task tool: **explorer**, **planner**, **general-purpose**. Each
+SDK's Task tool: **explorer**, **planner**, **general**. Each
 teammate spawned through `mcp__claude-crew__spawn_teammate` automatically
 has these registered; no operator config required.
 
@@ -11,17 +11,20 @@ has these registered; no operator config required.
 |---|---|---|---|
 | `explorer` | Haiku | `Read`, `Grep`, `Glob` | `effort=low`, `maxTurns=10` |
 | `planner` | Sonnet | `Read`, `Grep`, `Glob`, `Write` | `effort=high`, `maxTurns=20` |
-| `general-purpose` | Sonnet | `Read`, `Grep`, `Glob`, `Edit`, `Write`, `WebFetch`, `WebSearch` | `effort=medium`, `maxTurns=20` |
+| `general` | Sonnet | `Read`, `Grep`, `Glob`, `Edit`, `Write`, `Bash`, `WebFetch`, `WebSearch` | `effort=medium`, `maxTurns=20` |
 
 Each member is defined by a markdown file in this directory with YAML
 frontmatter for structural fields and a markdown body that is the
 agent's system prompt. Edit any of those files and the change is picked
 up on the next teammate spawn.
 
-No member has `Bash` (no shell out) or `Task` (subagents are leaves).
-These are load-bearing invariants — see `doc/features/FEATURE-default-subagent-pack.md`.
+No member has `Task` — subagents are leaves and cannot recurse. That's
+the load-bearing structural invariant. `explorer` and `planner` also
+exclude `Bash` so they can be safely routed read-only / write-only work;
+`general` is the catch-all and includes `Bash` for shell tasks. See
+`doc/features/FEATURE-default-subagent-pack.md` for the design history.
 
-## Security: CLAUDE.md visibility
+## Security: CLAUDE.md visibility + general's combined surface
 
 Subagents in this pack inherit the parent teammate's `setting_sources`,
 which means **they see the same `~/.claude/CLAUDE.md` and project
@@ -30,11 +33,15 @@ spawned by your teammate should know your standing instructions the
 same way the teammate does.
 
 It also means subagents with network tools — specifically
-**`general-purpose`**, which has `WebFetch` and `WebSearch` — can
-read CLAUDE.md content and then send requests to external URLs. If
-your CLAUDE.md contains secrets (API keys, internal hostnames,
-NDA-bound project names, customer identifiers), those values are
-reachable by general-purpose's network surface.
+**`general`**, which has `WebFetch`, `WebSearch`, AND `Bash` — can
+read CLAUDE.md content and then send requests to external URLs *and*
+run arbitrary shell commands. If your CLAUDE.md contains secrets (API
+keys, internal hostnames, NDA-bound project names, customer
+identifiers), those values are reachable by general's combined
+network + shell surface. The `Bash` addition (2026-05-08) widened the
+exfiltration surface; weigh that when deciding whether to load
+sensitive CLAUDE.md content into a teammate that can dispatch
+`general`.
 
 **Recommendation:** audit your `~/.claude/CLAUDE.md` and project
 `CLAUDE.md` before relying on the default pack with sensitive content.
