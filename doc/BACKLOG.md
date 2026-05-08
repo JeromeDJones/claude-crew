@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-07] Observation: agent-name casing collision shadows bundled subagents
+
+### Bundled lowercase `explorer` / `planner` shadowed by Claude Code's `Explore` / `Plan`
+- **What**: A claude-crew teammate dispatched a subagent by the bundled-pack name `explorer` (lowercase) and got back `Agent type 'explorer' not found. Available agents: builder, Explore, feature-planner, general-purpose, Plan, refactor, repo-reactor:rr-feature-reviewer, …`. The SDK's available-agent set has `Explore` and `Plan` (capitalized — Claude Code built-ins) but **neither** of the bundled lowercase entries (`explorer`, `planner`) appear. The bundled pack ships `claude_crew/subagents/{explorer,planner,general_purpose}.md`; `general-purpose` survives the merge unscathed because no built-in shadows it, but the other two are gone.
+- **Where**: Suspected interaction between `claude_crew/subagents/_user_loader.merge_packs` and the SDK's CLI-level agent registration. The pack-level merge keys are case-sensitive (`explorer` vs `Explore` would coexist as distinct keys), so the collision is most likely happening at the SDK boundary — either the CLI normalizes names to a canonical case for collision detection, or some other layer is collapsing `explorer`→`Explore`. Needs tracing.
+- **Why it matters**: Anything (teammate prompt, peer list, hand-coded dispatch) that names the bundled subagent with its declared lowercase key gets a "not found" at runtime. The peer-list rendering in `teammate_prompt._build_subagent_list` advertises whatever's in the `agents` dict — if that dict has `explorer` but the SDK only honors `Explore`, the teammate is told a lie about its options. Dual to the rr-implementor experience this session: the dispatch-name and the rendered-name must match, or the operator sees fail-soft errors.
+- **Suggested action**: Spike. Run a teammate locally with `agents={"explorer": <def>, "Explore": <def>}` and verify whether the SDK accepts both, picks one, or warns. Then either (a) rename the bundled packs to match the host's canonical case (`Explore.md`, `Plan.md`) — keeps coexistence intact but breaks anyone referencing the lowercase form; (b) emit a startup diagnostic via #25's channel when a bundled-pack key case-conflicts with a host built-in (operator-visible signal); or (c) both. Decide once the SDK behavior is pinned.
+
+---
+
 ## [2026-05-07] Feature: plugin-projectpath-prefix-match (#26)
 
 ### H1 — `_resolve_agent_def` vs spawn-factory synthetic-AgentDef divergence
