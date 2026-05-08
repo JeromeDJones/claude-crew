@@ -107,7 +107,7 @@ class PackFrontmatter:
     maxTurns: int | None = None
     initialPrompt: str | None = None
     background: bool | None = None
-    skills: tuple[str, ...] | Literal["all"] | None = None
+    skills: tuple[str, ...] | None = None
     permissionMode: str | None = None
     disallowedTools: tuple[str, ...] | None = None
     settingSources: list[str] | None = None
@@ -241,13 +241,9 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
         "initialPrompt": fm.initialPrompt,
         "background": fm.background,
     }
-    if fm.skills is not None:
-        if isinstance(fm.skills, str):
-            # "all" passes through as the SDK Literal (D-1)
-            agent_kwargs["skills"] = fm.skills
-        elif fm.skills:
-            # non-empty tuple → list for AgentDefinition
-            agent_kwargs["skills"] = list(fm.skills)
+    if fm.skills is not None and fm.skills:
+        # non-empty tuple → list for AgentDefinition
+        agent_kwargs["skills"] = list(fm.skills)
         # empty tuple → no-op (D-2): leave AgentDefinition.skills at default None
     if fm.permissionMode is not None:
         agent_kwargs["permissionMode"] = fm.permissionMode
@@ -336,18 +332,24 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
                     f"valid values: {sorted(_VALID_SETTING_SOURCES)}"
                 )
 
-    # skills: tuple[str, ...] | Literal["all"] | None — three accepted shapes (D-1).
+    # skills: tuple[str, ...] | None — only list-of-names is valid at the
+    # per-agent level. The SDK types AgentDefinition.skills as list[str] | None;
+    # the "all" literal is only valid at the session level via
+    # ClaudeAgentOptions.skills, NOT on AgentDefinition. Sending "all" on a
+    # per-agent definition is an invalid wire payload that the CLI silently
+    # drops, AND its presence cascades to drop other user-submitted agents in
+    # the same dict. We reject it here at parse time to surface the bug.
     raw_skills = d.get("skills")
-    parsed_skills: tuple[str, ...] | Literal["all"] | None
+    parsed_skills: tuple[str, ...] | None
     if raw_skills is None:
         parsed_skills = None
     elif isinstance(raw_skills, str):
-        if raw_skills != "all":
-            raise PackLoadError(
-                f"pack file {path}: skills string value must be 'all'; "
-                f"got {raw_skills!r}"
-            )
-        parsed_skills = "all"
+        raise PackLoadError(
+            f"pack file {path}: skills must be a list of skill names, not a "
+            f"string. The 'all' literal is only valid at the session level "
+            f"(ClaudeAgentOptions.skills='all'), not on a per-agent "
+            f"AgentDefinition. Got: skills: {raw_skills!r}"
+        )
     elif isinstance(raw_skills, list):
         for s in raw_skills:
             if not isinstance(s, str):
@@ -358,7 +360,7 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
         parsed_skills = tuple(raw_skills)  # may be empty (D-2 no-op)
     else:
         raise PackLoadError(
-            f"pack file {path}: skills must be a list of strings or the string 'all'; "
+            f"pack file {path}: skills must be a list of skill names; "
             f"got {type(raw_skills).__name__}"
         )
 

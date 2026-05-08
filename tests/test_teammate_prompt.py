@@ -64,7 +64,7 @@ def default_pack_bodies(default_pack_data):
 class TestStaticContradictionLint:
     """SC-6 — assembled teammate prompts must not contain negative patterns."""
 
-    ROLES = ["explorer", "planner", "general-purpose"]
+    ROLES = ["explorer", "planner", "general"]
 
     def test_assembled_teammate_prompt_for_each_bundled_role_has_no_negative_patterns(
         self,
@@ -191,15 +191,15 @@ class TestSubagentList:
 
         Surfacing tools to the parent prevents mis-routing tasks to subagents
         that lack the required tool (BACKLOG 2026-05-01: parent dispatched a
-        Bash task to general-purpose, which has no Bash, and the subagent
+        Bash task to general, which has no Bash, and the subagent
         fabricated). The sub-bullet alone doesn't enforce routing — that's a
         separate hook-based fix — but it gives the parent the data to route
         correctly and the operator a way to see what each peer can do.
         """
         result = _build_subagent_list("nonexistent-role", default_pack_agents)
-        gp_tools = ", ".join(default_pack_agents["general-purpose"].tools)
+        gp_tools = ", ".join(default_pack_agents["general"].tools)
         assert f"  - tools: {gp_tools}" in result, (
-            f"general-purpose peer entry missing tools sub-bullet. Got:\n{result}"
+            f"general peer entry missing tools sub-bullet. Got:\n{result}"
         )
         explorer_tools = ", ".join(default_pack_agents["explorer"].tools)
         assert f"  - tools: {explorer_tools}" in result, (
@@ -284,11 +284,11 @@ class TestSdkTeammateIntegration:
         self,
         default_pack_bodies,
     ) -> None:
-        teammate = self._make_teammate("general-purpose")
+        teammate = self._make_teammate("general")
         prompt = teammate._system_prompt
 
         # Pack body identity line appears
-        gp_body = default_pack_bodies["general-purpose"]
+        gp_body = default_pack_bodies["general"]
         # The first meaningful content line from the body should be in the prompt
         first_content = next(
             line for line in gp_body.splitlines() if line.strip()
@@ -304,13 +304,13 @@ class TestSdkTeammateIntegration:
             SENTINEL_DELEGATION,
         ):
             assert sentinel in prompt, (
-                f"Sentinel {sentinel!r} missing from general-purpose teammate prompt"
+                f"Sentinel {sentinel!r} missing from general teammate prompt"
             )
 
         # No negative patterns
         for pattern in NEGATIVE_PATTERNS:
             assert pattern not in prompt, (
-                f"Negative pattern {pattern!r} found in general-purpose teammate prompt"
+                f"Negative pattern {pattern!r} found in general teammate prompt"
             )
 
     def test_spawned_teammate_with_unknown_role_uses_default_fallback(self) -> None:

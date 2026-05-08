@@ -6,13 +6,37 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
-## [2026-05-07] Observation: agent-name casing collision shadows bundled subagents
+## [2026-05-08] Fixed: bundled `general-purpose` shadowing dropped `explorer` and `planner` (resolved)
 
-### Bundled lowercase `explorer` / `planner` shadowed by Claude Code's `Explore` / `Plan`
-- **What**: A claude-crew teammate dispatched a subagent by the bundled-pack name `explorer` (lowercase) and got back `Agent type 'explorer' not found. Available agents: builder, Explore, feature-planner, general-purpose, Plan, refactor, repo-reactor:rr-feature-reviewer, …`. The SDK's available-agent set has `Explore` and `Plan` (capitalized — Claude Code built-ins) but **neither** of the bundled lowercase entries (`explorer`, `planner`) appear. The bundled pack ships `claude_crew/subagents/{explorer,planner,general_purpose}.md`; `general-purpose` survives the merge unscathed because no built-in shadows it, but the other two are gone.
-- **Where**: Suspected interaction between `claude_crew/subagents/_user_loader.merge_packs` and the SDK's CLI-level agent registration. The pack-level merge keys are case-sensitive (`explorer` vs `Explore` would coexist as distinct keys), so the collision is most likely happening at the SDK boundary — either the CLI normalizes names to a canonical case for collision detection, or some other layer is collapsing `explorer`→`Explore`. Needs tracing.
-- **Why it matters**: Anything (teammate prompt, peer list, hand-coded dispatch) that names the bundled subagent with its declared lowercase key gets a "not found" at runtime. The peer-list rendering in `teammate_prompt._build_subagent_list` advertises whatever's in the `agents` dict — if that dict has `explorer` but the SDK only honors `Explore`, the teammate is told a lie about its options. Dual to the rr-implementor experience this session: the dispatch-name and the rendered-name must match, or the operator sees fail-soft errors.
-- **Suggested action**: Spike. Run a teammate locally with `agents={"explorer": <def>, "Explore": <def>}` and verify whether the SDK accepts both, picks one, or warns. Then either (a) rename the bundled packs to match the host's canonical case (`Explore.md`, `Plan.md`) — keeps coexistence intact but breaks anyone referencing the lowercase form; (b) emit a startup diagnostic via #25's channel when a bundled-pack key case-conflicts with a host built-in (operator-visible signal); or (c) both. Decide once the SDK behavior is pinned.
+### Original observation (2026-05-07) — hypothesis was wrong
+The original entry guessed case-insensitive collision between bundled `explorer`/`planner` and CLI built-ins `Explore`/`Plan`. Spike work disproved that. The names don't collide; the CLI doesn't do case-insensitive matching.
+
+### Real cause: two undocumented CLI drop rules
+The Claude Code CLI silently drops user-submitted agents (sent over the SDK initialize request) under two conditions:
+
+1. **Built-in name match.** If any name in the `agents` dict matches a CLI built-in (`Explore`, `Plan`, `general-purpose`, `statusline-setup`), every *other* user-submitted agent is dropped. The name-matching one is "kept" but shadowed by the CLI's own version.
+2. **Invalid `skills="all"` on `AgentDefinition`.** The SDK types `AgentDefinition.skills` as `list[str] | None`; the `"all"` literal is only valid at the session level (`ClaudeAgentOptions.skills`). Sending `"all"` on a per-agent definition is invalid wire data; the CLI silently drops the offending agent and cascades to drop the other user-submitted agents in the same dict.
+
+The bundled `general_purpose.md` triggered both rules simultaneously: name matched a CLI built-in AND it declared `skills: all` in frontmatter. `explorer` and `planner` were innocent bystanders dropped by the cascade.
+
+### Fix shipped
+- Renamed bundled `general_purpose.md` → `general.md`, frontmatter `name: general` (no longer collides with CLI built-in).
+- Removed `skills: all` from the bundled file (it was never working anyway — bundled `general-purpose` was always shadowed by the CLI built-in, so the field never reached a real running agent).
+- Pack-loader (`_loader.py`) now rejects `skills: "all"` at parse time with a `PackLoadError` pointing operators to `ClaudeAgentOptions.skills` for the session-level form.
+- `PackFrontmatter.skills` type narrowed from `tuple[str, ...] | Literal["all"] | None` to `tuple[str, ...] | None`.
+- Tests added: `TestPackContents::test_bundled_general_key_loads` (rename), `TestSkillsAllForm::test_skills_all_string_raises_pack_load_error` (rejection).
+- `explorer.md` and `planner.md` left untouched.
+
+### Followup observations (not blocking)
+
+**Defensive dead code now unreachable.** With `skills="all"` rejected at parse time, three branches that handle the literal are unreachable from real code paths:
+- `claude_crew/factories.py:277` — extras-merge handling for `"all"` literal
+- `claude_crew/broker.py:281` — config serialization that wraps `"all"` into `["all"]`
+- `claude_crew/subagents/_user_loader.py:448` — skill-name validation skip for `"all"`
+
+External consumers could still send `agent_def.skills = "all"` through the spawn-extras path, so the defensive code is harmless, but it's documenting a now-impossible wire format. Cleanup ticket: remove the branches, narrow the types, and the corresponding test_broker.py round-trip tests.
+
+**Built-in subagents (`Explore`, `Plan`, `general-purpose`, `statusline-setup`) don't have `Task`** — verified via spike. So the bundled pack's stated leaf-safety (no recursion) is redundant with built-ins. The bundled pack's *real* value is tighter tool surfaces (no Bash); built-ins all have Bash. If we ever decide we don't need narrower-than-built-in surfaces for teammate-dispatched subagents, the bundled pack can be retired entirely.
 
 ---
 

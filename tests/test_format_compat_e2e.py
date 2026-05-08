@@ -161,7 +161,7 @@ class TestPerSourceInfoContract:
         # Bundled INFO names role keys.
         assert "explorer" in bundled_msgs[0]
         assert "planner" in bundled_msgs[0]
-        assert "general-purpose" in bundled_msgs[0]
+        assert "general" in bundled_msgs[0]
 
         # User INFO names path + count + key.
         assert str(tmp_path) in user_msgs[0]
@@ -180,7 +180,7 @@ class TestBundledPackRegression:
 
     def test_bundled_pack_keys_unchanged(self) -> None:
         pack, role_ss, bodies = load_default_pack()
-        assert set(pack.keys()) == {"explorer", "planner", "general-purpose"}
+        assert set(pack.keys()) == {"explorer", "planner", "general"}
         # Each prompt now leads with substrate guidance.
         for role, agent in pack.items():
             assert agent.prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE), role

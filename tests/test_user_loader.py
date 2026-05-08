@@ -508,7 +508,7 @@ class TestPrecedence:
         assert merged["scout"].description == "User's scout."
         # Default-only agents survive.
         assert "planner" in merged
-        assert "general-purpose" in merged
+        assert "general" in merged
 
 
 # -----------------------------------------------------------------------------
@@ -563,8 +563,8 @@ class TestSettingSourcesCascade:
         _merged, role_ss, _bodies = build_merged_pack(home_dir=empty_user, project_root=empty_project)
 
         assert role_ss.get("explorer") == [], "explorer.md must declare settingSources: []"
-        assert role_ss.get("general-purpose") == ["user", "project"], (
-            "general_purpose.md must declare settingSources: [user, project] (#23 SC-6)"
+        assert role_ss.get("general") == ["user", "project"], (
+            "general.md must declare settingSources: [user, project]"
         )
         assert role_ss.get("planner") == ["project"], "planner.md must declare settingSources: [project]"
 
@@ -743,30 +743,25 @@ class TestWarnUnknownSkills:
         # foo is known, must not appear in any WARN
         assert not any("'foo'" in m for m in warn_msgs)
 
-    def test_skills_all_skips_unknown_check(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    def test_skills_all_is_rejected_at_pack_load(
+        self, tmp_path: Path
     ) -> None:
-        """Vacuity defense: skills: all has no name list to check, so no WARN."""
+        """skills: all is now rejected at pack-load time (no longer valid per-agent)."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
-        # No skill dirs at all.
+        proj.mkdir()
         _write_agent(
             home / ".claude" / "agents",
             "myrole.md",
             extra_frontmatter="skills: all",
         )
 
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
-            merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
-
-        # Positive-path probe (sentinel M-2): assert the role actually loaded
-        # so a future bug that skips _warn_unknown_skills entirely doesn't
-        # silently pass this negative assertion.
-        assert "myrole" in merged
-        assert merged["myrole"].skills == "all"
-
-        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert not any("declares unknown skills" in m for m in warn_msgs)
+        # build_merged_pack skips files that raise PackLoadError during parsing.
+        # So "myrole" won't be in the merged pack.
+        merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
+        assert "myrole" not in merged, (
+            "Agent with skills: all should be rejected during pack parse"
+        )
 
     def test_known_skill_does_not_warn(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -832,32 +827,32 @@ class TestSkillsCascade:
         merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
         assert merged["general-purpose"].skills == ["b"]
 
-    def test_user_all_replaces_default_list(self, tmp_path: Path) -> None:
-        """SC-8 forward: default skills: [a] (after user override), then user
-        with skills: all overrides cleanly to "all" string."""
+    def test_user_all_is_rejected(self, tmp_path: Path) -> None:
+        """skills: all is now rejected at pack-load time."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
+        proj.mkdir()
         _write_agent_with_skills(
             home / ".claude" / "agents", "myrole.md", skills_yaml="all"
         )
+        # File is skipped due to PackLoadError.
         merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
-        assert merged["myrole"].skills == "all"
+        assert "myrole" not in merged
 
-    def test_user_list_replaces_bundled_general_purpose_all(self, tmp_path: Path) -> None:
-        """SC-8 reverse: bundled general-purpose has skills: all (T3), user
-        override declares skills: [foo] → merged is ["foo"], not unioned."""
+    def test_user_list_overrides_bundled_general_no_skills(self, tmp_path: Path) -> None:
+        """User override of bundled general (which has no skills) declares skills: [foo]."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
+        proj.mkdir()
         _write_agent_with_skills(
-            home / ".claude" / "agents", "general-purpose.md", skills_yaml="[foo]"
+            home / ".claude" / "agents", "general.md", skills_yaml="[foo]"
         )
         merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
-        assert merged["general-purpose"].skills == ["foo"]
+        assert merged["general"].skills == ["foo"]
 
-    def test_user_empty_list_removes_default_skills(self, tmp_path: Path) -> None:
-        """D-2 cascade-removal: bundled general-purpose has skills: all, user
-        override declares skills: [] → no-op on the override, AgentDefinition
-        from override has skills=None, merge replaces wholesale → final None.
+    def test_user_empty_list_removes_bundled_skills(self, tmp_path: Path) -> None:
+        """Bundled general has no skills override. User declares skills: [] → no-op,
+        merged result has skills=None.
 
         Sentinel L-1: assert AgentDefinition default to defend against
         vacuous-pass if SDK changes the default.
@@ -867,24 +862,25 @@ class TestSkillsCascade:
 
         home = tmp_path / "home"
         proj = tmp_path / "proj"
+        proj.mkdir()
         _write_agent_with_skills(
-            home / ".claude" / "agents", "general-purpose.md", skills_yaml="[]"
+            home / ".claude" / "agents", "general.md", skills_yaml="[]"
         )
         merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
-        assert merged["general-purpose"].skills is None
+        assert merged["general"].skills is None
 
     def test_project_overrides_user_overrides_default(self, tmp_path: Path) -> None:
         """Three-layer cascade: project wins over user wins over default."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
         _write_agent_with_skills(
-            home / ".claude" / "agents", "general-purpose.md", skills_yaml="[user-skill]"
+            home / ".claude" / "agents", "general.md", skills_yaml="[user-skill]"
         )
         _write_agent_with_skills(
-            proj / ".claude" / "agents", "general-purpose.md", skills_yaml="[proj-skill]"
+            proj / ".claude" / "agents", "general.md", skills_yaml="[proj-skill]"
         )
         merged, _, _ = build_merged_pack(home_dir=home, project_root=proj)
-        assert merged["general-purpose"].skills == ["proj-skill"]
+        assert merged["general"].skills == ["proj-skill"]
 
 
 class TestSkillsFactoryRoundTrip:
@@ -894,9 +890,10 @@ class TestSkillsFactoryRoundTrip:
     with no coercion, so the bundled-pack value is what propagates.
     """
 
-    def test_general_purpose_skills_all_reaches_sdk_teammate(
+    def test_general_skills_none_reaches_sdk_teammate(
         self, monkeypatch, tmp_path: Path
     ) -> None:
+        """Bundled general (no skills override) reaches SdkTeammate with skills=None."""
         from claude_crew import factories
         from claude_crew.sdk_teammate import SdkTeammate
 
@@ -909,11 +906,11 @@ class TestSkillsFactoryRoundTrip:
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
 
         f = factories.default_factory()
-        teammate = f("t-1", "alice", "general-purpose")
+        teammate = f("t-1", "alice", "general")
 
         assert isinstance(teammate, SdkTeammate)
-        gp = teammate._agents["general-purpose"]
-        assert gp.skills == "all"  # the literal SDK Literal["all"], not a list
+        gen = teammate._agents["general"]
+        assert gen.skills is None
 
 
 # ============================================================================
