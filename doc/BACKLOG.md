@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-07] Feature: plugin-projectpath-prefix-match (#26)
+
+### H1 — `_resolve_agent_def` vs spawn-factory synthetic-AgentDef divergence
+- **What**: When a role is **not** in `merged_pack` and `extra_tools` / `extra_skills` are passed to `spawn_teammate`, `factories.py` takes two different paths. The spawn factory at `claude_crew/factories.py:294-301` constructs a *synthetic* `AgentDefinition(description="", prompt="", tools=extras, skills=extras)` so the teammate can run with the operator-supplied extras. `_resolve_agent_def` at `claude_crew/factories.py:362-365` returns `None` for the same case. Result: alive teammate with extras, but `Broker._configs[teammate_id] = None` → empty UI config panel even though the teammate is functional.
+- **Where**: `claude_crew/factories.py` — the `factory()` closure (`:252-350`) and the `_resolve_agent_def` helper (`:357-371`) both built off `merged_pack` but diverge on the unknown-role-with-extras path.
+- **Why it matters**: This is a code-read finding from the #26 Phase 1 spike — not the operator-reported incident (which was the `projectPath` filter, fixed in #26). It's a real asymmetry: the dashboard's transparency surface lies for any spawn shaped as "unknown role + extras." Today this is rare (most spawns are by known role), but it ambushes the unusual case silently. The spec's Phase 2 scope split it off explicitly.
+- **Suggested action**: Extract a single shared helper that takes `(role, merged_pack, extra_tools, extra_skills)` and returns either a real or synthetic `AgentDefinition`. Both `factory()` and `agent_def_resolver()` call it. Eliminates the silent disagreement at the source. Expected size: small (single-task slice).
+
+---
+
 ## [2026-05-06] Feature: startup-diagnostics-dashboard (#25)
 
 ### Style ERROR-tier startup-diagnostic badge in the dashboard

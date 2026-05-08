@@ -1,7 +1,8 @@
 # FEATURE — Plugin agent config visibility on the dashboard
 
-**Status:** Phase 1 (research / spike)
+**Status:** Phase 2 (shipped 2026-05-07)
 **Filed:** 2026-05-07
+**Shipped:** 2026-05-07 via RepoReactor (slug `plugin-projectpath-prefix-match`)
 **Surfaced by:** Operator report — running claude-crew in a project where `repo-reactor` was installed at project scope (`scope: "local"`, `projectPath: <repo>`); spawned a `repo-reactor:*` teammate; teammate ran fine; dashboard config panel showed no agent-definition details (tools, skills, model, system prompt).
 
 ---
@@ -153,3 +154,25 @@ H1 (synthetic-AgentDef divergence) and H2 (namespace mismatch) remain ruled out 
 1. **Symlinks and `..` segments** — `_normalize_path` already resolves these. `is_relative_to` operates on resolved paths. Should be fine, but call out in the test plan.
 2. **`projectPath` typed as a glob/list ever?** Today it's `str`. Confirm the manifest schema before assuming.
 3. Should the diagnostic fire even for installs that *do* load (informational)? Probably not — only fire on the miss case to avoid noise.
+
+---
+
+## Phase 2 — Shipped (2026-05-07)
+
+Single-task slice via RepoReactor. Both Phase 2 changes landed together; no decomposition needed (the classifier rule and the loader filter are tightly coupled — splitting would have introduced an artificial edge with zero parallelism gain).
+
+### What landed
+
+- `claude_crew/subagents/_user_loader.py::_read_installed_plugins` — strict `projectPath` equality replaced with `is_relative_to` against the normalized cwd. Both sides go through `_normalize_path` (resolves `~`, symlinks, `..`). The H1 `installPath` escape guard is unchanged.
+- `claude_crew/diagnostics.py` — `"plugin_scope_miss"` added to the `DiagCategory` Literal union; `("project-scope plugin", "plugin_scope_miss")` registered at index 0 in `_MESSAGE_RULES` so the rule fires before the existing `("installPath", "plugin")` rule. AT8 pins this ordering.
+- `tests/test_plugin_projectpath_prefix_match.py` — 8 acceptance tests, one per AT (exact match, subdirectory match, scope-miss diagnostic, sibling rejection, symlink resolution, parent-cwd rejection, user-scope unaffected, classifier ordering preserved).
+
+### Verification
+
+- 8 new tests pass.
+- Full suite 978 passed / 23 skipped / 0 failed (no regressions).
+- All RR phase verdicts PASS at cycle 0: plan-review, breakout-review, slice-review, feature-review, validation.
+
+### Follow-up split
+
+- **H1 — synthetic-AgentDef vs `_resolve_agent_def` divergence** (`factories.py:294-301` vs `:362-365`) is a real asymmetry surfaced by code reading during the spike. Not this incident; deliberately split out per Phase 2's scope discipline. Tracked in BACKLOG.
