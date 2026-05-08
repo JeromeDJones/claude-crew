@@ -102,7 +102,7 @@ class TestSdkFactoryAgentInjection:
         assert "scout" in teammate._agents  # planted
         assert "explorer" in teammate._agents  # bundled
         assert "planner" in teammate._agents  # bundled
-        assert "general-purpose" in teammate._agents  # bundled
+        assert "general" in teammate._agents  # bundled
 
     def test_default_factory_resolves_namespaced_plugin_role(
         self, monkeypatch, tmp_path,

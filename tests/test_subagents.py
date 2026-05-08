@@ -49,8 +49,8 @@ class TestPackContents:
 
     def test_keys_are_exactly_the_three_pack_members(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
-        assert set(pack.keys()) == {"explorer", "planner", "general-purpose"}
-        assert PACK_MEMBERS == ("explorer", "planner", "general-purpose")
+        assert set(pack.keys()) == {"explorer", "planner", "general"}
+        assert PACK_MEMBERS == ("explorer", "planner", "general")
 
     def test_explorer_contract(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
@@ -74,7 +74,7 @@ class TestPackContents:
 
     def test_general_purpose_contract(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
-        gp = pack["general-purpose"]
+        gp = pack["general"]
         assert gp.model == "sonnet"
         assert gp.effort == "medium"
         assert gp.maxTurns == 20
@@ -84,11 +84,11 @@ class TestPackContents:
         assert "Bash" not in gp.tools
         assert "Task" not in gp.tools
 
-    def test_general_purpose_has_skills_all(self) -> None:
-        """SC-6: bundled general-purpose declares skills: all for parity-of-invocation."""
+    def test_general_has_no_skills_override(self) -> None:
+        """Bundled 'general' does not declare a skills override."""
         pack, _role_ss, _bodies = load_default_pack()
-        gp = pack["general-purpose"]
-        assert gp.skills == "all"
+        gp = pack["general"]
+        assert gp.skills is None
 
     def test_explorer_planner_skills_unset(self) -> None:
         """SC-10: explorer and planner stay narrow; #11's lightweight-context win is preserved."""
@@ -125,6 +125,16 @@ class TestPackContents:
         assert a_ss == b_ss
         assert a_bodies == b_bodies
 
+    def test_bundled_general_key_loads(self) -> None:
+        """Post-rename: bundled pack returns 'general' key (not 'general-purpose')."""
+        pack, _role_ss, _bodies = load_default_pack()
+        # Key must be "general", not "general-purpose"
+        assert "general" in pack
+        assert "general-purpose" not in pack
+        # File path is now general.md, not general_purpose.md
+        body = _read_body(PACK_DIR / "general.md")
+        assert pack["general"].prompt.endswith(body.rstrip())
+
 
 class TestPackHermeticity:
     """SC-5 — pack content is in-repo. Post-#15 SC-7: substrate guidance leads,
@@ -153,13 +163,13 @@ class TestPackHermeticity:
 
     def test_general_purpose_prompt_ends_with_file_body(self) -> None:
         pack, _role_ss, _bodies = load_default_pack()
-        body = _read_body(PACK_DIR / "general_purpose.md")
-        assert pack["general-purpose"].prompt.endswith(body.rstrip())
+        body = _read_body(PACK_DIR / "general.md")
+        assert pack["general"].prompt.endswith(body.rstrip())
 
     def test_general_purpose_prompt_starts_with_substrate_guidance(self) -> None:
         from claude_crew.subagents._loader import SUBSTRATE_SUBAGENT_GUIDANCE
         pack, _role_ss, _bodies = load_default_pack()
-        assert pack["general-purpose"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
+        assert pack["general"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
 
     def test_bodies_dict_matches_raw_file_body(self) -> None:
         """The bodies dict returned by load_default_pack contains the raw body
@@ -169,7 +179,7 @@ class TestPackHermeticity:
         for key, fname in [
             ("explorer", "explorer.md"),
             ("planner", "planner.md"),
-            ("general-purpose", "general_purpose.md"),
+            ("general", "general.md"),
         ]:
             raw = _read_body(PACK_DIR / fname)
             assert bodies[key] == raw
@@ -427,7 +437,7 @@ class TestSdkTeammateIntegration:
 
         assert "options" in captured, "ClaudeSDKClient was never constructed"
         agents = captured["options"].agents
-        assert set(agents.keys()) == {"explorer", "planner", "general-purpose"}
+        assert set(agents.keys()) == {"explorer", "planner", "general"}
 
     async def test_internal_seam_custom_agents_dict(
         self, monkeypatch, broker: Broker
@@ -493,7 +503,7 @@ class TestSdkTeammateIntegration:
         teammate = sdk_factory("id-2", "bob", "explorer")
         assert isinstance(teammate, SdkTeammate)
         assert set(teammate._agents.keys()) == {
-            "explorer", "planner", "general-purpose",
+            "explorer", "planner", "general",
         }
 
 

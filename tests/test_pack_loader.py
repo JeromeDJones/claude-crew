@@ -187,13 +187,16 @@ class TestSettingSourcesMixedItems:
 
 
 class TestSkillsAllForm:
-    """Scenario: skills: all (string form) is accepted (D-1)."""
+    """Scenario: skills: all (string form) is now rejected at pack level (D-1 change)."""
 
-    def test_skills_all_string_accepted(self, tmp_path: Path) -> None:
+    def test_skills_all_string_raises_pack_load_error(self, tmp_path: Path) -> None:
+        """skills: 'all' is only valid at session level, not per-agent."""
         text = _pack_text("skills: all")
-        _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.skills == "all"
-        assert agent.skills == "all"
+        with pytest.raises(PackLoadError) as exc:
+            parse_pack_text(text, tmp_path / "agent.md")
+        msg = str(exc.value)
+        assert "skills must be a list of skill names" in msg
+        assert "session level" in msg
 
 
 class TestSkillsListForm:
@@ -230,12 +233,13 @@ class TestSkillsSettingSourcesConflict:
         assert "settingSources" in msg
 
     def test_skills_all_with_explicit_empty_settingsources_raises(self, tmp_path: Path) -> None:
+        """Now skills: 'all' is rejected outright, before settingSources check."""
         text = _pack_text("skills: all\nsettingSources: []")
         with pytest.raises(PackLoadError) as exc:
             parse_pack_text(text, tmp_path / "agent.md")
         msg = str(exc.value)
-        assert "contradictory" in msg
-        assert "settingSources" in msg
+        # Expect rejection of skills: 'all' form, not the settingSources contradiction.
+        assert "skills must be a list of skill names" in msg
 
     def test_empty_skills_with_empty_settingsources_accepted(self, tmp_path: Path) -> None:
         """skills:[] + settingSources:[] is consistent (no-op + no-source)."""

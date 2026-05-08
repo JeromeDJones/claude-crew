@@ -3,7 +3,7 @@
 Exposes:
 
 - ``load_default_pack()`` — returns the bundled three-member pack
-  (``explorer``, ``planner``, ``general-purpose``) as a
+  (``explorer``, ``planner``, ``general``) as a
   ``dict[str, AgentDefinition]`` ready to pass to
   ``ClaudeAgentOptions(agents=...)``.
 - ``merge_packs(default, user)`` — per-key override at whole-
@@ -31,13 +31,13 @@ __all__ = [
 ]
 
 
-PACK_MEMBERS: tuple[str, ...] = ("explorer", "planner", "general-purpose")
+PACK_MEMBERS: tuple[str, ...] = ("explorer", "planner", "general")
 
 _PACK_DIR = Path(__file__).parent
 _FILE_FOR_KEY = {
     "explorer": "explorer.md",
     "planner": "planner.md",
-    "general-purpose": "general_purpose.md",
+    "general": "general.md",
 }
 
 

@@ -91,9 +91,10 @@ class TestE2EHappyPaths:
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert not any("declares unknown skills" in m for m in warn_msgs)
 
-    def test_bundled_general_purpose_has_skills_all_e2e(
+    def test_bundled_general_loads_with_no_skills_override_e2e(
         self, monkeypatch, tmp_path: Path
     ) -> None:
+        """Bundled 'general' (formerly 'general-purpose') loads without skills override."""
         home = tmp_path / "home"
         home.mkdir()
         cwd = tmp_path / "cwd"
@@ -103,11 +104,12 @@ class TestE2EHappyPaths:
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
 
         f = factories.default_factory()
-        teammate = f("t-e2e-2", "bob", "general-purpose")
+        teammate = f("t-e2e-2", "bob", "general")
 
-        gp = teammate._agents["general-purpose"]
-        assert gp.skills == "all"
-        # SC-10 sanity: explorer/planner unchanged
+        gen = teammate._agents["general"]
+        # Bundled general.md has no skills field, so agent.skills is None.
+        assert gen.skills is None
+        # Sanity: explorer/planner unchanged
         assert teammate._agents["explorer"].skills is None
         assert teammate._agents["planner"].skills is None
 
@@ -117,17 +119,17 @@ class TestE2EHappyPaths:
         home = tmp_path / "home"
         cwd = tmp_path / "cwd"
         cwd.mkdir()
-        # Default has general-purpose with skills: all (T3).
+        # Bundled has general (no skills override).
         # User override → skills: [user-skill]
         _write_agent(
             home / ".claude" / "agents",
-            "general-purpose.md",
+            "general.md",
             frontmatter_extra="skills: [user-skill]",
         )
         # Project override → skills: [proj-skill]
         _write_agent(
             cwd / ".claude" / "agents",
-            "general-purpose.md",
+            "general.md",
             frontmatter_extra="skills: [proj-skill]",
         )
         monkeypatch.setattr("pathlib.Path.home", lambda: home)
@@ -135,10 +137,10 @@ class TestE2EHappyPaths:
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
 
         f = factories.default_factory()
-        teammate = f("t-e2e-3", "carol", "general-purpose")
+        teammate = f("t-e2e-3", "carol", "general")
 
         # Project wins.
-        assert teammate._agents["general-purpose"].skills == ["proj-skill"]
+        assert teammate._agents["general"].skills == ["proj-skill"]
 
 
 # -----------------------------------------------------------------------------
