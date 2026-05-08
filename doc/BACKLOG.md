@@ -6,6 +6,42 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-08] Live integration test for bundled-pack dispatch
+
+### No regression signal for CLI-rule changes that silently drop user-submitted agents
+- **What**: The 2026-05-07 → 2026-05-08 dispatch-drop bug (CLI silently dropping `explorer`/`planner` from the available-agent list) had **zero** test signal. The full unit suite (978 tests at the time) passed throughout, while in production teammates were getting "Agent type not found" at runtime. The drop happens inside the `claude` CLI subprocess after the SDK initialize request — none of our unit-level fixtures exercise that boundary, so any future change to CLI agent-registration rules (or a regression that reintroduces a name match / `skills: all`) sails past CI undetected.
+- **Where**: New live test alongside `tests/test_live_sdk.py` and `tests/test_live_subagents.py`, gated by `CLAUDE_CREW_LIVE_TESTS=1`. Spawn a real teammate via the live SDK path, ask it to enumerate available agent types via the Task tool schema, assert every key in `load_default_pack()` is dispatchable. Optionally also dispatch each bundled subagent with a trivial task and assert non-error return.
+- **Why it matters**: The class of bug we just paid for in confusion is structurally invisible to unit tests. A live canary test is the cheap insurance — runs nightly or pre-release, catches CLI rule changes and pack-config regressions (e.g., someone reintroducing `skills: all` or naming a bundled agent after a built-in) before they ship.
+- **Suggested action**: One test class, ~30-50 lines, ~1 hour of work. Reuse the live SDK harness pattern. Skipped by default; add to a release-readiness checklist.
+
+---
+
+## [2026-05-08] Cleanup batch: defensive dead-code + #25 follow-ups
+
+### Bundled cleanup PR for accumulated low-risk mechanical work
+- **What**: Several small, mechanical, low-risk cleanups have accumulated. Each is too small to ship alone but worth bundling.
+
+  **Defensive dead-code reachable only via the now-rejected `skills="all"` path:**
+  - `claude_crew/factories.py:277` — extras-merge handling for the `"all"` literal in `agent_def.skills`
+  - `claude_crew/broker.py:281` — config serialization that wraps `"all"` into `["all"]`
+  - `claude_crew/subagents/_user_loader.py:448` — skill-name validation skip when `skills == "all"`
+  - `tests/test_broker.py:1900-1925` — round-trip tests that exercise the `["all"]` serialization
+
+  Since `_loader._validate_frontmatter` (post-2026-05-08) rejects `skills: "all"` at parse time with a `PackLoadError`, no in-repo path produces an `agent_def.skills == "all"` value anymore. External callers could still inject it via `extra_skills` on `spawn_teammate` (currently typed `list[str] | None`, so they'd have to type-violate) — defensive but unreachable from real flows.
+
+  **#25 follow-ups (per SESSION.md):**
+  - ERROR-tier startup-diagnostic badge CSS (`.startup-notice-badge-error` rule missing)
+  - Drop no-op `try/except` around `record.getMessage()` in `StartupDiagCollector.emit`
+  - Refactor `_direct_attach_fallbacks` to return restore pairs (drop handler-attribute coupling)
+  - Breakout-feature planner heuristic — include `server.py` in `taskTouches` for factory→broker slices
+  - Reconcile `unknown_skill` category — confirm startup-time emit site or drop
+
+- **Where**: Across `claude_crew/` and `tests/`. See individual SESSION.md / BACKLOG references for the #25 items.
+- **Why it matters**: Each item alone is too small to justify a dedicated PR. Bundled, they cleanly retire post-fix dead code and close out the #25 follow-up tail. Reduces ambient noise (unreachable branches, missing CSS, etc.) and signals that the #25 ship is fully wrapped.
+- **Suggested action**: Single PR, "cleanup: post-fix dead code + #25 followups." Estimated effort: an afternoon.
+
+---
+
 ## [2026-05-08] Fixed: bundled `general-purpose` shadowing dropped `explorer` and `planner` (resolved)
 
 ### Original observation (2026-05-07) — hypothesis was wrong
