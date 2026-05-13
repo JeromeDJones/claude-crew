@@ -25,7 +25,16 @@ Suite contents (initial):
 
 Promoted to vision-pipeline-row consideration: yes. This is the moat-as-asserted-commitment feature.
 
-Related: subsumes the [2026-05-08] "Live integration test for bundled-pack dispatch" entry once promoted.
+Related: **subsumes the [2026-05-08] "Live integration test for bundled-pack dispatch" entry.** That entry has the seed test-shape; planner should fold its intent into the suite and treat the bundled-pack-dispatch class as one of several, not the only one. The one-off entry can be archived once #27 ships.
+
+### Notes for the implementing workflow (RepoReactor / SDD)
+
+- **API cost: real.** Live-gated tests hit the SDK and consume Anthropic API budget. Don't run on every push; gate behind `CLAUDE_CREW_LIVE_TESTS=1` (existing pattern from `test_live_sdk.py`, `test_format_compat_e2e.py`). The unit-test green path stays free; the live suite is a pre-release gate.
+- **Scope tightly per test class.** One round-trip per fidelity claim where possible. Avoid suites that spin up multiple long-running teammates if a single short turn proves the invariant.
+- **Reuse the `test_format_compat_e2e.py::TestLiveSdkToolsEmptyEnforcement` pattern.** That test is the existing prior-art for "spawn a real teammate, assert an SDK-boundary invariant, ~$0.05 per run." Each fidelity claim should follow that shape.
+- **Pin SDK version for the live suite's CI run (if/when CI runs it).** Several invariants (e.g., `AgentDefinition(model=None)` wire-safety, `tools=[]` no-tool enforcement) are claims about *current SDK behavior*; an SDK upgrade can silently change them. The suite IS the canary for those changes.
+- **Windows `\r\n` test gates on the underlying fix landing.** Until the three-line frontmatter fix ships, write the live test as `xfail` with a comment naming the gate; flip to a hard assertion when the fix lands.
+- **Document the shell-env-var hook carve-out as an explicit invariant**, not a TODO. The live test should assert "shell hook env vars are NOT injected in SDK mode" — that's the current contract, and turning it into a test prevents accidental "fixes" that would break other assumptions.
 
 ---
 
