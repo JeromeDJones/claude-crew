@@ -1,7 +1,7 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-05-06
+**Last Updated**: 2026-05-12
 **Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity)
 **Next up**: #20 peer messaging between teammates *(idea)*
 
@@ -15,7 +15,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session you drive
 
 A single machine can run multiple independent crews in parallel — each its own lead plus SDK helpers, each on a different problem in a different area of the code — without coordination overhead between them. claude-crew exists because Claude Code can't natively coordinate parallel peer Claudes, and the existing workarounds (tmux send-keys, Anthropic's experimental Agent Teams) either compromise reliability or accept hard scope limits like "one team per session, no nesting."
 
-**claude-crew is foundational, not a finished workflow product.** It is the runtime layer — bus, lifecycle, persistence, observability — that other products are built *on top of*. RepoReactor (planner/builder/reviewer for software development) is one such product. A research crew, a content crew, an ops crew would each be others. claude-crew provides primitives; the role definitions, system prompts, and team workflows live a layer up. Agent Teams is the closest analogue from Anthropic, but it bundles runtime + workflow + UI into one opinionated stack; claude-crew unbundles them and exposes the runtime as a clean substrate.
+claude-crew is the runtime layer — bus, lifecycle, persistence, observability — that other products are built *on top of*. RepoReactor (planner/builder/reviewer for software development) is a framework that builds on this capability; others may follow. claude-crew provides primitives; the role definitions, system prompts, and team workflows live a layer up. Agent Teams is the closest analogue from Anthropic, but it bundles runtime + workflow + UI into one opinionated stack; claude-crew unbundles them and exposes the runtime as a clean substrate.
 
 **North star:** A developer runs two crews side-by-side on one workstation. Crew A is RepoReactor in its sandboxed Docker container, three SDK agents in planner/builder/reviewer roles, working on a feature in their codebase. Crew B is a separate lead with three SDK agents debugging a production issue in a different repo. Both crews' internal conversations stream into a live UI the developer can glance at without context-switching. The orchestration is solid enough that the developer ships personal projects on it *and* deploys it at work. The message bus is a first-class primitive, not a workaround.
 
@@ -27,7 +27,7 @@ A single machine can run multiple independent crews in parallel — each its own
 
 ### Primary Users
 
-Working software developers who already use Claude Code as their daily AI development environment. The operator profile spans personal use (Jerome at home, on side projects), professional use (Jerome at work, or any developer at their employer), and through that range to anyone who has hit Claude Code's coordination ceiling and wants a way past it without giving up the Claude Code UX they already know.
+Working software developers who already use Claude Code as their daily AI development environment. The operator profile spans personal projects to professional work — anyone who has hit Claude Code's coordination ceiling and wants a way past it without giving up the Claude Code UX they already know.
 
 Not "everyone who codes." The user is someone deep enough into Claude Code to have felt its multi-agent limits and frustrated enough to want a real fix.
 
@@ -35,7 +35,7 @@ Not "everyone who codes." The user is someone deep enough into Claude Code to ha
 
 - **Subagents can't spawn subagents.** Claude Code's subagent model bottoms out at one level — a planner subagent can't itself delegate research, exploration, or focused implementation to its own subagents. Recursive decomposition stops dead, which caps how deeply any single role can scope and divide its own work.
 - **Agent Teams members can't spawn subagents either, and they're expensive.** Anthropic's official multi-agent answer has the same recursion ceiling, plus the cost of running multiple full Claude Code sessions concurrently — both in tokens and in operational overhead from the experimental flag's known limits.
-- **The tmux send-keys workaround isn't enterprise-grade.** It works for tinkering: fragile ANSI parsing, terminal-environment lock-in, prompt collisions when idle-detection lies. Not something you build a real product on. A serious team needs a serious primitive.
+- **The tmux send-keys workaround isn't production-grade.** It works for tinkering: fragile ANSI parsing, terminal-environment lock-in, prompt collisions when idle-detection lies. Not something you build a real product on. A serious developer needs a serious primitive.
 
 ### Desired Outcome
 
@@ -55,11 +55,11 @@ After adopting claude-crew, a developer can:
 
 | # | Criterion | How to Measure | Status |
 |---|-----------|---------------|--------|
-| 1 | A lead can spawn N persistent role-specialized teammates and exchange messages with them across a session, each teammate holding context across all exchanges | Scripted session with 3 teammates, 10+ exchanges each, teammates correctly reference earlier exchanges | Not started |
-| 2 | A teammate can recursively spawn its own subagents for focused work | Planner teammate spawns explorer + researcher subagents during a real planning task | Not started |
-| 3 | A developer can run two independent crews concurrently on one machine without interference | Two crews on different repos, both completing tasks, no message bleed between them | **Structurally met (2026-04-30)** — Multi-instance registry (#13) uses per-instance XDG files (keyed by crew_id) with PID liveness; two instances can co-exist without message bleed or registry corruption. Validated scenario (two real crews completing tasks end-to-end) is still a deferred v2 proof point. |
-| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | **Substantially met (2026-04-30)** — Mission Control UI (#12) ships a real-time browser dashboard. #13 extends it to all running instances: each peer's agents, status, and transcript stream into the same dashboard via server-side HTTP fanout. Token/cost tracking and crew-level filtering remain deferred. |
-| 5 | The system runs reliably enough to use on real work — completes a non-trivial task end-to-end without operator intervention beyond directing the lead | Successful real-task runs at home and at work, instrumented with a "needed manual rescue?" flag | **Met (home, 2026-04-26)** — MMM-35 backend slice shipped via SDD with claude-crew teammates, all 8 tripwires clean, ~$15-20 spend. Substrate findings captured for next-pass improvements. |
+| 1 | A lead can spawn N persistent role-specialized teammates and exchange messages with them across a session, each teammate holding context across all exchanges | Scripted session with 3 teammates, 10+ exchanges each, teammates correctly reference earlier exchanges | **Met** — Core product capability in daily use. RepoReactor exercises this constantly; persistent planner/builder/reviewer/feature-reviewer teammates carry context across many exchanges within a feature run. |
+| 2 | A teammate can recursively spawn its own subagents for focused work | Planner teammate spawns explorer + researcher subagents during a real planning task | **Met** — Exercised constantly by RepoReactor (planner spawns explorer subagents during planning; builders spawn scout/runner subagents during implementation). PreSubagentUse/PostSubagentUse hooks (#7) surface subagent activity in Mission Control. |
+| 3 | A developer can run two independent crews concurrently on one machine without interference | Two crews on different repos, both completing tasks, no message bleed between them | **Met (2026-05-12)** — Multi-instance registry (#13) uses per-instance XDG files (keyed by crew_id) with PID liveness; two instances co-exist without message bleed or registry corruption. Validated in lived use: one CLI running RepoReactor while a second CLI works my-money-matters concurrently, both visible in the unified Mission Control dashboard. |
+| 4 | The full crew conversation (lead ↔ teammates ↔ subagents) is observable in real time for debugging and learning | Live observability surface shows messages flowing across all crews; operator can identify a misbehaving prompt by reading the transcript | **Met** — Mission Control UI (#12) ships a real-time browser dashboard; #13 unifies all running instances; #14 added per-crew token/cost telemetry; #19 surfaces tool-use events inline in the transcript stream; #25 surfaces startup diagnostics. |
+| 5 | The system runs reliably enough to use on real work — completes a non-trivial task end-to-end without operator intervention beyond directing the lead | Successful real-task runs across multiple environments, instrumented with a "needed manual rescue?" flag | **Met (2026-05-12)** — In daily use on real codebases across multiple environments. MMM-35 backend slice (2026-04-26) shipped via SDD with claude-crew teammates was the first instrumented gate; ongoing real-task use since. External distribution remains a goal once install and onboarding hold up for someone who didn't build it. |
 
 **Guidance for writing criteria:**
 - Frame as outcomes, not outputs ("users can X" not "build feature Y")
@@ -106,6 +106,8 @@ Each crew is its own MCP server instance bound to its own lead. Crews are isolat
 
 The bus already sees every message. Observability is exposing it: a JSONL transcript file per crew is the v1 floor; a live UI (TUI or web) showing all active crews simultaneously, filterable by role and crew, is the v1 ceiling. The use case is dual: debugging when something misbehaves, and learning what prompts and team shapes actually work. Without this, users can't refine their crews — they can only guess.
 
+**Mission Control is an instrumented lab as much as a dashboard.** We're still learning what good multi-agent work looks like — telemetry is how we see it. Instrumentation that surfaces patterns we couldn't see otherwise earns its place.
+
 **In scope:** structured JSONL transcript per crew, multi-crew live UI, basic filtering and search.
 **Out of scope for v1:** transcript export tooling, replay/scrubbing, post-hoc analytics dashboards.
 
@@ -115,19 +117,18 @@ The bus already sees every message. Observability is exposing it: a JSONL transc
 
 ### What Makes This Different
 
-- **Foundational, not opinionated.** claude-crew provides runtime primitives (bus, lifecycle, persistence, observability). It does not bake in roles, workflows, or methodologies. RepoReactor and similar products live a layer up.
+- **Teammates feel like Claude Code because they obey Claude Code's rules.** CLAUDE.md, skills, hooks, permission modes, MCP, plugins — the rules for Claude Code are documented and knowable, and once you've learned them, more agents should just work. Runtime-agnostic frameworks (CrewAI, LangGraph, AutoGen) structurally forfeit this fidelity.
 - **Recursive subagent decomposition by default.** Teammates can spawn their own subagents — the limitation that makes Claude Code's native subagents and Agent Teams members feel underpowered for serious work.
 - **Persistent teammate context across many exchanges.** Teammates aren't ephemeral one-shots; they hold state across the session, accumulating memory the way a human collaborator would.
 - **Multi-crew on one host as a first-class shape.** Run two or more crews on different problems concurrently without interference, instead of being capped at "one team per session."
 - **Observability as a first-class output, not a debugging afterthought.** Structured transcripts and a live UI make the crew's behavior legible — both for debugging and for learning what works.
-- **Adapter-ready bus contract.** The protocol is defined separately from the SDK runtime so future runtimes (headless Claude Code, custom processes, other LLM providers) can join without redesigning the bus.
 
 ### Alternatives & Landscape
 
 | Alternative | Strength | Gap claude-crew Fills |
 |---|---|---|
 | **Claude Agent Teams** (Anthropic, experimental) | Built into Claude Code; first-class wake mechanism; shared task list | Single team per session, no nesting, no recursive subagents, opinionated stack you can't unbundle, experimental flag with known limits |
-| **tmux send-keys orchestrators** (Tmux-Orchestrator, amux, primeline-ai/claude-tmux-orchestration) | Works today on actual Claude Code instances | Fragile ANSI parsing, terminal-only, prompt-collision risk, not enterprise-grade — fine for tinkering, not for serious products |
+| **tmux send-keys orchestrators** (Tmux-Orchestrator, amux, primeline-ai/claude-tmux-orchestration) | Works today on actual Claude Code instances | Fragile ANSI parsing, terminal-only, prompt-collision risk, not production-grade — fine for tinkering, not for serious products |
 | **Claude Agent SDK directly** | Full programmatic control of agent loops | You'd reimplement the bus, lifecycle, multi-crew isolation, and observability yourself — that's exactly what claude-crew packages |
 | **BMAD framework** | Strong methodology and prompt scaffolding for agile workflow | Single-session prompt engineering — does not address parallel coordination at all. Complementary, not competitive. |
 | **Custom orchestrators built per project** | Tailored to one team's needs | Fragmentation, no shared substrate, every team rebuilds the same primitives |
@@ -143,7 +144,7 @@ claude-crew is *not* an alternative to RepoReactor, BMAD, or workflow products i
 - **Polling-first inbound, hooks deferred to v2.** Keeps v1 portable across MCP clients; we don't lock the contract to Claude Code internals before we have user data.
 - **Two-level recursion cap (lead → teammate → subagent).** SDK can technically go deeper; v1 caps it because deeper trees multiply cost and reasoning depth. Lifted only with evidence it pays off.
 - **Single Claude Code lead per crew in v1.** Headless / scripted leads are interesting but defer until the interactive case is solid.
-- **Enterprise-grade quality bar.** Tests at both implementation and integration layers, structured logging, error surfacing — this is meant to run on real work, not as a science project.
+- **Production-grade quality bar.** Tests at both implementation and integration layers, structured logging, error surfacing — this is meant to run on real work, not as a science project.
 
 ### Open Verification Items
 
