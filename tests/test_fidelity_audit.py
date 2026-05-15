@@ -33,6 +33,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import ResultMessage
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.subagents._user_loader import _load_user_mcp_server_names
 
 # Feature-detect Python-callable hook support (AT4, AT5).
 # HookMatcher was introduced alongside SDK hook callback support.
@@ -199,6 +200,11 @@ async def _spawn_and_ask(
         f"_spawn_and_ask: timed out after {timeout}s waiting for lead reply; "
         f"received {received} message(s)"
     )
+
+
+def _has_kg_server() -> bool:
+    """True if the knowledge-graph MCP server is registered in ~/.claude.json."""
+    return "knowledge-graph" in _load_user_mcp_server_names()
 
 
 def _response_contains_marker(envelope: Envelope, marker: str) -> bool:
@@ -735,3 +741,76 @@ class TestPluginScopeFidelity:
             f"not dispatched or its sentinel prompt was not relayed.\n"
             f"Reply payload: {reply.payload!r}"
         )
+
+
+@pytest.mark.skipif(
+    not _has_kg_server(),
+    reason=(
+        "knowledge-graph MCP server not in ~/.claude.json; "
+        "register or supply alternate"
+    ),
+)
+class TestMcpResolutionFidelity:
+    """AT7: User-level ~/.claude.json MCP servers are reachable from a teammate session.
+
+    Pre-condition: skip cleanly if ``knowledge-graph`` is not registered in
+    ``~/.claude.json`` (mirrors the ``_has_kg_server`` pattern from
+    ``tests/test_live_sdk.py::TestExtraToolsReachSdkSubprocess``).
+
+    Spawns one SDK teammate (no extra_tools needed — the knowledge-graph server
+    is registered in user-level ``~/.claude.json``, which SDK teammates inherit),
+    asks it to invoke ``mcp__knowledge-graph__list_projects``, and asserts the
+    response indicates a non-error result by checking for the absence of
+    tool-unavailability phrases.
+
+    Cost target: ~$0.02–0.05 (single haiku turn, one MCP call).
+    """
+
+    async def test_kg_mcp_tool_returns_non_error(self, broker: Broker) -> None:
+        """knowledge-graph MCP tool accessible inside teammate session returns non-error (AT7).
+
+        Pass condition: response does not contain tool-unavailability phrases.
+        Fail condition: any unavailable-phrase present → MCP resolution broke.
+        Skip condition: knowledge-graph not in ~/.claude.json (class-level gate).
+        """
+        reply = await _spawn_and_ask(
+            broker,
+            (
+                "Use the mcp__knowledge-graph__list_projects tool to list available "
+                "projects. Call the tool and briefly summarise what you see. "
+                "Include the raw tool output in your reply."
+            ),
+            timeout=120.0,
+        )
+
+        text = (
+            reply.payload.get("text", "") if isinstance(reply.payload, dict)
+            else str(reply.payload)
+        )
+        assert text.strip(), (
+            f"Empty response from teammate; MCP call may have failed silently.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
+
+        # Non-error assertion: none of the tool-unavailability phrases must appear.
+        # This mirrors the pattern in TestExtraToolsReachSdkSubprocess (test_live_sdk.py).
+        unavailable_phrases = [
+            "tool not available",
+            "don't have access to",
+            "do not have access to",
+            "no tool named",
+            "cannot use that tool",
+            "can't use that tool",
+            "unable to use",
+            "tool is not",
+        ]
+        lower_text = text.lower()
+        for phrase in unavailable_phrases:
+            assert phrase not in lower_text, (
+                f"MCP resolution appears to have failed; "
+                f"tool-unavailability phrase {phrase!r} found in response.\n"
+                f"This indicates the knowledge-graph MCP server is registered in "
+                f"~/.claude.json but is not reachable from inside the SDK teammate "
+                f"session.\n"
+                f"Response text: {text!r}"
+            )
