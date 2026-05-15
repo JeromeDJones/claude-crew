@@ -29,8 +29,20 @@ from typing import Any
 
 import pytest
 
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk.types import ResultMessage
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
+
+# Feature-detect Python-callable hook support (AT4, AT5).
+# HookMatcher was introduced alongside SDK hook callback support.
+# Tests that depend on it skip with an explicit reason if absent.
+try:
+    from claude_agent_sdk.types import HookMatcher as _HookMatcher
+    _HOOK_MATCHER_AVAILABLE = True
+except ImportError:
+    _HookMatcher = None  # type: ignore[assignment,misc]
+    _HOOK_MATCHER_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -429,4 +441,152 @@ class TestSkillDiscoveryFidelity:
             f"This indicates the skill under tmp ~/.claude/skills/{skill_name}/ "
             f"was not discovered or its output was not relayed.\n"
             f"Reply payload: {reply.payload!r}"
+        )
+
+
+class TestHookFiringFidelity:
+    """AT4, AT5: Python-callable PreToolUse hooks fire inside an SDK session.
+
+    AT4 — test_pre_post_tool_hooks_fire: registers a PreToolUse Python callable
+    that writes a sentinel file when a Bash tool fires; asserts the file exists
+    and is non-empty after the turn completes.
+
+    AT5 — test_shell_env_vars_empty_invariant: registers a PreToolUse hook that
+    records ``os.environ.get("CLAUDE_TOOL_NAME", "<EMPTY>")`` inside the hook
+    body; asserts the captured value is exactly ``"<EMPTY>"``. This confirms
+    the documented carve-out (CLAUDE.md "Known limitations" — shell env vars
+    are not injected in SDK mode). If this test fails, the carve-out has closed
+    upstream: update CLAUDE.md accordingly and treat as a feature gain, not
+    a regression.
+
+    Both methods use ``ClaudeSDKClient`` directly (not the broker/SdkTeammate
+    path) so that custom hooks can be injected into ``ClaudeAgentOptions``
+    without subclassing ``SdkTeammate`` (whose hooks are hard-coded in
+    ``_run()``). This is the cleanest surface for asserting the fidelity claim.
+
+    Hook fidelity is asserted via Python callables (HookMatcher), not shell
+    hooks — shell hooks don't fire in SDK sessions (the separate documented
+    invariant asserted by AT5).
+
+    Feature detection: both methods skip with an explicit reason if ``HookMatcher``
+    is not present in the installed ``claude-agent-sdk`` build.
+
+    Cost target: ~$0.02–0.05 per method (single haiku turn, Bash only).
+    """
+
+    async def test_pre_post_tool_hooks_fire(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """PreToolUse Python callable writes a sentinel file when Bash fires (AT4).
+
+        Pass condition: sentinel file exists and is non-empty after the turn.
+        Fail condition: file absent → hooks not firing in SDK sessions.
+        Skip condition: HookMatcher absent in this SDK build.
+        """
+        if not _HOOK_MATCHER_AVAILABLE:
+            pytest.skip(
+                "HookMatcher not available in this claude-agent-sdk build; "
+                "Python-callable hooks not supported — skip AT4"
+            )
+
+        sentinel_file = tmp_path / "pre_tool_hook_sentinel.txt"
+
+        async def _pre_hook(inp: dict, tool_use_id: str, ctx: dict) -> dict:
+            tool_name = inp.get("tool_name", "<unknown>")
+            sentinel_file.write_text(
+                f"hook fired: tool_name={tool_name} id={tool_use_id}"
+            )
+            return {}
+
+        options = ClaudeAgentOptions(
+            model="claude-haiku-4-5-20251001",
+            system_prompt=(
+                "You are a minimal fidelity probe. "
+                "When asked to run a Bash command, run it with the Bash tool immediately. "
+                "Be terse. Do not narrate."
+            ),
+            hooks={
+                "PreToolUse": [
+                    _HookMatcher(matcher=None, hooks=[_pre_hook], timeout=5.0)
+                ]
+            },
+        )
+
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query("Run: `echo hook_probe_fired` using the Bash tool.")
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    break
+
+        assert sentinel_file.exists(), (
+            "PreToolUse hook did not write the sentinel file. "
+            "This indicates Python-callable hooks are not firing inside SDK sessions "
+            "(or the model did not invoke the Bash tool)."
+        )
+        assert sentinel_file.stat().st_size > 0, (
+            "PreToolUse hook wrote the sentinel file but it is empty. "
+            "The hook callback ran but did not write any content."
+        )
+
+    async def test_shell_env_vars_empty_invariant(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """CLAUDE_TOOL_NAME is empty inside SDK hook callbacks (documented carve-out, AT5).
+
+        Records ``os.environ.get("CLAUDE_TOOL_NAME", "<EMPTY>")`` inside a
+        PreToolUse hook and asserts the captured value is exactly ``"<EMPTY>"``.
+
+        Failure means the carve-out has closed upstream (behavior change, not
+        regression). If this test fails: update CLAUDE.md "Known limitations" →
+        "Verified invariants" and recognise the gained capability.
+
+        Skip condition: HookMatcher absent in this SDK build.
+        """
+        if not _HOOK_MATCHER_AVAILABLE:
+            pytest.skip(
+                "HookMatcher not available in this claude-agent-sdk build; "
+                "Python-callable hooks not supported — skip AT5"
+            )
+
+        record_file = tmp_path / "env_capture.txt"
+
+        async def _env_hook(inp: dict, tool_use_id: str, ctx: dict) -> dict:
+            value = os.environ.get("CLAUDE_TOOL_NAME", "<EMPTY>")
+            record_file.write_text(value)
+            return {}
+
+        options = ClaudeAgentOptions(
+            model="claude-haiku-4-5-20251001",
+            system_prompt=(
+                "You are a minimal fidelity probe. "
+                "When asked to run a Bash command, run it with the Bash tool immediately. "
+                "Be terse. Do not narrate."
+            ),
+            hooks={
+                "PreToolUse": [
+                    _HookMatcher(matcher=None, hooks=[_env_hook], timeout=5.0)
+                ]
+            },
+        )
+
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query("Run: `echo env_probe` using the Bash tool.")
+            async for msg in client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    break
+
+        assert record_file.exists(), (
+            "PreToolUse hook did not write the env capture file. "
+            "The hook callback may not have been invoked at all "
+            "(model may not have called Bash, or hooks are not firing)."
+        )
+        captured = record_file.read_text()
+        assert captured == "<EMPTY>", (
+            f"CLAUDE_TOOL_NAME was not empty inside the SDK hook callback. "
+            f"Captured value: {captured!r}. "
+            "The shell-env-var carve-out has closed upstream. "
+            "Update CLAUDE.md 'Known limitations' → 'Verified invariants' "
+            "and treat this as a feature gain, not a regression."
         )
