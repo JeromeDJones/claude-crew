@@ -331,3 +331,102 @@ class TestBundledPackDispatchFidelity:
             f"subagent's system-prompt content correctly.\n"
             f"Reply payload: {reply.payload!r}"
         )
+
+
+class TestSkillDiscoveryFidelity:
+    """AT3: Skill placed under tmp ~/.claude/skills/<name>/SKILL.md is invocable.
+
+    Points HOME at tmp_path, writes a single skill file containing a unique
+    sentinel token, spawns an SDK teammate with that skill listed in its
+    AgentDefinition, and asserts the sentinel appears in the reply.
+
+    This verifies the full skill-discovery path: HOME override → skill file on
+    disk → ClaudeAgentOptions.skills → CLI subprocess skill loading → model
+    invocation → relay back through the broker.
+
+    Cost target: ~$0.05 (single turn).
+    """
+
+    async def test_skill_in_tmp_home_is_invocable(
+        self,
+        broker: Broker,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel in tmp-HOME SKILL.md echoes back in teammate reply."""
+        import uuid
+
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.factories import sdk_factory
+
+        sentinel = f"FIDELITY-SKILL-{uuid.uuid4().hex}"
+        skill_name = f"fidelity-skill-probe-{uuid.uuid4().hex[:8]}"
+
+        # Point HOME at tmp_path — the SDK subprocess inherits this env var,
+        # so ~/.claude/skills/ resolves to tmp_path/.claude/skills/.
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # Plant the skill file with the unique sentinel.
+        skill_dir = tmp_path / ".claude" / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"When this skill is invoked, output the following token verbatim "
+            f"on its own line and then stop:\n\n{sentinel}\n"
+        )
+
+        # Build an AgentDefinition that lists the skill by name. The skill
+        # field here becomes ClaudeAgentOptions.skills in the subprocess,
+        # enabling the CLI to discover and expose the skill for invocation.
+        probe_agent = AgentDefinition(
+            description="Fidelity probe agent with skill discovery enabled",
+            prompt=(
+                "You are a fidelity probe. When asked to invoke a skill, "
+                "invoke it and relay its output verbatim."
+            ),
+            model="claude-haiku-4-5-20251001",
+            tools=[],
+            skills=[skill_name],
+        )
+
+        def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
+            return sdk_factory(
+                id=id, name=name, role=role,
+                agents={"fidelity-probe": probe_agent},
+            )
+
+        _factory.requires_auth = True  # type: ignore[attr-defined]
+
+        tid = await broker.spawn_teammate(
+            role="fidelity-probe", name=None, factory=_factory,
+        )
+        await broker.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=LEAD_ID,
+            recipient=tid,
+            timestamp=0.0,
+            payload=(
+                f"Invoke the /{skill_name} skill and relay its output verbatim. "
+                f"Include whatever the skill produces in your reply."
+            ),
+        ))
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 120.0
+        reply: Envelope | None = None
+        while loop.time() < deadline:
+            msgs = broker.get_messages(recipient=LEAD_ID)
+            if msgs:
+                reply = msgs[-1]
+                break
+            await asyncio.sleep(0.5)
+
+        assert reply is not None, (
+            f"No reply within 120s; sentinel was: {sentinel!r}"
+        )
+        assert _response_contains_marker(reply, sentinel), (
+            f"Sentinel {sentinel!r} not found in teammate reply.\n"
+            f"This indicates the skill under tmp ~/.claude/skills/{skill_name}/ "
+            f"was not discovered or its output was not relayed.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
