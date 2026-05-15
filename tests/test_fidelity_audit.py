@@ -590,3 +590,148 @@ class TestHookFiringFidelity:
             "Update CLAUDE.md 'Known limitations' → 'Verified invariants' "
             "and treat this as a feature gain, not a regression."
         )
+
+
+class TestPluginScopeFidelity:
+    """AT6: Plugin-provided agents resolve inside teammates.
+
+    Synthesises a tmp plugin directory under
+    ``tmp_path/.claude/plugins/cache/fidelity-probe/1.0.0/``, plants one
+    agent file whose prompt contains a uuid-suffixed sentinel, points HOME
+    at ``tmp_path``, and spawns a parent teammate with the merged pack
+    (which includes the plugin agent at key
+    ``fidelity-probe:fidelity-plugin-probe``).  The parent is asked to
+    dispatch the plugin agent via Task and relay the sentinel back.
+
+    The agent name ``fidelity-plugin-probe`` is deliberately non-bundled to
+    avoid shadow-resolution ambiguity (bundled agents are ``explorer``,
+    ``general-purpose``, ``planner``).
+
+    Cost target: ~$0.05 (one parent turn + one Task subagent turn).
+    """
+
+    async def test_plugin_agent_sentinel_echoed(
+        self,
+        broker: Broker,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plugin agent's sentinel prompt text echoes back through parent (AT6).
+
+        Pass condition: sentinel from plugin agent's system prompt appears in
+        the parent's final reply — proving the plugin pack entry was dispatched
+        and its prompt was honoured, not a fabricated response.
+        """
+        import json
+        import uuid
+
+        from claude_crew.factories import sdk_factory
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        sentinel = f"FIDELITY-PLUGIN-{uuid.uuid4().hex}"
+
+        # Plugin naming: plugin_short derived from the manifest key before '@'.
+        # Namespaced key in the merged pack will be
+        # "<plugin_short>:<agent_stem>".
+        plugin_short = "fidelity-probe"
+        agent_stem = "fidelity-plugin-probe"
+        namespaced_key = f"{plugin_short}:{agent_stem}"
+
+        # Point HOME at tmp_path — the SDK subprocess inherits this env var so
+        # ~/.claude/plugins/ resolves to tmp_path/.claude/plugins/.
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # 1. Create the plugin directory and agent file.
+        #    installPath must live within ~/.claude/plugins/ to pass the H1
+        #    escape guard in _read_installed_plugins.
+        plugin_install_dir = (
+            tmp_path / ".claude" / "plugins" / "cache" / plugin_short / "1.0.0"
+        )
+        agents_dir = plugin_install_dir / "agents"
+        agents_dir.mkdir(parents=True)
+
+        (agents_dir / f"{agent_stem}.md").write_text(
+            f"---\n"
+            f"description: Fidelity plugin probe agent\n"
+            f"model: haiku\n"
+            f"tools: []\n"
+            f"---\n\n"
+            f"You are a fidelity plugin probe agent. "
+            f"Your identity token is:\n\n"
+            f"{sentinel}\n\n"
+            f"When asked for your identity token, state it verbatim "
+            f"and nothing else.\n"
+        )
+
+        # 2. Write installed_plugins.json so load_plugin_agents discovers the
+        #    plugin.  The installPath must be within the plugins root.
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        manifest = {
+            "version": 2,
+            "plugins": {
+                f"{plugin_short}@{plugin_short}": [
+                    {
+                        "scope": "user",
+                        "installPath": str(plugin_install_dir),
+                    }
+                ],
+            },
+        }
+        (plugins_dir / "installed_plugins.json").write_text(json.dumps(manifest))
+
+        # 3. Build the merged pack from tmp_path HOME.  The plugin agent must
+        #    appear under the namespaced key.
+        merged_pack, _role_ss, _bodies = build_merged_pack(home_dir=tmp_path)
+        assert namespaced_key in merged_pack, (
+            f"Plugin agent {namespaced_key!r} not in merged pack after loading "
+            f"from {tmp_path}.  Available keys: {sorted(merged_pack.keys())}"
+        )
+
+        # 4. Spawn a parent teammate with the merged pack.  The parent has no
+        #    explicit AgentDefinition for its own role ("fidelity-probe" parent),
+        #    so the SDK will use its default system prompt.  The pack it carries
+        #    makes the plugin agent available for Task dispatch.
+        def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
+            return sdk_factory(id=id, name=name, role=role, agents=merged_pack)
+
+        _factory.requires_auth = True  # type: ignore[attr-defined]
+
+        tid = await broker.spawn_teammate(
+            role="fidelity-probe-parent", name=None, factory=_factory
+        )
+        await broker.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=LEAD_ID,
+            recipient=tid,
+            timestamp=0.0,
+            payload=(
+                f"Use the Task tool to run the '{namespaced_key}' agent with "
+                f"this exact prompt: "
+                f"'What is your identity token? State it verbatim and nothing else.' "
+                f"After the Task completes, relay the agent's exact reply back to me."
+            ),
+        ))
+
+        # 5. Wait up to 180 s for the parent's reply (Task dispatch adds an
+        #    extra SDK subprocess round-trip on top of the parent's own turn).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 180.0
+        reply: Envelope | None = None
+        while loop.time() < deadline:
+            msgs = broker.get_messages(recipient=LEAD_ID)
+            if msgs:
+                reply = msgs[-1]
+                break
+            await asyncio.sleep(0.5)
+
+        assert reply is not None, (
+            f"No reply from parent within 180s; sentinel was: {sentinel!r}; "
+            f"plugin agent key: {namespaced_key!r}"
+        )
+        assert _response_contains_marker(reply, sentinel), (
+            f"Sentinel {sentinel!r} not found in parent reply.\n"
+            f"This indicates the plugin-provided agent '{namespaced_key}' was "
+            f"not dispatched or its sentinel prompt was not relayed.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
