@@ -814,3 +814,166 @@ class TestMcpResolutionFidelity:
                 f"session.\n"
                 f"Response text: {text!r}"
             )
+
+
+class TestAgentFormatYamlPolymorphism:
+    """AT8: Both markdown-frontmatter and pure-YAML pack entries dispatch correctly.
+
+    Writes one .md (markdown-with-frontmatter) agent file and one .yaml (pure-YAML)
+    agent file into a tmp agents dir. The .md file is loaded via build_merged_pack;
+    the .yaml file is parsed via yaml.safe_load and an AgentDefinition is constructed
+    from it (discover_dir currently auto-discovers only *.md files — manual parse is
+    required for the YAML format, which is noted in the build report).
+
+    Both AgentDefinitions are merged into a single pack, a parent teammate is spawned,
+    and in a single turn the parent dispatches both subagents via Task and surfaces
+    both sentinels in its reply.
+
+    Asserts both sentinel substrings appear in the parent's response.
+
+    Cost target: ~$0.05–0.10 (one parent turn + two Task subagent turns).
+    """
+
+    async def test_both_formats_dispatchable(
+        self,
+        broker: Broker,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """md-frontmatter and YAML-derived agents both dispatch and surface sentinels (AT8).
+
+        Pass condition: both sentinel substrings appear in the parent's reply.
+        Fail condition: either sentinel absent → that agent format was not dispatched correctly.
+        """
+        import uuid
+
+        import yaml
+
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.factories import sdk_factory
+        from claude_crew.subagents._loader import build_subagent_prompt
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        sentinel_md = f"FIDELITY-MD-{uuid.uuid4().hex}"
+        sentinel_yaml = f"FIDELITY-YAML-{uuid.uuid4().hex}"
+        # Agent names must match [a-z0-9][a-z0-9-]* (Claude Code agent name spec).
+        # uuid.uuid4().hex produces lowercase hex — safe for the pattern.
+        agent_md_name = f"fidelity-md-{uuid.uuid4().hex[:8]}"
+        agent_yaml_name = f"fidelity-yaml-{uuid.uuid4().hex[:8]}"
+
+        # Isolate HOME so real ~/.claude/agents/ doesn't bleed in.
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        agents_dir = tmp_path / ".claude" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Write the markdown-with-frontmatter agent file.
+        md_body = (
+            f"You are a fidelity markdown-format probe agent.\n"
+            f"Your identity token is: {sentinel_md}\n"
+            f"When asked for your identity token, state it verbatim and nothing else.\n"
+        )
+        (agents_dir / f"{agent_md_name}.md").write_text(
+            f"---\n"
+            f"description: Fidelity markdown-format probe agent\n"
+            f"model: haiku\n"
+            f"tools: []\n"
+            f"---\n\n"
+            + md_body
+        )
+
+        # 2. Write the pure-YAML agent file.
+        #    The prompt_body key stores the role-specific instructions; the
+        #    AgentDefinition prompt is built via build_subagent_prompt below.
+        yaml_body = (
+            f"You are a fidelity YAML-format probe agent.\n"
+            f"Your identity token is: {sentinel_yaml}\n"
+            f"When asked for your identity token, state it verbatim and nothing else.\n"
+        )
+        yaml_data: dict[str, Any] = {
+            "description": "Fidelity YAML-format probe agent",
+            "model": "haiku",
+            "tools": [],
+            "prompt_body": yaml_body,
+        }
+        yaml_file = agents_dir / f"{agent_yaml_name}.yaml"
+        yaml_file.write_text(yaml.dump(yaml_data, default_flow_style=False))
+
+        # 3. Load the merged pack — discover_dir discovers *.md files only, so
+        #    agent_md_name loads; agent_yaml_name is intentionally absent here.
+        merged_pack, _role_ss, _bodies = build_merged_pack(
+            home_dir=tmp_path,
+            project_root=tmp_path / "nonexistent-project",
+        )
+        assert agent_md_name in merged_pack, (
+            f"Markdown agent {agent_md_name!r} not found in merged pack after loading. "
+            f"Available keys: {sorted(merged_pack.keys())}"
+        )
+
+        # 4. Parse the YAML file directly and construct the AgentDefinition.
+        #    Use build_subagent_prompt so the substrate framing leads the prompt,
+        #    matching the shape produced by parse_pack_text for .md files.
+        loaded_yaml = yaml.safe_load(yaml_file.read_text())
+        yaml_agent = AgentDefinition(
+            description=loaded_yaml["description"],
+            prompt=build_subagent_prompt(loaded_yaml["prompt_body"]),
+            model=loaded_yaml.get("model"),
+            tools=loaded_yaml.get("tools", []),
+        )
+
+        # 5. Merge both agents into a single pack for dispatch.
+        full_pack = {**merged_pack, agent_yaml_name: yaml_agent}
+
+        # 6. Spawn parent teammate with the combined pack.
+        def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
+            return sdk_factory(id=id, name=name, role=role, agents=full_pack)
+
+        _factory.requires_auth = True  # type: ignore[attr-defined]
+
+        tid = await broker.spawn_teammate(
+            role="fidelity-probe", name=None, factory=_factory
+        )
+        await broker.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=LEAD_ID,
+            recipient=tid,
+            timestamp=0.0,
+            payload=(
+                f"Use the Task tool to dispatch two agents, one after the other:\n\n"
+                f"1. Task: run the '{agent_md_name}' agent with prompt: "
+                f"'What is your identity token? State it verbatim and nothing else.'\n\n"
+                f"2. Task: run the '{agent_yaml_name}' agent with prompt: "
+                f"'What is your identity token? State it verbatim and nothing else.'\n\n"
+                f"After both Tasks complete, include both agents' verbatim replies in your "
+                f"final response to me."
+            ),
+        ))
+
+        # 7. Wait up to 180s for the parent's reply (two Task subagent round-trips).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 180.0
+        reply: Envelope | None = None
+        while loop.time() < deadline:
+            msgs = broker.get_messages(recipient=LEAD_ID)
+            if msgs:
+                reply = msgs[-1]
+                break
+            await asyncio.sleep(0.5)
+
+        assert reply is not None, (
+            f"No reply from parent within 180s; "
+            f"md-sentinel: {sentinel_md!r}, yaml-sentinel: {sentinel_yaml!r}"
+        )
+        assert _response_contains_marker(reply, sentinel_md), (
+            f"Markdown-format agent sentinel {sentinel_md!r} not found in parent reply.\n"
+            f"This indicates the md-frontmatter agent was not dispatched correctly "
+            f"or its sentinel prompt was not relayed.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
+        assert _response_contains_marker(reply, sentinel_yaml), (
+            f"YAML-format agent sentinel {sentinel_yaml!r} not found in parent reply.\n"
+            f"This indicates the YAML-derived AgentDefinition was not dispatched "
+            f"correctly or its sentinel prompt was not relayed.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
