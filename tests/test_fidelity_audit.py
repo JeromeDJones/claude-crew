@@ -231,9 +231,9 @@ def test_live_gate_active() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fidelity test classes are added by subsequent tasks in the DAG:
+# Fidelity test classes — AT2 implemented below; others added by later tasks:
 #
-#   TestBundledPackDispatchFidelity  — bundled-pack-dispatch-test task  (AT2)
+#   TestBundledPackDispatchFidelity  — bundled-pack-dispatch-test task  (AT2)  ← HERE
 #   TestSkillDiscoveryFidelity       — skill-discovery-test task         (AT3)
 #   TestHookFiringFidelity           — hook-firing-test task             (AT4, AT5)
 #   TestPluginScopeFidelity          — plugin-scope-test task            (AT6)
@@ -241,3 +241,93 @@ def test_live_gate_active() -> None:
 #   TestAgentFormatYamlPolymorphism  — yaml-polymorphism-test task       (AT8)
 #   TestAuthFailureSurface           — auth-failure-surface-test task    (AT10)
 # ---------------------------------------------------------------------------
+
+
+class TestBundledPackDispatchFidelity:
+    """AT2: Bundled-pack subagent dispatched via Task executes its actual prompt.
+
+    A parent teammate is spawned with the bundled pack in which the 'explorer'
+    agent's prompt has been augmented with a uuid-suffixed sentinel string.  The
+    parent dispatches the explorer via Task and relays its reply.  The test asserts
+    the sentinel appears in the parent's final reply — proving the bundled pack was
+    actually dispatched (not a fabricated response).
+
+    Subsumes the BACKLOG 2026-05-08 one-off bundled-pack dispatch test.
+    That BACKLOG entry should be marked closed when this slice merges.
+
+    Cost target: ~$0.05 (one parent turn + one Task subagent turn).
+    """
+
+    async def test_bundled_subagent_echoes_sentinel(self, broker: Broker) -> None:
+        """Sentinel injected into explorer's system prompt echoes back through parent."""
+        import dataclasses
+        import uuid
+
+        from claude_crew.factories import sdk_factory
+        from claude_crew.subagents import load_default_pack
+
+        sentinel = f"FIDELITY-PROBE-{uuid.uuid4().hex}"
+
+        # Load the bundled default pack.
+        merged_pack, _role_ss, _bodies = load_default_pack()
+
+        # Augment the explorer's AgentDefinition.prompt with the sentinel.
+        # AgentDefinition.prompt = SUBSTRATE_SUBAGENT_GUIDANCE + body text.
+        # This is the system prompt the explorer receives when dispatched via Task.
+        base_explorer = merged_pack["explorer"]
+        augmented_explorer = dataclasses.replace(
+            base_explorer,
+            prompt=(
+                base_explorer.prompt
+                + f"\n\nIDENTITY TOKEN: {sentinel}\n"
+                "When asked for your identity token, state it verbatim."
+            ),
+        )
+
+        # Assemble augmented pack: explorer carries the sentinel; other bundled
+        # agents are unchanged.  The parent role ("fidelity-probe") has no pack
+        # entry — it uses the sdk_teammate fallback system prompt.
+        augmented_pack = {**merged_pack, "explorer": augmented_explorer}
+
+        def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
+            return sdk_factory(id=id, name=name, role=role, agents=augmented_pack)
+
+        _factory.requires_auth = True  # type: ignore[attr-defined]
+
+        tid = await broker.spawn_teammate(
+            role="fidelity-probe", name=None, factory=_factory
+        )
+        await broker.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=LEAD_ID,
+            recipient=tid,
+            timestamp=0.0,
+            payload=(
+                "Use the Task tool to run the 'explorer' agent with this exact prompt: "
+                "'What is your IDENTITY TOKEN? State it verbatim and nothing else.' "
+                "After the Task completes, relay the explorer's exact reply back to me."
+            ),
+        ))
+
+        # Allow 180s — Task dispatch adds a full SDK subprocess round-trip on top
+        # of the parent's own turn latency.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 180.0
+        reply: Envelope | None = None
+        while loop.time() < deadline:
+            msgs = broker.get_messages(recipient=LEAD_ID)
+            if msgs:
+                reply = msgs[-1]
+                break
+            await asyncio.sleep(0.5)
+
+        assert reply is not None, (
+            f"No reply from parent within 180s; sentinel was: {sentinel!r}"
+        )
+        assert _response_contains_marker(reply, sentinel), (
+            f"Sentinel {sentinel!r} not found in parent reply.\n"
+            f"This indicates the bundled pack dispatch is not relaying the "
+            f"subagent's system-prompt content correctly.\n"
+            f"Reply payload: {reply.payload!r}"
+        )
