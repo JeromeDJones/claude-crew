@@ -33,6 +33,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import ResultMessage
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
+from claude_crew.factories import sdk_factory
 from claude_crew.subagents._user_loader import _load_user_mcp_server_names
 
 # Feature-detect Python-callable hook support (AT4, AT5).
@@ -976,4 +977,115 @@ class TestAgentFormatYamlPolymorphism:
             f"This indicates the YAML-derived AgentDefinition was not dispatched "
             f"correctly or its sentinel prompt was not relayed.\n"
             f"Reply payload: {reply.payload!r}"
+        )
+
+
+class TestAuthFailureSurface:
+    """AT10: Auth-failure exception injected at SDK boundary propagates to lead within 90s.
+
+    This is a fault-injection test — not a real auth probe.  A controlled
+    ``RuntimeError("auth failure: simulated credential rejection")`` is injected
+    at ``ClaudeSDKClient.query``, the single chokepoint in
+    ``SdkTeammate._handle_one_turn`` (sdk_teammate.py:1101):
+
+        await client.query(prompt, session_id=session_id)
+
+    The test then asserts that the substrate surfaces this auth-shaped error
+    cleanly to the lead within the ``_wait_for_lead`` 90s budget, and that the
+    error envelope payload contains ``"auth"`` (case-insensitive substring).
+
+    Assertions (AT10 a/b/c):
+      (a) Error envelope arrives at LEAD_ID within 90s — bound is structural
+          via ``asyncio.wait_for``, not implicit.
+      (b) Envelope payload (JSON-serialised) contains ``"auth"`` (case-insensitive).
+          The injected message ``"auth failure: simulated credential rejection"``
+          propagates via ``_send_error_envelope`` into the ``"message"`` field of
+          the error payload.
+      (c) Test outcome is PASS — correct error-propagation behavior observed.
+
+    Cost: 0.0 — ``query`` is intercepted before any network I/O.  The SDK
+    subprocess starts (requires valid credentials under CLAUDE_CREW_LIVE_TESTS=1),
+    but the injected exception fires before any prompt reaches the model.
+
+    See AT10 spec notes: real-credential suppression was rejected because the SDK
+    discovers auth from multiple sources (env var, keychain, OAuth token, etc.);
+    injection at the chokepoint is deterministic and side-effect-free.
+    """
+
+    async def test_auth_failure_surfaces_within_timeout(
+        self,
+        broker: Broker,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Injected auth-failure RuntimeError propagates to lead within 90s (AT10).
+
+        Pass condition:
+          - Error envelope arrives at LEAD_ID within 90s.
+          - Envelope payload (JSON-dumped, lower-cased) contains ``"auth"``.
+        Fail condition:
+          - No envelope within 90s → substrate swallowed the error.
+          - Payload lacks ``"auth"`` → error message was stripped or replaced.
+        Cost: 0.0 — monkeypatch fires before any API round-trip.
+        """
+        # Monkeypatch ClaudeSDKClient.query — the single SDK call chokepoint.
+        # Must be async to match the awaited call site (sdk_teammate.py:1101).
+        async def _injected_query(self_client: Any, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("auth failure: simulated credential rejection")
+
+        monkeypatch.setattr(ClaudeSDKClient, "query", _injected_query)
+
+        # Spawn via broker directly — full factory control; avoids _spawn_and_ask
+        # (which uses asyncio.get_event_loop() and silently drops extra_tools).
+        def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
+            return sdk_factory(id=id, name=name, role=role)
+
+        _factory.requires_auth = True  # type: ignore[attr-defined]
+
+        tid = await broker.spawn_teammate(
+            role="fidelity-probe", name=None, factory=_factory
+        )
+        await broker.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender=LEAD_ID,
+            recipient=tid,
+            timestamp=0.0,
+            payload="Say hello.",
+        ))
+
+        # (a) Assert the exception surfaces within the 90s _wait_for_lead budget.
+        # asyncio.wait_for makes the bound explicit and structural (not implicit).
+        async def _poll_lead_inbox() -> Envelope:
+            """Poll until LEAD_ID has a message.  Caller wraps in wait_for."""
+            while True:
+                msgs = broker.get_messages(recipient=LEAD_ID)
+                if msgs:
+                    return msgs[-1]
+                await asyncio.sleep(0.1)
+
+        try:
+            reply = await asyncio.wait_for(_poll_lead_inbox(), timeout=90.0)
+        except asyncio.TimeoutError:
+            raise AssertionError(
+                "No reply from teammate within 90s after injected auth failure. "
+                "The substrate did not surface the error envelope within the "
+                "_wait_for_lead 90s budget — error was swallowed, not propagated."
+            )
+
+        # (b) Assert the error envelope payload contains "auth" (case-insensitive).
+        # _send_error_envelope (sdk_teammate.py) serialises the RuntimeError message
+        # into payload["message"]; json.dumps round-trips the full dict for checking.
+        payload = reply.payload
+        if isinstance(payload, dict):
+            payload_text = json.dumps(payload).lower()
+        else:
+            payload_text = str(payload).lower()
+
+        assert "auth" in payload_text, (
+            "Error envelope payload does not contain 'auth' (case-insensitive). "
+            "The injected RuntimeError('auth failure: simulated credential rejection') "
+            "was not relayed faithfully into the error envelope. "
+            "This indicates the substrate is suppressing or replacing auth-shaped "
+            "SDK errors rather than propagating them to the lead.\n"
+            f"Payload: {reply.payload!r}"
         )
