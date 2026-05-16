@@ -6,6 +6,26 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-16] Feature: fidelity-audit-suite (#27)
+
+### Wire `ResultMessage.usage` extraction into each live test body
+
+- **What**: The autouse cost fixture in `tests/test_fidelity_audit.py` reads a module-global `_test_cost_data` dict and writes one JSONL line per test. No live test body in the suite ever populates `_test_cost_data` with extracted `ResultMessage.usage` data — all live tests write `{input_tokens: 0, output_tokens: 0, cost_usd: 0.0, wall_seconds: <real>}`. The cost artifact is structurally valid (AT11 field-presence passes) but semantically empty.
+- **Where**: Each test class in `tests/test_fidelity_audit.py` that calls `_spawn_and_ask` or drives a live SDK turn — needs a `ResultMessage` break-point capture and storage into `_test_cost_data[request.node.nodeid]`. Auth-failure class stores zeros explicitly (no real SDK call).
+- **Why it matters**: The suite is meant to be the canonical per-run cost record for the fidelity moat. All-zeros defeats the point; real pricing is the only signal that tells a developer when claims are getting more expensive.
+- **Suggested action**: Wire `ResultMessage.usage` extraction at each live-turn break point across the 7 real SDK classes. Medium effort — behavior-changing and must be validated under `CLAUDE_CREW_LIVE_TESTS=1` with real API spend. Feature-review MEDIUM-02 (`feature.spec-satisfaction.cost-telemetry-zero`).
+
+### Extend `discover_dir` to discover `*.yaml`/`*.yml` agent files (AT8 yaml-loader gap)
+
+- **What**: `TestAgentFormatYamlPolymorphism` manually parses the `.yaml` agent file via `yaml.safe_load` and constructs `AgentDefinition` inline; `discover_dir` is only called for the markdown side (it globs `*.md`). AT8's claim — "both markdown-with-frontmatter AND pure-YAML pack entries load via `build_merged_pack`" — is over-stated: the test asserts dispatch-side fidelity, not loader-side fidelity. A regression breaking YAML support in the loader would not flip the test.
+- **Where**: `claude_crew/subagents/_loader.py::discover_dir` (glob pattern `*.md`); `tests/test_fidelity_audit.py::TestAgentFormatYamlPolymorphism`.
+- **Why it matters**: The fidelity suite's purpose is to fail loudly when a claim erodes. The AT8 gap silently exempts the loader from that contract.
+- **Suggested action**: Either (a) extend `discover_dir` to glob `*.yaml`/`*.yml` in addition to `*.md` and route AT8 through `build_merged_pack` end-to-end, or (b) amend the AT8 spec row to read "both formats dispatch once instantiated as `AgentDefinition`" and tighten the test docstring to match. Option (a) is the higher-value fix. Feature-review MEDIUM-01 (`feature.spec-satisfaction.yaml-loader-bypass`).
+
+_Note: five RepoReactor coordinator/skill improvements surfaced by this feature (state-op map setter, `.rr/` gitignore handling, prior-task slice-review digest, breakout-reviewer glob-overlap heuristic, spec-Assumption prior-art verification) are tracked in the **repo-reactor** repo's BACKLOG — they're plugin-level concerns, not claude-crew product concerns._
+
+---
+
 ## [2026-05-12] Feature candidate: fidelity-audit live-test suite
 
 ### CLI-fidelity moat needs asserted commitment, not incident response
@@ -83,7 +103,7 @@ This is vision-doc maintenance, not a feature. Tracking here so it doesn't drift
 
 ---
 
-## [2026-05-08] Live integration test for bundled-pack dispatch
+## [2026-05-08] Live integration test for bundled-pack dispatch — ARCHIVED: subsumed by #27 fidelity-audit-suite (2026-05-16)
 
 ### No regression signal for CLI-rule changes that silently drop user-submitted agents
 - **What**: The 2026-05-07 → 2026-05-08 dispatch-drop bug (CLI silently dropping `explorer`/`planner` from the available-agent list) had **zero** test signal. The full unit suite (978 tests at the time) passed throughout, while in production teammates were getting "Agent type not found" at runtime. The drop happens inside the `claude` CLI subprocess after the SDK initialize request — none of our unit-level fixtures exercise that boundary, so any future change to CLI agent-registration rules (or a regression that reintroduces a name match / `skills: all`) sails past CI undetected.
