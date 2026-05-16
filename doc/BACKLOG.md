@@ -22,40 +22,7 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 - **Why it matters**: The fidelity suite's purpose is to fail loudly when a claim erodes. The AT8 gap silently exempts the loader from that contract.
 - **Suggested action**: Either (a) extend `discover_dir` to glob `*.yaml`/`*.yml` in addition to `*.md` and route AT8 through `build_merged_pack` end-to-end, or (b) amend the AT8 spec row to read "both formats dispatch once instantiated as `AgentDefinition`" and tighten the test docstring to match. Option (a) is the higher-value fix. Feature-review MEDIUM-01 (`feature.spec-satisfaction.yaml-loader-bypass`).
 
-### Tighten `rr-breakout-reviewer` glob-overlap-risk heuristic for multi-file test splits
-
-- **What**: The fidelity-audit-suite breakout review did not fire its `glob-overlap-risk` check on a single combined test command (`uv run pytest tests/test_fidelity_audit.py tests/test_fidelity_audit_frontmatter.py`) split across parallel tasks 0 and 1. Each implementor wrote a cross-slice stub of the sibling file to pass the combined command locally; coordinator hand-cleaned stub residue before slice-review on both tasks.
-- **Where**: RepoReactor `rr-breakout-reviewer` heuristic / template guidance.
-- **Why it matters**: Cross-slice stub residue at build time is a predictable failure mode when a single test command spans ≥2 files split across parallel tasks. It adds coordinator cleanup burden and risks subtle test contamination if the coordinator doesn't catch it.
-- **Suggested action**: Update `rr-breakout-reviewer` to fire the `glob-overlap-risk` check when a single test command spans ≥2 files split into parallel tasks, naming the stub-residue risk explicitly in the breakout-review output so it surfaces before slice-review.
-
-### Coordinator: attach prior-task slice-review digest to later task implementor prompts
-
-- **What**: Slice-reviews across the 9 fidelity-audit-suite tasks repeatedly flagged identical patterns: `asyncio.get_event_loop()` deprecation (3 tasks), inline imports inside test bodies (5 tasks), missing `asyncio.wait_for` timeout (1 task). The recurrence stopped only after task 4, once the coordinator started naming the patterns in the prompt. Earlier task prompts carried no digest of prior slice-review findings.
-- **Where**: RepoReactor coordinator — task-N implementor dispatch prompt.
-- **Why it matters**: Recurring per-slice findings mean the coordinator pays re-review cycles for an omission that costs nothing to include. Each finding re-raised means a slice-review cycle and a debrief for an avoidable gap.
-- **Suggested action**: When dispatching task N implementor, attach a deduplicated digest of slice-review findings from tasks 0..N-1 (severity ≥ MEDIUM and any INFO tagged `slice.review-process.cross-slice-observation`) so recurring patterns stop being re-discovered task-by-task.
-
-### `state-op.sh`: add per-task implementor map setter
-
-- **What**: `state-op.sh` has no setter for per-task implementor entries despite the v4 schema treating `teammates.implementor` as a map keyed by task slug. Coordinator had to work around via direct `.rr/` file writes.
-- **Where**: RepoReactor `state-op.sh`.
-- **Why it matters**: The missing setter caused coordinator friction on every post-task-2 artifact write, requiring workarounds that bypass the intended state-op abstraction.
-- **Suggested action**: Add a `set-task-implementor <task-slug> <teammate-id>` sub-command to `state-op.sh` matching the v4 schema's `teammates.implementor` map shape. XS — a one-afternoon addition.
-
-### Coordinator: warn when `.rr/` is gitignored at worktree spawn time
-
-- **What**: `.rr/` is gitignored in the claude-crew repo. Per-task `git add -A` commits never staged `.rr/` artifacts; `worktree remove --force` then destroyed them. Coordinator routed all post-task-2 artifacts directly to the slice worktree's `.rr/reports/` as a workaround rather than per-task worktrees.
-- **Where**: RepoReactor coordinator worktree spawn / teardown logic.
-- **Why it matters**: Silently destroys per-task artifacts without warning; operators discover the loss only when `worktree remove` has already run. Coordinator workaround prevents the loss but requires manual routing that the process shouldn't need.
-- **Suggested action**: At worktree spawn time, detect `.rr/` in `.gitignore` and either (a) route artifact commits via `git add -f` for `.rr/` paths, or (b) emit a startup warning: "`.rr/` is gitignored — per-task worktree artifacts will be lost on `worktree remove --force`." Option (b) is the minimal safe fix.
-
-### Spec hygiene: planner verifies cited prior-art for Assumption coverage
-
-- **What**: The fidelity-audit-suite spec's Assumption "HOME-override pattern is verified by existing live tests" cited `tests/test_user_loader_live.py` as verification. That test loads user-level config but never authenticates an SDK subprocess turn. Three tests (`TestSkillDiscoveryFidelity`, `TestPluginScopeFidelity`, `TestAgentFormatYamlPolymorphism`) failed the first validation run for exactly this reason.
-- **Where**: SDD workflow — Phase 2 spec authoring (planner) and plan-review (plan-reviewer).
-- **Why it matters**: A spec Assumption that cites prior art without reading what that test actually exercises creates false confidence that obscures a real validation gap until the first live run.
-- **Suggested action**: When a spec Assumption cites an existing test as verification, the planner (or a plan-review check) reads the cited test to confirm it exercises the path being asserted — not just an adjacent path. Could be a named checklist item in the plan-reviewer's review protocol.
+_Note: five RepoReactor coordinator/skill improvements surfaced by this feature (state-op map setter, `.rr/` gitignore handling, prior-task slice-review digest, breakout-reviewer glob-overlap heuristic, spec-Assumption prior-art verification) are tracked in the **repo-reactor** repo's BACKLOG — they're plugin-level concerns, not claude-crew product concerns._
 
 ---
 

@@ -55,6 +55,10 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 - Tests that need SDK mode clear the env var explicitly or pass `factory=` to `make_server()`.
 - Tests that exercise the transcript sink set `CLAUDE_CREW_TRANSCRIPT_DIR` to a `tmp_path` and unset `CLAUDE_CREW_TRANSCRIPT_DISABLED`.
 - Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
+- **Imports at module top.** Inline imports inside test functions are a code smell — put new imports in the module's existing import block. The only exception is guarding optional dependencies (the `HookMatcher` `try/except ImportError` in `test_fidelity_audit.py` is the right pattern).
+- **`asyncio.get_running_loop()`, never `asyncio.get_event_loop()`** inside coroutines — the latter is deprecated since Python 3.10 and emits warnings.
+- **Bound unbounded async-iterator drains.** When iterating an open-ended async generator (e.g., `client.receive_response()`), wrap the drain in `asyncio.wait_for(..., timeout=T)` so a hung SDK subprocess surfaces as a clean timeout instead of a process-blocking hang. Set `T` from the spec's declared hang-detection budget (90s is the established `_wait_for_lead` default).
+- **HOME-monkeypatch needs SDK auth preservation.** Tests that `monkeypatch.setenv("HOME", tmp_path)` to plant skill/plugin/agent fixtures must copy `~/.claude/.credentials.json` and `~/.claude.json` into the tmp HOME before spawning an SDK subprocess; without those, the subprocess returns `"Not logged in · Please run /login"`. Capture the real HOME at module-import time (`expanduser("~")` post-monkeypatch resolves to the tmp dir). See `_preserve_sdk_auth` in `tests/test_fidelity_audit.py` for the canonical helper.
 
 ### SDK behavior — verified invariants
 
