@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,12 @@ pytestmark = pytest.mark.skipif(
 
 _ARTIFACTS_DIR = Path(__file__).resolve().parent / "_artifacts"
 _COST_ARTIFACT = _ARTIFACTS_DIR / "fidelity-audit-cost.jsonl"
+
+# Captured at module-import time, BEFORE any test's `monkeypatch.setenv("HOME", ...)`
+# can fire. ``_preserve_sdk_auth`` reads this — not ``Path.home()`` or
+# ``expanduser("~")`` — because both of those resolve via the live ``HOME`` env
+# var, which is already tmp_path inside the tests that need the helper.
+_REAL_HOME = Path(os.path.expanduser("~"))
 
 # ---------------------------------------------------------------------------
 # Per-test cost storage.
@@ -206,6 +213,33 @@ async def _spawn_and_ask(
 def _has_kg_server() -> bool:
     """True if the knowledge-graph MCP server is registered in ~/.claude.json."""
     return "knowledge-graph" in _load_user_mcp_server_names()
+
+
+def _preserve_sdk_auth(tmp_home: Path) -> None:
+    """Copy SDK auth artifacts from the real HOME into ``tmp_home``.
+
+    Tests that ``monkeypatch.setenv("HOME", tmp_path)`` to plant
+    skill/plugin/agent fixtures under ``tmp_home/.claude/`` otherwise strip the
+    spawned SDK subprocess of its credentials (``~/.claude/.credentials.json``)
+    and global config (``~/.claude.json``), producing ``"Not logged in · Please
+    run /login"`` instead of real model output.
+
+    Copies (not symlinks) so the tmp HOME is self-contained and removable.
+    Best-effort: missing source files are silently skipped — the test will
+    surface its own auth failure if the SDK still can't find credentials.
+    """
+    # Use _REAL_HOME captured at module-import time; ``Path.home()`` /
+    # ``expanduser("~")`` would resolve via the already-monkeypatched HOME
+    # and point at ``tmp_home`` itself (empty), causing the copies to silently
+    # skip and the SDK to come back "Not logged in".
+    src_creds = _REAL_HOME / ".claude" / ".credentials.json"
+    src_config = _REAL_HOME / ".claude.json"
+    dst_claude = tmp_home / ".claude"
+    dst_claude.mkdir(parents=True, exist_ok=True)
+    if src_creds.exists():
+        shutil.copy2(src_creds, dst_claude / ".credentials.json")
+    if src_config.exists():
+        shutil.copy2(src_config, tmp_home / ".claude.json")
 
 
 def _response_contains_marker(envelope: Envelope, marker: str) -> bool:
@@ -384,6 +418,9 @@ class TestSkillDiscoveryFidelity:
         # Point HOME at tmp_path — the SDK subprocess inherits this env var,
         # so ~/.claude/skills/ resolves to tmp_path/.claude/skills/.
         monkeypatch.setenv("HOME", str(tmp_path))
+        # Preserve SDK auth: without ~/.claude/.credentials.json the
+        # spawned subprocess returns "Not logged in · Please run /login".
+        _preserve_sdk_auth(tmp_path)
 
         # Plant the skill file with the unique sentinel.
         skill_dir = tmp_path / ".claude" / "skills" / skill_name
@@ -647,6 +684,8 @@ class TestPluginScopeFidelity:
         # Point HOME at tmp_path — the SDK subprocess inherits this env var so
         # ~/.claude/plugins/ resolves to tmp_path/.claude/plugins/.
         monkeypatch.setenv("HOME", str(tmp_path))
+        # Preserve SDK auth — see _preserve_sdk_auth docstring.
+        _preserve_sdk_auth(tmp_path)
 
         # 1. Create the plugin directory and agent file.
         #    installPath must live within ~/.claude/plugins/ to pass the H1
@@ -864,6 +903,8 @@ class TestAgentFormatYamlPolymorphism:
 
         # Isolate HOME so real ~/.claude/agents/ doesn't bleed in.
         monkeypatch.setenv("HOME", str(tmp_path))
+        # Preserve SDK auth — see _preserve_sdk_auth docstring.
+        _preserve_sdk_auth(tmp_path)
 
         agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
