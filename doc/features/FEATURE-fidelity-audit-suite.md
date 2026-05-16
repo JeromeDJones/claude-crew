@@ -76,8 +76,8 @@ turn — the cited prior art did not cover the auth path.
 
 | Severity | Tag | Note |
 |---|---|---|
-| Medium | `spec-satisfaction.yaml-loader-bypass` | `TestAgentFormatYamlPolymorphism` manually constructs the YAML-side `AgentDefinition`; `discover_dir` globs `*.md` only so the loader never sees the file. AT8 asserts dispatch, not loader YAML support. See BACKLOG [2026-05-16]. |
-| Medium | `spec-satisfaction.cost-telemetry-zero` | Autouse cost fixture skeleton present; no live test body populates `_test_cost_data` with `ResultMessage.usage`; artifact fields are present but all-zeros. AT11 literal field-presence passes. See BACKLOG [2026-05-16]. |
+| ~~Medium~~ **CLOSED 2026-05-16** | `spec-satisfaction.yaml-loader-bypass` | ~~`TestAgentFormatYamlPolymorphism` manually constructs the YAML-side `AgentDefinition`; `discover_dir` globs `*.md` only so the loader never sees the file. AT8 asserts dispatch, not loader YAML support.~~ Closed by `fidelity-audit-followups` slice: `discover_dir` now globs `*.yaml`/`*.yml` alongside `*.md`; `parse_yaml_pack_text` added in `_loader.py`; AT8 refactored to route end-to-end through `build_merged_pack` (no manual `yaml.safe_load`). Re-validated 10p+1xfail in 72s. |
+| ~~Medium~~ **CLOSED 2026-05-16** | `spec-satisfaction.cost-telemetry-zero` | ~~Autouse cost fixture skeleton present; no live test body populates `_test_cost_data` with `ResultMessage.usage`; artifact fields are present but all-zeros.~~ Closed by `fidelity-audit-followups` slice: `_record_sdk_cost(broker, tid, *, result_msg=None)` helper added; 5 broker-backed classes call it with `(broker, tid)`, 2 hook classes call it with `result_msg=...`. All 7 non-auth live classes now write real `ResultMessage.usage` data. Verified 7/9 non-zero cost lines per validation run. |
 | Info | `cracks.hook-test-bypasses-sdkteammate` | `TestHookFiringFidelity` uses `ClaudeSDKClient` directly because `SdkTeammate._run` hard-codes its own telemetry hooks. Asserts SDK hook mechanism fires; does not assert operator-injectable hooks on `SdkTeammate` (no such surface exists today). |
 
 ## BACKLOG Closed
