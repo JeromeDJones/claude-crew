@@ -21,10 +21,12 @@ intra-directory key-collision behavior.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 from pathlib import Path
 
+import yaml
 from claude_agent_sdk.types import AgentDefinition
 
 from claude_crew.subagents import load_default_pack, merge_packs
@@ -33,6 +35,7 @@ from claude_crew.subagents._loader import (
     PackLoadError,
     _split_frontmatter,
     parse_pack_text,
+    parse_yaml_pack_file,
 )
 
 __all__ = [
@@ -61,9 +64,14 @@ _ACCEPTED_FRONTMATTER_KEYS = frozenset(PackFrontmatter.__dataclass_fields__)
 def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, str]:
     """Parse a user/project agent file, warning on unsupported frontmatter keys.
 
-    Wraps ``parse_pack_text``. Diffs the frontmatter dict against
-    ``_ACCEPTED_FRONTMATTER_KEYS``; any extra key (typo'd ``descrption``,
-    forward-compat ``setting_sources``, etc.) is logged at WARNING via
+    Dispatches on file suffix:
+
+    - ``.md`` — wraps ``parse_pack_text`` (markdown with YAML frontmatter).
+    - ``.yaml`` / ``.yml`` — wraps ``parse_yaml_pack_file`` (pure-YAML doc
+      where the mapping IS the frontmatter and ``prompt_body`` is the body).
+
+    In both cases, diffs the frontmatter dict against
+    ``_ACCEPTED_FRONTMATTER_KEYS``; any extra key is logged at WARNING via
     the ``claude_crew.subagents.loader`` logger. The agent still loads
     using the supported fields.
 
@@ -79,6 +87,31 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, st
             invalid YAML, or is otherwise unparseable. Callers in
             this module catch and isolate per-file failures.
     """
+    if path.suffix in (".yaml", ".yml"):
+        # Pure-YAML agent file: the whole doc is the frontmatter mapping;
+        # prompt_body is the body field.
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            raise PackLoadError(f"cannot read pack file {path}: {exc}") from exc
+        try:
+            doc = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise PackLoadError(f"pack file {path} has invalid YAML: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise PackLoadError(f"pack file {path}: YAML document is not a mapping")
+        fm_dict = {k: v for k, v in doc.items() if k != "prompt_body"}
+        extras = sorted(set(fm_dict) - _ACCEPTED_FRONTMATTER_KEYS)
+        if extras:
+            logger.warning(
+                "agent file %s has unsupported frontmatter key(s) %s; dropping",
+                path,
+                extras,
+            )
+        key, agent, fm, body = parse_yaml_pack_file(path)
+        return key, agent, fm.settingSources, body
+
+    # Markdown path (default)
     try:
         text = path.read_text()
     except OSError as exc:
@@ -127,7 +160,15 @@ def discover_dir(
     if not directory.is_dir():
         return {}, {}, {}
 
-    candidates = sorted(p for p in directory.glob("*.md") if p.name != _README)
+    candidates = sorted(
+        p
+        for p in itertools.chain(
+            directory.glob("*.md"),
+            directory.glob("*.yaml"),
+            directory.glob("*.yml"),
+        )
+        if p.name != _README
+    )
     if len(candidates) > _MAX_FILES_PER_DIR:
         logger.warning(
             "agent directory %s contains %d files; taking first %d (alphabetical), skipping rest",

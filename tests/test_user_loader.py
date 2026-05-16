@@ -1263,3 +1263,239 @@ class TestShadowDropOptionalModelAndTools:
         assert not any(
             "drops collection field" in m for m in warn_msgs
         ), f"subset is operator intent, not a drop; got {warn_msgs}"
+
+
+# ============================================================================
+# YAML loader extension (AT-3, AT-4, AT-6, AT-7)
+# ============================================================================
+
+
+def _write_yaml_agent(
+    dir_: Path,
+    filename: str,
+    *,
+    description: str = "Test YAML agent.",
+    model: str = "haiku",
+    tools: list[str] | None = None,
+    body: str = "You are a YAML test agent.",
+) -> Path:
+    """Plant a valid pure-YAML agent file. Returns the path.
+
+    The file uses flow-scalar style for prompt_body so the value is stored
+    verbatim (no block-scalar trailing newline). This keeps assertion logic
+    simple and mirrors the spec's AT8 fixture shape.
+    """
+    dir_.mkdir(parents=True, exist_ok=True)
+    tools_yaml = ", ".join(tools or ["Read"])
+    content = "\n".join([
+        f"description: {description}",
+        f"model: {model}",
+        f"tools: [{tools_yaml}]",
+        f"prompt_body: {body}",
+        "",
+    ])
+    path = dir_ / filename
+    path.write_text(content)
+    return path
+
+
+class TestYamlDiscovery:
+    """AT-3: discover_dir finds .yaml and .yml agent files alongside .md."""
+
+    def test_discovers_yaml_yml_and_md_in_same_dir(self, tmp_path: Path) -> None:
+        """All three formats are returned when all three are present."""
+        agents_dir = tmp_path / "agents"
+        _write_agent(agents_dir, "alpha.md")
+        _write_yaml_agent(agents_dir, "beta.yaml")
+        _write_yaml_agent(agents_dir, "gamma.yml")
+
+        pack, _, _ = discover_dir(agents_dir)
+
+        assert "alpha" in pack
+        assert "beta" in pack
+        assert "gamma" in pack
+
+    def test_yaml_agent_description_and_body_loaded(self, tmp_path: Path) -> None:
+        """YAML agent file produces a correctly populated AgentDefinition."""
+        agents_dir = tmp_path / "agents"
+        _write_yaml_agent(
+            agents_dir,
+            "probe.yaml",
+            description="My YAML agent.",
+            body="Do YAML things.",
+        )
+
+        pack, _, bodies = discover_dir(agents_dir)
+
+        assert "probe" in pack
+        assert pack["probe"].description == "My YAML agent."
+        assert bodies["probe"] == "Do YAML things."
+
+    def test_both_yaml_extensions_discover(self, tmp_path: Path) -> None:
+        """Both .yaml and .yml are recognized."""
+        agents_dir = tmp_path / "agents"
+        _write_yaml_agent(agents_dir, "dot-yaml.yaml")
+        _write_yaml_agent(agents_dir, "dot-yml.yml")
+
+        pack, _, _ = discover_dir(agents_dir)
+
+        assert "dot-yaml" in pack
+        assert "dot-yml" in pack
+
+    def test_uppercase_yaml_extension_ignored(self, tmp_path: Path) -> None:
+        """Uppercase .YAML / .YML extensions are not discovered (mirrors .MD behavior)."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        # Plant an uppercase-extension file that should be ignored.
+        (agents_dir / "upper.YAML").write_text(
+            "description: uppercase\nmodel: haiku\ntools: [Read]\nprompt_body: body\n"
+        )
+        _write_yaml_agent(agents_dir, "lower.yaml")
+
+        pack, _, _ = discover_dir(agents_dir)
+
+        assert "lower" in pack
+        assert "upper" not in pack
+
+
+class TestYamlMalformed:
+    """AT-4: malformed YAML agent files warn and skip; siblings still load."""
+
+    def test_missing_description_warns_and_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A .yaml file missing 'description' emits WARN and is skipped."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        # Missing description: only model + tools + body
+        (agents_dir / "bad.yaml").write_text(
+            "model: haiku\ntools: [Read]\nprompt_body: Some body.\n"
+        )
+        _write_yaml_agent(agents_dir, "good.yaml")
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            pack, _, _ = discover_dir(agents_dir)
+
+        assert "good" in pack
+        assert "bad" not in pack
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "bad.yaml" in m or ("bad" in m and "could not be loaded" in m)
+            for m in warn_msgs
+        ), f"expected WARN about bad.yaml, got {warn_msgs}"
+
+    def test_missing_prompt_body_warns_and_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A .yaml file with description but no prompt_body is skipped."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "nobody.yaml").write_text(
+            "description: Missing body.\nmodel: haiku\ntools: [Read]\n"
+        )
+        _write_yaml_agent(agents_dir, "good.yaml")
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            pack, _, _ = discover_dir(agents_dir)
+
+        assert "good" in pack
+        assert "nobody" not in pack
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("nobody.yaml" in m or "nobody" in m for m in warn_msgs), (
+            f"expected WARN about nobody.yaml, got {warn_msgs}"
+        )
+
+    def test_invalid_yaml_syntax_warns_and_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A .yaml file with a YAML syntax error is warned and skipped."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        # Intentionally broken YAML indentation
+        (agents_dir / "broken.yaml").write_text(
+            "description: test\n  bad_indent: yes\n"
+        )
+        _write_yaml_agent(agents_dir, "sibling.yaml")
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            pack, _, _ = discover_dir(agents_dir)
+
+        assert "sibling" in pack
+        assert "broken" not in pack
+
+
+class TestMarkdownNonRegression:
+    """AT-6: load_default_pack() behavior is unchanged after the YAML extension."""
+
+    def test_bundled_pack_has_standard_keys(self) -> None:
+        """load_default_pack returns exactly the three standard role keys."""
+        from claude_crew.subagents import PACK_MEMBERS
+        pack, _, _ = load_default_pack()
+        assert set(pack.keys()) == set(PACK_MEMBERS)
+
+    def test_bundled_pack_agents_have_descriptions(self) -> None:
+        """Every bundled agent has a non-empty description."""
+        pack, _, _ = load_default_pack()
+        for key, agent in pack.items():
+            assert agent.description, f"agent {key!r} has empty description"
+
+    def test_bundled_pack_bodies_non_empty(self) -> None:
+        """Every bundled agent has non-empty raw body text."""
+        _, _, bodies = load_default_pack()
+        for key, body in bodies.items():
+            assert body.strip(), f"agent {key!r} has empty body"
+
+    def test_discover_dir_md_only_dir_unaffected(self, tmp_path: Path) -> None:
+        """discover_dir on a directory with only .md files returns same results as before."""
+        agents_dir = tmp_path / "agents"
+        _write_agent(agents_dir, "my-role.md", description="My role.", body="Do things.")
+
+        pack, _, bodies = discover_dir(agents_dir)
+
+        assert "my-role" in pack
+        assert pack["my-role"].description == "My role."
+        assert bodies["my-role"].strip() == "Do things."
+
+
+class TestYamlKebabCollision:
+    """AT-7: .md and .yaml with the same stem collide on the same kebab-key.
+    Alphabetically-later file (.yaml > .md) wins; a WARN names both paths.
+    """
+
+    def test_yaml_wins_over_md_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """probe.yaml alphabetically follows probe.md; YAML body wins."""
+        agents_dir = tmp_path / "agents"
+        _write_agent(agents_dir, "probe.md", body="Markdown body.")
+        _write_yaml_agent(agents_dir, "probe.yaml", body="YAML body.")
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            pack, _, bodies = discover_dir(agents_dir)
+
+        assert "probe" in pack
+        assert bodies["probe"] == "YAML body."
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "probe" in m and "probe.md" in m and "probe.yaml" in m
+            for m in warn_msgs
+        ), f"expected collision WARN naming both probe.md and probe.yaml, got {warn_msgs}"
+
+    def test_yml_wins_over_md_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """probe.yml alphabetically follows probe.md; YML body wins."""
+        agents_dir = tmp_path / "agents"
+        _write_agent(agents_dir, "probe.md", body="Markdown body.")
+        _write_yaml_agent(agents_dir, "probe.yml", body="YML body.")
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            pack, _, bodies = discover_dir(agents_dir)
+
+        assert "probe" in pack
+        assert bodies["probe"] == "YML body."
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "probe" in m and "probe.md" in m and "probe.yml" in m
+            for m in warn_msgs
+        ), f"expected collision WARN naming both probe.md and probe.yml, got {warn_msgs}"
