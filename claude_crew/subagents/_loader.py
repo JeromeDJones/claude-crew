@@ -165,28 +165,25 @@ def build_subagent_prompt(body: str) -> str:
 _VALID_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 
-def parse_yaml_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
-    """Parse a pure-YAML agent file into (key, AgentDefinition, frontmatter, body).
+def parse_yaml_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
+    """Parse pure-YAML pack text into (key, AgentDefinition, frontmatter, body).
 
-    The YAML document IS the frontmatter mapping. The body is read from a
-    well-known field — ``prompt_body`` (matches AT8 fixture shape). All other
-    fields share validation with ``_validate_frontmatter``.
+    Symmetric counterpart to ``parse_pack_text`` — takes already-read text so
+    callers (notably ``strict_parse``) can do file I/O once. The YAML document
+    IS the frontmatter mapping. The body is read from a well-known field —
+    ``prompt_body`` (matches AT8 fixture shape). All other fields share
+    validation with ``_validate_frontmatter``.
 
     Lowercase-only extensions (``.yaml``, ``.yml``); uppercase files are
     silently skipped by ``discover_dir``'s glob.
 
     Raises:
-        PackLoadError: if the file is missing, has invalid YAML, is not a
-            mapping, is missing ``prompt_body``, has an empty body, or fails
+        PackLoadError: if the YAML is invalid, not a mapping, is missing
+            ``prompt_body``, has an empty body, or fails
             ``_validate_frontmatter``. If the operator writes ``prompt:``
             instead of ``prompt_body:``, a clear error names the expected
             field.
     """
-    try:
-        text = path.read_text()
-    except OSError as exc:
-        raise PackLoadError(f"cannot read pack file {path}: {exc}") from exc
-
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as exc:

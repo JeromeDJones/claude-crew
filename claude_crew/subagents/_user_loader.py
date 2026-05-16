@@ -35,7 +35,7 @@ from claude_crew.subagents._loader import (
     PackLoadError,
     _split_frontmatter,
     parse_pack_text,
-    parse_yaml_pack_file,
+    parse_yaml_pack_text,
 )
 
 __all__ = [
@@ -67,7 +67,7 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, st
     Dispatches on file suffix:
 
     - ``.md`` — wraps ``parse_pack_text`` (markdown with YAML frontmatter).
-    - ``.yaml`` / ``.yml`` — wraps ``parse_yaml_pack_file`` (pure-YAML doc
+    - ``.yaml`` / ``.yml`` — wraps ``parse_yaml_pack_text`` (pure-YAML doc
       where the mapping IS the frontmatter and ``prompt_body`` is the body).
 
     In both cases, diffs the frontmatter dict against
@@ -89,7 +89,9 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, st
     """
     if path.suffix in (".yaml", ".yml"):
         # Pure-YAML agent file: the whole doc is the frontmatter mapping;
-        # prompt_body is the body field.
+        # prompt_body is the body field. Read the file once, then drive both
+        # the extras-key check and the parser off the same text — keeps this
+        # branch symmetric with the markdown branch below.
         try:
             text = path.read_text()
         except OSError as exc:
@@ -108,7 +110,7 @@ def strict_parse(path: Path) -> tuple[str, AgentDefinition, list[str] | None, st
                 path,
                 extras,
             )
-        key, agent, fm, body = parse_yaml_pack_file(path)
+        key, agent, fm, body = parse_yaml_pack_text(text, path)
         return key, agent, fm.settingSources, body
 
     # Markdown path (default)

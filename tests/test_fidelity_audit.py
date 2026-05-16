@@ -25,17 +25,22 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import ResultMessage
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.factories import sdk_factory
-from claude_crew.subagents._user_loader import _load_user_mcp_server_names
+from claude_crew.subagents._user_loader import (
+    _load_user_mcp_server_names,
+    build_merged_pack,
+)
 
 # Feature-detect Python-callable hook support (AT4, AT5).
 # HookMatcher was introduced alongside SDK hook callback support.
@@ -195,7 +200,7 @@ async def _spawn_and_ask(
         payload=prompt,
     ))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
         msgs = broker.get_messages(recipient=LEAD_ID)
@@ -265,25 +270,58 @@ def _response_contains_marker(envelope: Envelope, marker: str) -> bool:
     return marker in text
 
 
-def _record_sdk_cost(broker: Broker, tid: str) -> None:
-    """Populate _test_cost_data from the teammate's status_snapshot.
+def _record_sdk_cost(
+    broker: Broker | None = None,
+    tid: str | None = None,
+    *,
+    result_msg: ResultMessage | None = None,
+) -> None:
+    """Populate _test_cost_data with cumulative SDK token + cost data.
 
-    Call this from each live test body AFTER the reply envelope has arrived
-    and BEFORE the test function returns (so the autouse fixture sees the
-    populated dict on the post-yield branch).
+    Two call shapes — both end up writing the same three keys into
+    ``_test_cost_data`` with identical semantics (cache-inclusive
+    ``input_tokens``, per sdk_teammate.py D-3):
 
-    Reads ``total_input_tokens``, ``total_output_tokens``, ``total_cost_usd``
-    from ``broker.get_teammate_status(tid)``, which calls
-    ``SdkTeammate.status_snapshot()`` internally for alive teammates (F14 in
-    sdk_teammate.py). Fields are session-cumulative; because each test spawns
-    a fresh teammate, session totals equal the turn delta.
+    1. **Broker-backed** — ``_record_sdk_cost(broker, tid)``: reads
+       ``total_input_tokens`` / ``total_output_tokens`` / ``total_cost_usd``
+       from ``broker.get_teammate_status(tid)`` (which calls
+       ``SdkTeammate.status_snapshot()`` internally for alive teammates,
+       F14). Use for tests that spawn an ``SdkTeammate``.
 
-    Skips silently if the teammate is tombstoned or unknown — the test will
-    surface the real failure on its own.  The cost line for that test falls
-    back to zeros, which is acceptable telemetry.
+    2. **ResultMessage-backed** — ``_record_sdk_cost(result_msg=msg)``:
+       extracts the equivalent fields from a single ``ResultMessage`` for
+       tests that use ``ClaudeSDKClient`` directly without going through
+       the broker (``TestHookFiringFidelity``). ``input_tokens`` rolls in
+       ``cache_read_input_tokens`` + ``cache_creation_input_tokens`` to
+       match the snapshot path (which already includes those, see
+       sdk_teammate.py:206-207 and the D-3 invariant).
+
+    Call AFTER the reply has arrived and BEFORE the test function returns
+    (so the autouse fixture sees the populated dict on the post-yield
+    branch).
+
+    Skips silently if the teammate is tombstoned/unknown or the message
+    has no ``usage`` field — the test will surface the real failure on
+    its own; the cost line for that test falls back to zeros, which is
+    acceptable telemetry.
     """
     global _test_cost_data  # noqa: PLW0603
     try:
+        if result_msg is not None:
+            usage = getattr(result_msg, "usage", None) or {}
+            if isinstance(usage, dict):
+                _test_cost_data["input_tokens"] = int(
+                    usage.get("input_tokens", 0)
+                    + usage.get("cache_read_input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0)
+                )
+                _test_cost_data["output_tokens"] = int(usage.get("output_tokens", 0))
+            cost = getattr(result_msg, "total_cost_usd", None)
+            if cost is not None:
+                _test_cost_data["cost_usd"] = float(cost)
+            return
+        if broker is None or tid is None:
+            return
         status = broker.get_teammate_status(tid)
         if "error" in status or not status.get("alive", False):
             return
@@ -349,7 +387,7 @@ class TestBundledPackDispatchFidelity:
         from claude_crew.factories import sdk_factory
         from claude_crew.subagents import load_default_pack
 
-        sentinel = f"FIDELITY-PROBE-{uuid.uuid4().hex}"
+        sentinel = f"FIDELITY-PROBE-{uuid.uuid4().hex[:12]}"
 
         # Load the bundled default pack.
         merged_pack, _role_ss, _bodies = load_default_pack()
@@ -395,7 +433,7 @@ class TestBundledPackDispatchFidelity:
 
         # Allow 180s — Task dispatch adds a full SDK subprocess round-trip on top
         # of the parent's own turn latency.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + 180.0
         reply: Envelope | None = None
         while loop.time() < deadline:
@@ -498,7 +536,7 @@ class TestSkillDiscoveryFidelity:
             ),
         ))
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + 120.0
         reply: Envelope | None = None
         while loop.time() < deadline:
@@ -597,19 +635,7 @@ class TestHookFiringFidelity:
                     _hook_result_msg = msg
                     break
 
-        # Extract SDK cost into _test_cost_data for the autouse cost fixture.
-        if _hook_result_msg is not None:
-            _usage = getattr(_hook_result_msg, "usage", None) or {}
-            if isinstance(_usage, dict):
-                _test_cost_data["input_tokens"] = int(
-                    _usage.get("input_tokens", 0)
-                    + _usage.get("cache_read_input_tokens", 0)
-                    + _usage.get("cache_creation_input_tokens", 0)
-                )
-                _test_cost_data["output_tokens"] = int(_usage.get("output_tokens", 0))
-            _cost = getattr(_hook_result_msg, "total_cost_usd", None)
-            if _cost is not None:
-                _test_cost_data["cost_usd"] = float(_cost)
+        _record_sdk_cost(result_msg=_hook_result_msg)
 
         assert sentinel_file.exists(), (
             "PreToolUse hook did not write the sentinel file. "
@@ -671,19 +697,7 @@ class TestHookFiringFidelity:
                     _env_result_msg = msg
                     break
 
-        # Extract SDK cost into _test_cost_data for the autouse cost fixture.
-        if _env_result_msg is not None:
-            _usage = getattr(_env_result_msg, "usage", None) or {}
-            if isinstance(_usage, dict):
-                _test_cost_data["input_tokens"] = int(
-                    _usage.get("input_tokens", 0)
-                    + _usage.get("cache_read_input_tokens", 0)
-                    + _usage.get("cache_creation_input_tokens", 0)
-                )
-                _test_cost_data["output_tokens"] = int(_usage.get("output_tokens", 0))
-            _cost = getattr(_env_result_msg, "total_cost_usd", None)
-            if _cost is not None:
-                _test_cost_data["cost_usd"] = float(_cost)
+        _record_sdk_cost(result_msg=_env_result_msg)
 
         assert record_file.exists(), (
             "PreToolUse hook did not write the env capture file. "
@@ -949,15 +963,8 @@ class TestAgentFormatYamlPolymorphism:
         Pass condition: both sentinel substrings appear in the parent's reply.
         Fail condition: either sentinel absent → that agent format was not dispatched correctly.
         """
-        import uuid
-
-        import yaml
-
-        from claude_crew.factories import sdk_factory
-        from claude_crew.subagents._user_loader import build_merged_pack
-
-        sentinel_md = f"FIDELITY-MD-{uuid.uuid4().hex}"
-        sentinel_yaml = f"FIDELITY-YAML-{uuid.uuid4().hex}"
+        sentinel_md = f"FIDELITY-MD-{uuid.uuid4().hex[:12]}"
+        sentinel_yaml = f"FIDELITY-YAML-{uuid.uuid4().hex[:12]}"
         # Agent names must match [a-z0-9][a-z0-9-]* (Claude Code agent name spec).
         # uuid.uuid4().hex produces lowercase hex — safe for the pattern.
         agent_md_name = f"fidelity-md-{uuid.uuid4().hex[:8]}"
@@ -988,7 +995,7 @@ class TestAgentFormatYamlPolymorphism:
 
         # 2. Write the pure-YAML agent file.
         #    The prompt_body key stores the role-specific instructions;
-        #    discover_dir → parse_yaml_pack_file handles the rest.
+        #    discover_dir → parse_yaml_pack_text handles the rest.
         yaml_body = (
             f"You are a fidelity YAML-format probe agent.\n"
             f"Your identity token is: {sentinel_yaml}\n"
@@ -1070,7 +1077,7 @@ class TestAgentFormatYamlPolymorphism:
         assert _response_contains_marker(reply, sentinel_yaml), (
             f"YAML-format agent sentinel {sentinel_yaml!r} not found in parent reply.\n"
             f"This indicates the YAML agent was not dispatched correctly "
-            f"(check discover_dir glob and parse_yaml_pack_file) or its sentinel "
+            f"(check discover_dir glob and parse_yaml_pack_text) or its sentinel "
             f"prompt was not relayed.\n"
             f"Reply payload: {reply.payload!r}"
         )
