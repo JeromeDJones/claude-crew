@@ -1,23 +1,23 @@
 ## Task
 
-Review task `yaml-loader-extension` (index 0) of the breakout for slice
+Review task `live-test-cost-and-yaml-dispatch` (index 1) of the breakout for slice
 adherence, non-regression, and code-quality smoke. Your final-turn text is
 the report. The coordinator persists it to:
-`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/reports/fidelity-audit-followups-task-yaml-loader-extension-slice-review-0.md`
+`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/reports/fidelity-audit-followups-task-live-test-cost-and-yaml-dispatch-slice-review-0.md`
 
 Use the `review-slice` skill for the verification checklist, severity tiers,
 tag vocabulary, and verdict rule.
 
 ## Task Under Review
 
-Task name: `yaml-loader-extension`
-Task index: `0`
+Task name: `live-test-cost-and-yaml-dispatch`
+Task index: `1`
 
-Spec: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/yaml-loader-extension/.rr/specs/fidelity-audit-followups.md`
-Breakout: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/yaml-loader-extension/.rr/breakouts/fidelity-audit-followups.md`
-Build report: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/reports/fidelity-audit-followups-task-yaml-loader-extension-build-0.md`
+Spec: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/live-test-cost-and-yaml-dispatch/.rr/specs/fidelity-audit-followups.md`
+Breakout: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/live-test-cost-and-yaml-dispatch/.rr/breakouts/fidelity-audit-followups.md`
+Build report: `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/reports/fidelity-audit-followups-task-live-test-cost-and-yaml-dispatch-build-0.md`
 
-Find the breakout entry whose `name` is `yaml-loader-extension`. Its `acceptanceTests`
+Find the breakout entry whose `name` is `live-test-cost-and-yaml-dispatch`. Its `acceptanceTests`
 list (1-based indices into the spec's `## Acceptance Tests`) names which
 acceptance tests this task owns — evaluate adherence against those, not the
 whole spec.
@@ -38,7 +38,7 @@ that recurred — unresolved issues carry forward and count against PASS.
 
 ## Working Directory
 
-`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/yaml-loader-extension`
+`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr-worktrees/live-test-cost-and-yaml-dispatch`
 
 Change to this directory before all file operations.
 
