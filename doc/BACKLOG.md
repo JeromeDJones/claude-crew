@@ -8,14 +8,14 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ## [2026-05-16] Feature: fidelity-audit-suite (#27)
 
-### Wire `ResultMessage.usage` extraction into each live test body
+### Wire `ResultMessage.usage` extraction into each live test body — CLOSED by fidelity-audit-followups (2026-05-16)
 
 - **What**: The autouse cost fixture in `tests/test_fidelity_audit.py` reads a module-global `_test_cost_data` dict and writes one JSONL line per test. No live test body in the suite ever populates `_test_cost_data` with extracted `ResultMessage.usage` data — all live tests write `{input_tokens: 0, output_tokens: 0, cost_usd: 0.0, wall_seconds: <real>}`. The cost artifact is structurally valid (AT11 field-presence passes) but semantically empty.
 - **Where**: Each test class in `tests/test_fidelity_audit.py` that calls `_spawn_and_ask` or drives a live SDK turn — needs a `ResultMessage` break-point capture and storage into `_test_cost_data[request.node.nodeid]`. Auth-failure class stores zeros explicitly (no real SDK call).
 - **Why it matters**: The suite is meant to be the canonical per-run cost record for the fidelity moat. All-zeros defeats the point; real pricing is the only signal that tells a developer when claims are getting more expensive.
 - **Suggested action**: Wire `ResultMessage.usage` extraction at each live-turn break point across the 7 real SDK classes. Medium effort — behavior-changing and must be validated under `CLAUDE_CREW_LIVE_TESTS=1` with real API spend. Feature-review MEDIUM-02 (`feature.spec-satisfaction.cost-telemetry-zero`).
 
-### Extend `discover_dir` to discover `*.yaml`/`*.yml` agent files (AT8 yaml-loader gap)
+### Extend `discover_dir` to discover `*.yaml`/`*.yml` agent files (AT8 yaml-loader gap) — CLOSED by fidelity-audit-followups (2026-05-16)
 
 - **What**: `TestAgentFormatYamlPolymorphism` manually parses the `.yaml` agent file via `yaml.safe_load` and constructs `AgentDefinition` inline; `discover_dir` is only called for the markdown side (it globs `*.md`). AT8's claim — "both markdown-with-frontmatter AND pure-YAML pack entries load via `build_merged_pack`" — is over-stated: the test asserts dispatch-side fidelity, not loader-side fidelity. A regression breaking YAML support in the loader would not flip the test.
 - **Where**: `claude_crew/subagents/_loader.py::discover_dir` (glob pattern `*.md`); `tests/test_fidelity_audit.py::TestAgentFormatYamlPolymorphism`.

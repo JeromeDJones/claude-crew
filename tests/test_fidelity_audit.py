@@ -25,17 +25,22 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import ResultMessage
 from claude_crew.broker import LEAD_ID, Broker
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.factories import sdk_factory
-from claude_crew.subagents._user_loader import _load_user_mcp_server_names
+from claude_crew.subagents._user_loader import (
+    _load_user_mcp_server_names,
+    build_merged_pack,
+)
 
 # Feature-detect Python-callable hook support (AT4, AT5).
 # HookMatcher was introduced alongside SDK hook callback support.
@@ -195,11 +200,12 @@ async def _spawn_and_ask(
         payload=prompt,
     ))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
         msgs = broker.get_messages(recipient=LEAD_ID)
         if msgs:
+            _record_sdk_cost(broker, tid)
             return msgs[-1]
         await asyncio.sleep(0.5)
 
@@ -264,6 +270,68 @@ def _response_contains_marker(envelope: Envelope, marker: str) -> bool:
     return marker in text
 
 
+def _record_sdk_cost(
+    broker: Broker | None = None,
+    tid: str | None = None,
+    *,
+    result_msg: ResultMessage | None = None,
+) -> None:
+    """Populate _test_cost_data with cumulative SDK token + cost data.
+
+    Two call shapes — both end up writing the same three keys into
+    ``_test_cost_data`` with identical semantics (cache-inclusive
+    ``input_tokens``, per sdk_teammate.py D-3):
+
+    1. **Broker-backed** — ``_record_sdk_cost(broker, tid)``: reads
+       ``total_input_tokens`` / ``total_output_tokens`` / ``total_cost_usd``
+       from ``broker.get_teammate_status(tid)`` (which calls
+       ``SdkTeammate.status_snapshot()`` internally for alive teammates,
+       F14). Use for tests that spawn an ``SdkTeammate``.
+
+    2. **ResultMessage-backed** — ``_record_sdk_cost(result_msg=msg)``:
+       extracts the equivalent fields from a single ``ResultMessage`` for
+       tests that use ``ClaudeSDKClient`` directly without going through
+       the broker (``TestHookFiringFidelity``). ``input_tokens`` rolls in
+       ``cache_read_input_tokens`` + ``cache_creation_input_tokens`` to
+       match the snapshot path (which already includes those, see
+       sdk_teammate.py:206-207 and the D-3 invariant).
+
+    Call AFTER the reply has arrived and BEFORE the test function returns
+    (so the autouse fixture sees the populated dict on the post-yield
+    branch).
+
+    Skips silently if the teammate is tombstoned/unknown or the message
+    has no ``usage`` field — the test will surface the real failure on
+    its own; the cost line for that test falls back to zeros, which is
+    acceptable telemetry.
+    """
+    global _test_cost_data  # noqa: PLW0603
+    try:
+        if result_msg is not None:
+            usage = getattr(result_msg, "usage", None) or {}
+            if isinstance(usage, dict):
+                _test_cost_data["input_tokens"] = int(
+                    usage.get("input_tokens", 0)
+                    + usage.get("cache_read_input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0)
+                )
+                _test_cost_data["output_tokens"] = int(usage.get("output_tokens", 0))
+            cost = getattr(result_msg, "total_cost_usd", None)
+            if cost is not None:
+                _test_cost_data["cost_usd"] = float(cost)
+            return
+        if broker is None or tid is None:
+            return
+        status = broker.get_teammate_status(tid)
+        if "error" in status or not status.get("alive", False):
+            return
+        _test_cost_data["input_tokens"] = int(status.get("total_input_tokens", 0))
+        _test_cost_data["output_tokens"] = int(status.get("total_output_tokens", 0))
+        _test_cost_data["cost_usd"] = float(status.get("total_cost_usd", 0.0))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Gate probe (AT1)
 # ---------------------------------------------------------------------------
@@ -319,7 +387,7 @@ class TestBundledPackDispatchFidelity:
         from claude_crew.factories import sdk_factory
         from claude_crew.subagents import load_default_pack
 
-        sentinel = f"FIDELITY-PROBE-{uuid.uuid4().hex}"
+        sentinel = f"FIDELITY-PROBE-{uuid.uuid4().hex[:12]}"
 
         # Load the bundled default pack.
         merged_pack, _role_ss, _bodies = load_default_pack()
@@ -365,7 +433,7 @@ class TestBundledPackDispatchFidelity:
 
         # Allow 180s — Task dispatch adds a full SDK subprocess round-trip on top
         # of the parent's own turn latency.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + 180.0
         reply: Envelope | None = None
         while loop.time() < deadline:
@@ -378,6 +446,7 @@ class TestBundledPackDispatchFidelity:
         assert reply is not None, (
             f"No reply from parent within 180s; sentinel was: {sentinel!r}"
         )
+        _record_sdk_cost(broker, tid)
         assert _response_contains_marker(reply, sentinel), (
             f"Sentinel {sentinel!r} not found in parent reply.\n"
             f"This indicates the bundled pack dispatch is not relaying the "
@@ -467,7 +536,7 @@ class TestSkillDiscoveryFidelity:
             ),
         ))
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + 120.0
         reply: Envelope | None = None
         while loop.time() < deadline:
@@ -480,6 +549,7 @@ class TestSkillDiscoveryFidelity:
         assert reply is not None, (
             f"No reply within 120s; sentinel was: {sentinel!r}"
         )
+        _record_sdk_cost(broker, tid)
         assert _response_contains_marker(reply, sentinel), (
             f"Sentinel {sentinel!r} not found in teammate reply.\n"
             f"This indicates the skill under tmp ~/.claude/skills/{skill_name}/ "
@@ -557,11 +627,15 @@ class TestHookFiringFidelity:
             },
         )
 
+        _hook_result_msg: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query("Run: `echo hook_probe_fired` using the Bash tool.")
             async for msg in client.receive_response():
                 if isinstance(msg, ResultMessage):
+                    _hook_result_msg = msg
                     break
+
+        _record_sdk_cost(result_msg=_hook_result_msg)
 
         assert sentinel_file.exists(), (
             "PreToolUse hook did not write the sentinel file. "
@@ -615,11 +689,15 @@ class TestHookFiringFidelity:
             },
         )
 
+        _env_result_msg: ResultMessage | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query("Run: `echo env_probe` using the Bash tool.")
             async for msg in client.receive_response():
                 if isinstance(msg, ResultMessage):
+                    _env_result_msg = msg
                     break
+
+        _record_sdk_cost(result_msg=_env_result_msg)
 
         assert record_file.exists(), (
             "PreToolUse hook did not write the env capture file. "
@@ -775,6 +853,7 @@ class TestPluginScopeFidelity:
             f"No reply from parent within 180s; sentinel was: {sentinel!r}; "
             f"plugin agent key: {namespaced_key!r}"
         )
+        _record_sdk_cost(broker, tid)
         assert _response_contains_marker(reply, sentinel), (
             f"Sentinel {sentinel!r} not found in parent reply.\n"
             f"This indicates the plugin-provided agent '{namespaced_key}' was "
@@ -860,14 +939,13 @@ class TestAgentFormatYamlPolymorphism:
     """AT8: Both markdown-frontmatter and pure-YAML pack entries dispatch correctly.
 
     Writes one .md (markdown-with-frontmatter) agent file and one .yaml (pure-YAML)
-    agent file into a tmp agents dir. The .md file is loaded via build_merged_pack;
-    the .yaml file is parsed via yaml.safe_load and an AgentDefinition is constructed
-    from it (discover_dir currently auto-discovers only *.md files — manual parse is
-    required for the YAML format, which is noted in the build report).
+    agent file into a tmp agents dir. Both are discovered and loaded end-to-end via
+    ``build_merged_pack`` (``discover_dir`` now globs ``*.md``, ``*.yaml``, and
+    ``*.yml`` — see ``yaml-loader-extension`` task). No manual ``yaml.safe_load``
+    or inline ``AgentDefinition`` construction is required.
 
-    Both AgentDefinitions are merged into a single pack, a parent teammate is spawned,
-    and in a single turn the parent dispatches both subagents via Task and surfaces
-    both sentinels in its reply.
+    A parent teammate is spawned with the merged pack, and in a single turn the
+    parent dispatches both subagents via Task and surfaces both sentinels in its reply.
 
     Asserts both sentinel substrings appear in the parent's response.
 
@@ -880,22 +958,13 @@ class TestAgentFormatYamlPolymorphism:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """md-frontmatter and YAML-derived agents both dispatch and surface sentinels (AT8).
+        """md-frontmatter and pure-YAML agents both load via build_merged_pack and dispatch (AT8).
 
         Pass condition: both sentinel substrings appear in the parent's reply.
         Fail condition: either sentinel absent → that agent format was not dispatched correctly.
         """
-        import uuid
-
-        import yaml
-
-        from claude_agent_sdk.types import AgentDefinition
-        from claude_crew.factories import sdk_factory
-        from claude_crew.subagents._loader import build_subagent_prompt
-        from claude_crew.subagents._user_loader import build_merged_pack
-
-        sentinel_md = f"FIDELITY-MD-{uuid.uuid4().hex}"
-        sentinel_yaml = f"FIDELITY-YAML-{uuid.uuid4().hex}"
+        sentinel_md = f"FIDELITY-MD-{uuid.uuid4().hex[:12]}"
+        sentinel_yaml = f"FIDELITY-YAML-{uuid.uuid4().hex[:12]}"
         # Agent names must match [a-z0-9][a-z0-9-]* (Claude Code agent name spec).
         # uuid.uuid4().hex produces lowercase hex — safe for the pattern.
         agent_md_name = f"fidelity-md-{uuid.uuid4().hex[:8]}"
@@ -925,8 +994,8 @@ class TestAgentFormatYamlPolymorphism:
         )
 
         # 2. Write the pure-YAML agent file.
-        #    The prompt_body key stores the role-specific instructions; the
-        #    AgentDefinition prompt is built via build_subagent_prompt below.
+        #    The prompt_body key stores the role-specific instructions;
+        #    discover_dir → parse_yaml_pack_text handles the rest.
         yaml_body = (
             f"You are a fidelity YAML-format probe agent.\n"
             f"Your identity token is: {sentinel_yaml}\n"
@@ -941,8 +1010,8 @@ class TestAgentFormatYamlPolymorphism:
         yaml_file = agents_dir / f"{agent_yaml_name}.yaml"
         yaml_file.write_text(yaml.dump(yaml_data, default_flow_style=False))
 
-        # 3. Load the merged pack — discover_dir discovers *.md files only, so
-        #    agent_md_name loads; agent_yaml_name is intentionally absent here.
+        # 3. Load the merged pack — discover_dir globs *.md, *.yaml, and *.yml,
+        #    so both agents are present in merged_pack without any manual parsing.
         merged_pack, _role_ss, _bodies = build_merged_pack(
             home_dir=tmp_path,
             project_root=tmp_path / "nonexistent-project",
@@ -951,24 +1020,15 @@ class TestAgentFormatYamlPolymorphism:
             f"Markdown agent {agent_md_name!r} not found in merged pack after loading. "
             f"Available keys: {sorted(merged_pack.keys())}"
         )
-
-        # 4. Parse the YAML file directly and construct the AgentDefinition.
-        #    Use build_subagent_prompt so the substrate framing leads the prompt,
-        #    matching the shape produced by parse_pack_text for .md files.
-        loaded_yaml = yaml.safe_load(yaml_file.read_text())
-        yaml_agent = AgentDefinition(
-            description=loaded_yaml["description"],
-            prompt=build_subagent_prompt(loaded_yaml["prompt_body"]),
-            model=loaded_yaml.get("model"),
-            tools=loaded_yaml.get("tools", []),
+        assert agent_yaml_name in merged_pack, (
+            f"YAML agent {agent_yaml_name!r} not found in merged pack after loading. "
+            f"discover_dir must glob *.yaml — verify yaml-loader-extension landed. "
+            f"Available keys: {sorted(merged_pack.keys())}"
         )
 
-        # 5. Merge both agents into a single pack for dispatch.
-        full_pack = {**merged_pack, agent_yaml_name: yaml_agent}
-
-        # 6. Spawn parent teammate with the combined pack.
+        # 4. Spawn parent teammate with the merged pack directly (both formats loaded).
         def _factory(id: str, name: str | None, role: str, **_kw: Any) -> Any:
-            return sdk_factory(id=id, name=name, role=role, agents=full_pack)
+            return sdk_factory(id=id, name=name, role=role, agents=merged_pack)
 
         _factory.requires_auth = True  # type: ignore[attr-defined]
 
@@ -992,7 +1052,7 @@ class TestAgentFormatYamlPolymorphism:
             ),
         ))
 
-        # 7. Wait up to 180s for the parent's reply (two Task subagent round-trips).
+        # 5. Wait up to 180s for the parent's reply (two Task subagent round-trips).
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 180.0
         reply: Envelope | None = None
@@ -1007,6 +1067,7 @@ class TestAgentFormatYamlPolymorphism:
             f"No reply from parent within 180s; "
             f"md-sentinel: {sentinel_md!r}, yaml-sentinel: {sentinel_yaml!r}"
         )
+        _record_sdk_cost(broker, tid)
         assert _response_contains_marker(reply, sentinel_md), (
             f"Markdown-format agent sentinel {sentinel_md!r} not found in parent reply.\n"
             f"This indicates the md-frontmatter agent was not dispatched correctly "
@@ -1015,8 +1076,9 @@ class TestAgentFormatYamlPolymorphism:
         )
         assert _response_contains_marker(reply, sentinel_yaml), (
             f"YAML-format agent sentinel {sentinel_yaml!r} not found in parent reply.\n"
-            f"This indicates the YAML-derived AgentDefinition was not dispatched "
-            f"correctly or its sentinel prompt was not relayed.\n"
+            f"This indicates the YAML agent was not dispatched correctly "
+            f"(check discover_dir glob and parse_yaml_pack_text) or its sentinel "
+            f"prompt was not relayed.\n"
             f"Reply payload: {reply.payload!r}"
         )
 

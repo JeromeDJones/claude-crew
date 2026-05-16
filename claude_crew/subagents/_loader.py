@@ -165,6 +165,86 @@ def build_subagent_prompt(body: str) -> str:
 _VALID_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 
+def parse_yaml_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
+    """Parse pure-YAML pack text into (key, AgentDefinition, frontmatter, body).
+
+    Symmetric counterpart to ``parse_pack_text`` — takes already-read text so
+    callers (notably ``strict_parse``) can do file I/O once. The YAML document
+    IS the frontmatter mapping. The body is read from a well-known field —
+    ``prompt_body`` (matches AT8 fixture shape). All other fields share
+    validation with ``_validate_frontmatter``.
+
+    Lowercase-only extensions (``.yaml``, ``.yml``); uppercase files are
+    silently skipped by ``discover_dir``'s glob.
+
+    Raises:
+        PackLoadError: if the YAML is invalid, not a mapping, is missing
+            ``prompt_body``, has an empty body, or fails
+            ``_validate_frontmatter``. If the operator writes ``prompt:``
+            instead of ``prompt_body:``, a clear error names the expected
+            field.
+    """
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise PackLoadError(f"pack file {path} has invalid YAML: {exc}") from exc
+
+    if not isinstance(doc, dict):
+        raise PackLoadError(f"pack file {path}: YAML document is not a mapping")
+
+    body = doc.get("prompt_body")
+    if body is None:
+        raise PackLoadError(
+            f"pack file {path}: missing required field 'prompt_body' "
+            f"(YAML agent files supply the body text via 'prompt_body:', not 'prompt:')"
+        )
+    if not isinstance(body, str) or not body.strip():
+        raise PackLoadError(f"pack file {path} has empty body")
+
+    # Build frontmatter dict without prompt_body (it is the body, not a field)
+    fm_dict = {k: v for k, v in doc.items() if k != "prompt_body"}
+    fm = _validate_frontmatter(fm_dict, path)
+
+    stem_key = path.stem.replace("_", "-")
+    key = fm.name if fm.name is not None else stem_key
+
+    if fm.name is not None and fm.name != stem_key:
+        logger.info(
+            "pack %s declares name '%s' (file stem: '%s') — canonical key is '%s'",
+            path, fm.name, stem_key, fm.name,
+        )
+
+    if "tools" not in fm_dict:
+        logger.info(
+            "agent %r has no tools declared — teammate will spawn but cannot invoke tools",
+            key,
+        )
+
+    agent_kwargs: dict[str, Any] = {
+        "description": fm.description,
+        "prompt": build_subagent_prompt(body),
+        "tools": list(fm.tools),
+        "model": fm.model,
+        "effort": fm.effort,
+        "maxTurns": fm.maxTurns,
+        "initialPrompt": fm.initialPrompt,
+        "background": fm.background,
+    }
+    if fm.skills is not None and fm.skills:
+        agent_kwargs["skills"] = list(fm.skills)
+    if fm.permissionMode is not None:
+        agent_kwargs["permissionMode"] = fm.permissionMode
+    if fm.disallowedTools is not None:
+        agent_kwargs["disallowedTools"] = list(fm.disallowedTools)
+    if fm.mcpServers is not None:
+        agent_kwargs["mcpServers"] = list(fm.mcpServers)
+    if fm.memory is not None:
+        agent_kwargs["memory"] = fm.memory
+
+    agent = AgentDefinition(**agent_kwargs)
+    return key, agent, fm, body
+
+
 def parse_pack_file(path: Path) -> tuple[str, AgentDefinition, PackFrontmatter, str]:
     """Parse one markdown file with YAML frontmatter into an AgentDefinition.
 
