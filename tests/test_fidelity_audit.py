@@ -80,7 +80,7 @@ _test_cost_data: dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped cost-logging fixture (autouse — fires for every test here)
+# Per-test cost-logging fixture (autouse, function-scoped — fires once per test)
 # ---------------------------------------------------------------------------
 
 

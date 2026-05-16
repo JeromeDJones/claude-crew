@@ -6,6 +6,59 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-16] Feature: fidelity-audit-suite (#27)
+
+### Wire `ResultMessage.usage` extraction into each live test body
+
+- **What**: The autouse cost fixture in `tests/test_fidelity_audit.py` reads a module-global `_test_cost_data` dict and writes one JSONL line per test. No live test body in the suite ever populates `_test_cost_data` with extracted `ResultMessage.usage` data — all live tests write `{input_tokens: 0, output_tokens: 0, cost_usd: 0.0, wall_seconds: <real>}`. The cost artifact is structurally valid (AT11 field-presence passes) but semantically empty.
+- **Where**: Each test class in `tests/test_fidelity_audit.py` that calls `_spawn_and_ask` or drives a live SDK turn — needs a `ResultMessage` break-point capture and storage into `_test_cost_data[request.node.nodeid]`. Auth-failure class stores zeros explicitly (no real SDK call).
+- **Why it matters**: The suite is meant to be the canonical per-run cost record for the fidelity moat. All-zeros defeats the point; real pricing is the only signal that tells a developer when claims are getting more expensive.
+- **Suggested action**: Wire `ResultMessage.usage` extraction at each live-turn break point across the 7 real SDK classes. Medium effort — behavior-changing and must be validated under `CLAUDE_CREW_LIVE_TESTS=1` with real API spend. Feature-review MEDIUM-02 (`feature.spec-satisfaction.cost-telemetry-zero`).
+
+### Extend `discover_dir` to discover `*.yaml`/`*.yml` agent files (AT8 yaml-loader gap)
+
+- **What**: `TestAgentFormatYamlPolymorphism` manually parses the `.yaml` agent file via `yaml.safe_load` and constructs `AgentDefinition` inline; `discover_dir` is only called for the markdown side (it globs `*.md`). AT8's claim — "both markdown-with-frontmatter AND pure-YAML pack entries load via `build_merged_pack`" — is over-stated: the test asserts dispatch-side fidelity, not loader-side fidelity. A regression breaking YAML support in the loader would not flip the test.
+- **Where**: `claude_crew/subagents/_loader.py::discover_dir` (glob pattern `*.md`); `tests/test_fidelity_audit.py::TestAgentFormatYamlPolymorphism`.
+- **Why it matters**: The fidelity suite's purpose is to fail loudly when a claim erodes. The AT8 gap silently exempts the loader from that contract.
+- **Suggested action**: Either (a) extend `discover_dir` to glob `*.yaml`/`*.yml` in addition to `*.md` and route AT8 through `build_merged_pack` end-to-end, or (b) amend the AT8 spec row to read "both formats dispatch once instantiated as `AgentDefinition`" and tighten the test docstring to match. Option (a) is the higher-value fix. Feature-review MEDIUM-01 (`feature.spec-satisfaction.yaml-loader-bypass`).
+
+### Tighten `rr-breakout-reviewer` glob-overlap-risk heuristic for multi-file test splits
+
+- **What**: The fidelity-audit-suite breakout review did not fire its `glob-overlap-risk` check on a single combined test command (`uv run pytest tests/test_fidelity_audit.py tests/test_fidelity_audit_frontmatter.py`) split across parallel tasks 0 and 1. Each implementor wrote a cross-slice stub of the sibling file to pass the combined command locally; coordinator hand-cleaned stub residue before slice-review on both tasks.
+- **Where**: RepoReactor `rr-breakout-reviewer` heuristic / template guidance.
+- **Why it matters**: Cross-slice stub residue at build time is a predictable failure mode when a single test command spans ≥2 files split across parallel tasks. It adds coordinator cleanup burden and risks subtle test contamination if the coordinator doesn't catch it.
+- **Suggested action**: Update `rr-breakout-reviewer` to fire the `glob-overlap-risk` check when a single test command spans ≥2 files split into parallel tasks, naming the stub-residue risk explicitly in the breakout-review output so it surfaces before slice-review.
+
+### Coordinator: attach prior-task slice-review digest to later task implementor prompts
+
+- **What**: Slice-reviews across the 9 fidelity-audit-suite tasks repeatedly flagged identical patterns: `asyncio.get_event_loop()` deprecation (3 tasks), inline imports inside test bodies (5 tasks), missing `asyncio.wait_for` timeout (1 task). The recurrence stopped only after task 4, once the coordinator started naming the patterns in the prompt. Earlier task prompts carried no digest of prior slice-review findings.
+- **Where**: RepoReactor coordinator — task-N implementor dispatch prompt.
+- **Why it matters**: Recurring per-slice findings mean the coordinator pays re-review cycles for an omission that costs nothing to include. Each finding re-raised means a slice-review cycle and a debrief for an avoidable gap.
+- **Suggested action**: When dispatching task N implementor, attach a deduplicated digest of slice-review findings from tasks 0..N-1 (severity ≥ MEDIUM and any INFO tagged `slice.review-process.cross-slice-observation`) so recurring patterns stop being re-discovered task-by-task.
+
+### `state-op.sh`: add per-task implementor map setter
+
+- **What**: `state-op.sh` has no setter for per-task implementor entries despite the v4 schema treating `teammates.implementor` as a map keyed by task slug. Coordinator had to work around via direct `.rr/` file writes.
+- **Where**: RepoReactor `state-op.sh`.
+- **Why it matters**: The missing setter caused coordinator friction on every post-task-2 artifact write, requiring workarounds that bypass the intended state-op abstraction.
+- **Suggested action**: Add a `set-task-implementor <task-slug> <teammate-id>` sub-command to `state-op.sh` matching the v4 schema's `teammates.implementor` map shape. XS — a one-afternoon addition.
+
+### Coordinator: warn when `.rr/` is gitignored at worktree spawn time
+
+- **What**: `.rr/` is gitignored in the claude-crew repo. Per-task `git add -A` commits never staged `.rr/` artifacts; `worktree remove --force` then destroyed them. Coordinator routed all post-task-2 artifacts directly to the slice worktree's `.rr/reports/` as a workaround rather than per-task worktrees.
+- **Where**: RepoReactor coordinator worktree spawn / teardown logic.
+- **Why it matters**: Silently destroys per-task artifacts without warning; operators discover the loss only when `worktree remove` has already run. Coordinator workaround prevents the loss but requires manual routing that the process shouldn't need.
+- **Suggested action**: At worktree spawn time, detect `.rr/` in `.gitignore` and either (a) route artifact commits via `git add -f` for `.rr/` paths, or (b) emit a startup warning: "`.rr/` is gitignored — per-task worktree artifacts will be lost on `worktree remove --force`." Option (b) is the minimal safe fix.
+
+### Spec hygiene: planner verifies cited prior-art for Assumption coverage
+
+- **What**: The fidelity-audit-suite spec's Assumption "HOME-override pattern is verified by existing live tests" cited `tests/test_user_loader_live.py` as verification. That test loads user-level config but never authenticates an SDK subprocess turn. Three tests (`TestSkillDiscoveryFidelity`, `TestPluginScopeFidelity`, `TestAgentFormatYamlPolymorphism`) failed the first validation run for exactly this reason.
+- **Where**: SDD workflow — Phase 2 spec authoring (planner) and plan-review (plan-reviewer).
+- **Why it matters**: A spec Assumption that cites prior art without reading what that test actually exercises creates false confidence that obscures a real validation gap until the first live run.
+- **Suggested action**: When a spec Assumption cites an existing test as verification, the planner (or a plan-review check) reads the cited test to confirm it exercises the path being asserted — not just an adjacent path. Could be a named checklist item in the plan-reviewer's review protocol.
+
+---
+
 ## [2026-05-12] Feature candidate: fidelity-audit live-test suite
 
 ### CLI-fidelity moat needs asserted commitment, not incident response
@@ -83,7 +136,7 @@ This is vision-doc maintenance, not a feature. Tracking here so it doesn't drift
 
 ---
 
-## [2026-05-08] Live integration test for bundled-pack dispatch
+## [2026-05-08] Live integration test for bundled-pack dispatch — ARCHIVED: subsumed by #27 fidelity-audit-suite (2026-05-16)
 
 ### No regression signal for CLI-rule changes that silently drop user-submitted agents
 - **What**: The 2026-05-07 → 2026-05-08 dispatch-drop bug (CLI silently dropping `explorer`/`planner` from the available-agent list) had **zero** test signal. The full unit suite (978 tests at the time) passed throughout, while in production teammates were getting "Agent type not found" at runtime. The drop happens inside the `claude` CLI subprocess after the SDK initialize request — none of our unit-level fixtures exercise that boundary, so any future change to CLI agent-registration rules (or a regression that reintroduces a name match / `skills: all`) sails past CI undetected.
