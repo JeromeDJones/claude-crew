@@ -478,17 +478,16 @@ def _warn_unknown_skills(
 ) -> None:
     """Emit a WARN for each declared skill that is not on disk at startup.
 
-    Walks each role's ``AgentDefinition.skills`` list; skips ``None`` and the
-    ``"all"`` literal (no name list to validate). Compares the listed names
-    against :func:`_discover_skill_names`; any unknown name produces a single
-    WARN naming the role and the unknown skill names. Does not raise — the
-    operator may add the SKILL.md later, or the skill may live in a search
-    path we don't traverse (D-4, SC-4).
+    Walks each role's ``AgentDefinition.skills`` list; skips ``None``.
+    Compares the listed names against :func:`_discover_skill_names`; any
+    unknown name produces a single WARN naming the role and the unknown
+    skill names. Does not raise — the operator may add the SKILL.md later,
+    or the skill may live in a search path we don't traverse (D-4, SC-4).
     """
     discovered = _discover_skill_names(home_dir, project_root)
     for role, agent in merged.items():
         skills = getattr(agent, "skills", None)
-        if skills is None or skills == "all":
+        if skills is None:
             continue
         unknown = [s for s in skills if s not in discovered]
         if unknown:

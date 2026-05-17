@@ -1896,34 +1896,6 @@ class TestConfigSnapshot:
         }
         assert set(cfg.keys()) == expected_keys
 
-    def test_skills_all_literal_normalized_to_list(self, broker: Broker) -> None:
-        """MEDIUM-01 regression: skills='all' must produce ['all'], not bare str.
-
-        The spec data contract is list[str]. A bare 'all' string would cause
-        len('all') == 3 in downstream UI chip count, which is wrong.
-        """
-        agent_def = _make_agent_def(skills="all")
-        cfg = broker._snapshot_config(
-            agent_def=agent_def, effort=None, permission_mode=None
-        )
-        assert cfg is not None
-        assert cfg["skills"] == ["all"], (
-            f"Expected ['all'] but got {cfg['skills']!r}; "
-            "'all' literal must be wrapped in a list"
-        )
-
-    async def test_config_skills_all_via_status(self, broker: Broker) -> None:
-        """MEDIUM-01 end-to-end: skills='all' round-trips as ['all'] through get_teammate_status."""
-        agent_def = _make_agent_def(skills="all")
-        resolver = lambda role: agent_def  # noqa: E731
-
-        tid = await broker.spawn_teammate(
-            role="builder", name=None, factory=_factory,
-            agent_def_resolver=resolver,
-        )
-        cfg = broker.get_teammate_status(tid)["config"]
-        assert cfg["skills"] == ["all"]
-
     async def test_factory_attached_resolver_is_used_when_arg_omitted(
         self, broker: Broker
     ) -> None:

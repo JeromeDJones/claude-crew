@@ -173,12 +173,7 @@ class StartupDiagCollector(logging.Handler):
         if self._frozen:
             return
         try:
-            try:
-                raw = record.getMessage()
-            except Exception:
-                # Defer to handleError below — this is a malformed
-                # record (bad % args, etc.). Stdlib convention.
-                raise
+            raw = record.getMessage()
             level = _coerce_level(record.levelno)
             if level == "INFO" and self.level > logging.INFO:
                 # Defensive: respect the handler-level threshold even

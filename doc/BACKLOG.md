@@ -113,29 +113,17 @@ This is vision-doc maintenance, not a feature. Tracking here so it doesn't drift
 
 ---
 
-## [2026-05-08] Cleanup batch: defensive dead-code + #25 follow-ups
+## [2026-05-08] Fixed: cleanup batch — defensive dead-code + #25 follow-ups (resolved 2026-05-16)
 
-### Bundled cleanup PR for accumulated low-risk mechanical work
-- **What**: Several small, mechanical, low-risk cleanups have accumulated. Each is too small to ship alone but worth bundling.
+### Shipped on branch `cleanup/post-fix-and-25-followups`
+- Defensive dead-code paths for the rejected `skills="all"` literal removed: extras-merge branch in `factories.py`, "all"→`["all"]` normalization in `broker._snapshot_config`, `skills == "all"` skip in `_warn_unknown_skills`, and the two round-trip tests in `test_broker.py` that exercised them.
+- `StartupDiagCollector.emit` no-op inner `try/except` around `record.getMessage()` dropped; outer `except Exception: self.handleError(record)` retains stdlib safe-emit behavior.
+- `_direct_attach_fallbacks` now returns `(attached_loggers, restore_pairs)`. The handler-attribute coupling (`collector_handler._restore_levels`) is gone; `default_factory()` stores both as locals and uses the pairs in the `finally` block.
+- `unknown_skill` category reconciliation: confirmed reachable at startup via `_warn_unknown_skills` (called from `build_merged_pack`, which runs inside `collect_startup_diagnostics`). Message "agent %r declares unknown skills %s" matches classifier substring "declares unknown skills". No code change needed.
+- ERROR-tier badge: CSS rule `.startup-notice-badge-error` was already shipped in the original #25 panel slice (commit `9ecad17`). Only the rendering test was missing; added `test_error_tier_badge_renders_with_styled_class` to `tests/dashboard/test_startup_notices.py` to guard both the class assignment and the CSS rule resolving non-transparent.
 
-  **Defensive dead-code reachable only via the now-rejected `skills="all"` path:**
-  - `claude_crew/factories.py:277` — extras-merge handling for the `"all"` literal in `agent_def.skills`
-  - `claude_crew/broker.py:281` — config serialization that wraps `"all"` into `["all"]`
-  - `claude_crew/subagents/_user_loader.py:448` — skill-name validation skip when `skills == "all"`
-  - `tests/test_broker.py:1900-1925` — round-trip tests that exercise the `["all"]` serialization
-
-  Since `_loader._validate_frontmatter` (post-2026-05-08) rejects `skills: "all"` at parse time with a `PackLoadError`, no in-repo path produces an `agent_def.skills == "all"` value anymore. External callers could still inject it via `extra_skills` on `spawn_teammate` (currently typed `list[str] | None`, so they'd have to type-violate) — defensive but unreachable from real flows.
-
-  **#25 follow-ups (per SESSION.md):**
-  - ERROR-tier startup-diagnostic badge CSS (`.startup-notice-badge-error` rule missing)
-  - Drop no-op `try/except` around `record.getMessage()` in `StartupDiagCollector.emit`
-  - Refactor `_direct_attach_fallbacks` to return restore pairs (drop handler-attribute coupling)
-  - Breakout-feature planner heuristic — include `server.py` in `taskTouches` for factory→broker slices
-  - Reconcile `unknown_skill` category — confirm startup-time emit site or drop
-
-- **Where**: Across `claude_crew/` and `tests/`. See individual SESSION.md / BACKLOG references for the #25 items.
-- **Why it matters**: Each item alone is too small to justify a dedicated PR. Bundled, they cleanly retire post-fix dead code and close out the #25 follow-up tail. Reduces ambient noise (unreachable branches, missing CSS, etc.) and signals that the #25 ship is fully wrapped.
-- **Suggested action**: Single PR, "cleanup: post-fix dead code + #25 followups." Estimated effort: an afternoon.
+### Out of scope for this PR (deferred)
+- The breakout-feature planner heuristic ("include `server.py` in `taskTouches` for factory→broker slices") is a *repo-reactor* skill change, not claude-crew. Tracked separately in the FDE repo backlog if/when revisited.
 
 ---
 

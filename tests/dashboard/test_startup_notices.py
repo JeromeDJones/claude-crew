@@ -115,6 +115,31 @@ def misconfig_server_url():
 
 
 @pytest.fixture(scope="module")
+def error_server_url():
+    """Broker carrying one ERROR-tier diagnostic (#25 followup coverage).
+
+    ERROR is reachable in production whenever a pack-load failure surfaces
+    via the ``raised`` / ``could not be loaded`` substring rules at
+    ``ERROR`` level. The original #25 ship added the ``.startup-notice-badge-error``
+    CSS rule but no rendering test exercised it — this fixture closes that gap.
+    """
+    diags = (
+        _diag(
+            "ERROR",
+            "agent broken.md could not be loaded: malformed frontmatter",
+            "claude_crew.subagents.loader",
+            1715000002.0,
+            "frontmatter",
+        ),
+    )
+    broker = Broker(startup_diagnostics=diags)
+    url, server, t = _start_server(broker)
+    yield url
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.fixture(scope="module")
 def clean_server_url():
     """Broker with no startup diagnostics (empty tuple)."""
     broker = Broker()
@@ -217,6 +242,41 @@ def test_panel_visible_after_refresh(misconfig_server_url, page):
     page.locator(".startup-notices-header").wait_for(state="visible", timeout=15000)
     page.reload()
     page.locator(".startup-notices-header").wait_for(state="visible", timeout=15000)
+
+
+@pytest.mark.dashboard
+def test_error_tier_badge_renders_with_styled_class(error_server_url, page):
+    """#25 followup: ERROR-tier diagnostics get the styled ``.startup-notice-badge-error``
+    class and the CSS rule actually resolves (non-transparent background).
+
+    Pre-fix gap: ``StartupNoticeRow`` assigned the class for ERROR levels but
+    ``dashboard.html`` only defined CSS for ``-info`` and ``-warning``, so ERROR
+    badges fell back to inherited text only. The CSS rule has since been added;
+    this test guards against future regression of either side.
+    """
+    page.goto(error_server_url)
+    page.locator(".startup-notices-header").wait_for(state="visible", timeout=15000)
+    # Guard the count-only assert below: confirm the section is actually rendered
+    # (the `if (list.length === 0) return null` short-circuit would silently
+    # produce a 0 row count otherwise).
+    page.locator(".startup-notices-section").wait_for(state="visible", timeout=3000)
+
+    error_rows = page.locator(".startup-notice-row").filter(
+        has=page.locator(".startup-notice-badge-error")
+    )
+    assert error_rows.count() == 1, (
+        f"Expected 1 ERROR row visible by default; got {error_rows.count()}"
+    )
+    badge = error_rows.first.locator(".startup-notice-badge-error")
+    assert badge.inner_text().strip() == "ERROR"
+
+    bg = badge.evaluate(
+        "el => getComputedStyle(el).backgroundColor"
+    )
+    assert bg and bg not in ("rgba(0, 0, 0, 0)", "transparent"), (
+        f"Expected .startup-notice-badge-error to resolve to a non-transparent "
+        f"background; got {bg!r}. The CSS rule is missing or unreachable."
+    )
 
 
 @pytest.mark.dashboard
