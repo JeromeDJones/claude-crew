@@ -257,10 +257,12 @@
       font-family: var(--font-mono); cursor: default;
     }
     .ctx-window-bar-track {
+      display: inline-block;
       width: 64px; height: 5px; border-radius: 3px;
       background: var(--bg-2); overflow: hidden;
     }
     .ctx-window-bar-fill {
+      display: block;
       height: 100%; transition: width 0.25s ease, background-color 0.25s ease;
     }
     .ctx-window-bar-fill.ctx-ok      { background: oklch(0.62 0.15 145); }
