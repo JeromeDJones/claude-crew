@@ -99,14 +99,27 @@ class TestBuildMemorySectionNoIndex:
         result = build_memory_section("sentinel", ("Read", "Write"))
         assert "No prior memories yet" in result
 
-    def test_includes_disambiguation_from_project_memory(self, fake_home):
+    def test_includes_boundary_from_project_memory(self, fake_home):
+        """The memory section must explicitly mark project memory as
+        off-limits and explain BOTH mechanisms that enforce it: the
+        spawn-time env suppression AND the runtime write guard.
+
+        Renamed from test_includes_disambiguation_from_project_memory
+        2026-05-17 when the wording shifted from 'disambiguation against
+        a visible-but-not-yours memory' to 'boundary against a
+        suppressed-and-write-blocked memory' — auto-memory is no longer
+        loaded for SDK teammates so the prior framing was wrong.
+        """
         result = build_memory_section("sentinel", ("Write",))
-        assert "Disambiguation" in result
-        assert "project-scoped" in result
+        # Keyword on the new instruction header
+        assert "Boundaries" in result
+        # The protected path the teammate must not write to
+        assert "~/.claude/projects/*/memory/" in result
+        # Both enforcement mechanisms are named
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in result
+        assert "write guard" in result.lower()
+        # The lead is named as the owner
         assert "lead session" in result.lower()
-        # Path string the agent sees — guards against drift if someone refactors
-        # the encoded-cwd convention without updating the disambiguation text.
-        assert "~/.claude/projects/<encoded-cwd>/memory/MEMORY.md" in result
 
     def test_includes_what_to_save_section(self, fake_home):
         result = build_memory_section("sentinel", ("Write",))
