@@ -251,6 +251,21 @@
       font-family: var(--font-mono); font-size: 11px; color: var(--fg-1);
     }
     .startup-notice-row.startup-notice-info { opacity: 0.7; }
+    .ctx-window-bar {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-left: auto; font-size: 10.5px; color: var(--fg-3);
+      font-family: var(--font-mono); cursor: default;
+    }
+    .ctx-window-bar-track {
+      width: 64px; height: 5px; border-radius: 3px;
+      background: var(--bg-2); overflow: hidden;
+    }
+    .ctx-window-bar-fill {
+      height: 100%; transition: width 0.25s ease, background-color 0.25s ease;
+    }
+    .ctx-window-bar-fill.ctx-ok      { background: oklch(0.62 0.15 145); }
+    .ctx-window-bar-fill.ctx-warn    { background: oklch(0.65 0.18 75); }
+    .ctx-window-bar-fill.ctx-danger  { background: oklch(0.55 0.20 25); }
     .startup-notice-badge {
       display: inline-block;
       padding: 0 6px; border-radius: 3px;
@@ -390,6 +405,40 @@
     function fmtTime(iso) {
       const d = new Date(iso);
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    }
+
+    // Context-window limit per model family. All Claude models we spawn run
+    // on the standard 200k tier — the 1M-context beta is not enabled.
+    const CONTEXT_WINDOW_LIMIT = 200_000;
+    function ctxBarClass(pct) {
+      if (pct >= 0.80) return "ctx-danger";
+      if (pct >= 0.50) return "ctx-warn";
+      return "ctx-ok";
+    }
+
+    // --- ContextWindowBar ---
+    // Renders the LAST turn's input tokens as utilization vs. the model's
+    // context window. This is the cliff signal — cumulative tokens don't tell
+    // you whether the next turn will fit. Tooltip shows last-turn out + the
+    // session cumulative for context.
+    function ContextWindowBar({ lastTurn, totalIn, totalOut }) {
+      const used = lastTurn && typeof lastTurn.in === "number" ? lastTurn.in : 0;
+      const out  = lastTurn && typeof lastTurn.out === "number" ? lastTurn.out : 0;
+      const pct  = Math.min(1, used / CONTEXT_WINDOW_LIMIT);
+      const cls  = ctxBarClass(pct);
+      const widthPct = (pct * 100).toFixed(1) + "%";
+      const tooltip =
+        `last turn: ${used.toLocaleString()} in · ${out.toLocaleString()} out` +
+        ` (${(pct * 100).toFixed(0)}% of ${fmtTokens(CONTEXT_WINDOW_LIMIT)})\n` +
+        `cumulative: ${totalIn.toLocaleString()} in · ${totalOut.toLocaleString()} out`;
+      return (
+        <span className="ctx-window-bar" title={tooltip}>
+          <span className="ctx-window-bar-track">
+            <span className={`ctx-window-bar-fill ${cls}`} style={{ width: widthPct }}/>
+          </span>
+          <span>{fmtTokens(used)}/{fmtTokens(CONTEXT_WINDOW_LIMIT)}</span>
+        </span>
+      );
     }
 
     // --- StatusDot ---
@@ -911,14 +960,18 @@
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
               <ModelBadge model={agent.model}/>
+              <ContextWindowBar
+                lastTurn={agent.last_turn || { in: 0, out: 0 }}
+                totalIn={agent.tokens.in}
+                totalOut={agent.tokens.out}
+              />
               <span
                 className="mono"
-                title={`${agent.tokens.in.toLocaleString()} in · ${agent.tokens.out.toLocaleString()} out`}
-                style={{ fontSize: 10.5, color: "var(--fg-3)", marginLeft: "auto" }}
+                title={`session cost (cumulative)`}
+                style={{ fontSize: 10.5, color: "var(--fg-2)" }}
               >
-                {fmtTokens(agent.tokens.in + agent.tokens.out)}
+                {fmtCost(agent.cost)}
               </span>
-              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)" }}>{fmtCost(agent.cost)}</span>
             </div>
           </div>
 

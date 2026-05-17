@@ -164,10 +164,15 @@ class TestBuildStateWithTeammates:
         agent = state["instances"][0]["agents"][0]
         for field in (
             "id", "role", "model", "status", "uptime", "lastMsg",
-            "cost", "tokens", "tools", "current_tool",
+            "cost", "tokens", "last_turn", "tools", "current_tool",
             "oldest_in_flight", "in_flight_count", "last_tool_completed",  # F22 D-3, D-7
         ):
             assert field in agent, f"missing field: {field}"
+        # last_turn carries per-turn deltas with {in, out} shape; the bar UI
+        # reads these directly. Zero on a fresh broker_with_teammates fixture
+        # (no real turns run); shape must be present regardless.
+        assert isinstance(agent["last_turn"], dict)
+        assert "in" in agent["last_turn"] and "out" in agent["last_turn"]
 
     async def test_status_active_when_agents_present(self, broker_with_teammates):
         broker = broker_with_teammates
