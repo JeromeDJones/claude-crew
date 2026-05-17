@@ -998,7 +998,20 @@ class SdkTeammate(Teammate):
             # Suppress the UI server and instance registry inside SDK teammates.
             # They inherit global MCP config (including claude-crew), so without
             # this they'd each register themselves as a crew instance in the dashboard.
-            "env": {"CLAUDE_CREW_UI_PORT": "0"},
+            #
+            # CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 suppresses Claude Code's project
+            # auto-memory injection (~/.claude/projects/<sanitized-cwd>/memory/MEMORY.md)
+            # for the spawned teammate. Auto-memory is a lead-session continuity
+            # mechanism — it's the operator's project memory, not the teammate's.
+            # Leaking it into every teammate's context wastes ~550 tokens per
+            # LLM invocation and pollutes role-scoped agents with lead-only
+            # entries. The operator's interactive `claude` session is unaffected
+            # (this env scoping applies only to subprocesses spawned via the SDK).
+            # Spike: doc/research/auto-memory-disable-sdk-behavior.md.
+            "env": {
+                "CLAUDE_CREW_UI_PORT": "0",
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            },
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort

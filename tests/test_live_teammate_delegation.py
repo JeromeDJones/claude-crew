@@ -30,7 +30,6 @@ from claude_crew.factories import sdk_factory
 from claude_crew.teammate_prompt import (
     SENTINEL_CONTEXT,
     SENTINEL_DELEGATION,
-    SENTINEL_SUBAGENTS,
 )
 
 
@@ -101,9 +100,9 @@ class TestGeneralPurposeTeammateDelegation:
         teammate_pre = broker._teammates.get(tid)
         assert teammate_pre is not None
         sys_prompt = getattr(teammate_pre, "_system_prompt", "") or ""
-        for sentinel in (
-            SENTINEL_CONTEXT, SENTINEL_SUBAGENTS, SENTINEL_DELEGATION,
-        ):
+        # SENTINEL_SUBAGENTS dropped 2026-05-17 — its section duplicated the
+        # framework-injected Agent tool description.
+        for sentinel in (SENTINEL_CONTEXT, SENTINEL_DELEGATION):
             assert sentinel in sys_prompt, (
                 f"#21 prompt assembly regression: SENTINEL_{sentinel!r} missing from "
                 f"general-purpose teammate's _system_prompt. Skipping live call."
