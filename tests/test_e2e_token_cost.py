@@ -445,6 +445,118 @@ async def test_peak_invocation_input_tracks_single_largest_llm_call(
         await broker.shutdown_all()
 
 
+@pytest.mark.asyncio
+async def test_active_model_exposed_on_snapshot_after_assistant_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """active-model-display: after a turn produces an AssistantMessage, the
+    teammate's status_snapshot() exposes ``active_model`` carrying the
+    AssistantMessage.model verbatim.
+
+    This is the API-authoritative model id (echoed back in the Messages API
+    response). The dashboard relies on this for the "what model is actually
+    running" chip and the model-chain renderer.
+    """
+    fake = FakeSDKClient(
+        scripted_responses=[
+            text_response_with_usage(
+                "pong",
+                turn_input_tokens=100,
+                turn_output_tokens=10,
+                cumulative_cost_usd=0.001,
+            ),
+        ]
+    )
+    _patch_sdk(monkeypatch, fake)
+
+    broker = Broker()
+    try:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        await _send(broker, tid, "ping")
+        await _wait_lead(broker, 1)
+
+        snap = broker._teammates[tid].status_snapshot()
+        # fake-model is the model the FakeSDKClient stamps on AssistantMessages
+        # — this is the value the real SDK would put there from the API
+        # response payload (message_parser.py:148-150).
+        assert snap["active_model"] == "fake-model", (
+            f"expected active_model='fake-model'; got {snap['active_model']!r}"
+        )
+
+        # Broker snapshot also surfaces it on the live entry.
+        live = [e for e in broker.snapshot().live if e.info.id == tid]
+        assert len(live) == 1
+        # status copy (D-2 deepcopy) preserves the active_model key.
+        assert live[0].status.get("active_model") == "fake-model"
+    finally:
+        await broker.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_active_model_none_before_any_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """active-model-display: a freshly spawned teammate that hasn't yet
+    produced an AssistantMessage exposes ``active_model=None`` so the UI
+    can fall back to the configured value with the "not observed yet"
+    affordance.
+    """
+    fake = FakeSDKClient(scripted_responses=[])
+    _patch_sdk(monkeypatch, fake)
+
+    broker = Broker()
+    try:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        snap = broker._teammates[tid].status_snapshot()
+        assert snap["active_model"] is None
+    finally:
+        await broker.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_active_model_preserved_at_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """active-model-display: when a teammate is killed after producing an
+    AssistantMessage, the broker's tombstone preserves active_model so the
+    dashboard's dead-row chip still shows the model the API actually used.
+    """
+    fake = FakeSDKClient(
+        scripted_responses=[
+            text_response_with_usage(
+                "done",
+                turn_input_tokens=200,
+                turn_output_tokens=20,
+                cumulative_cost_usd=0.002,
+            ),
+        ]
+    )
+    _patch_sdk(monkeypatch, fake)
+
+    broker = Broker()
+    try:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        await _send(broker, tid, "do work")
+        await _wait_lead(broker, 1)
+
+        await broker.kill_teammate(tid)
+
+        info = broker._info[tid]
+        assert info.active_model_at_death == "fake-model"
+
+        # Broker snapshot dead-build path exposes it on the wire-shape dict.
+        dead = broker.snapshot().teammates
+        dead_match = [d for d in dead if d.id == tid]
+        assert len(dead_match) == 1
+        # The dict-shape build path runs through Broker.snapshot internals —
+        # exercise the to-dict accessor via the public API:
+        dict_snap = broker.get_teammate_status(tid)
+        assert dict_snap is not None
+        assert dict_snap["active_model"] == "fake-model"
+    finally:
+        await broker.shutdown_all()
+
+
 @pytest.mark.skipif(
     os.environ.get("CLAUDE_CREW_LIVE_TESTS") != "1",
     reason="live API gated; set CLAUDE_CREW_LIVE_TESTS=1 to run",

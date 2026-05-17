@@ -451,6 +451,65 @@ class TestBuildStateTokenCost:
             assert agent["cost"] == 0.15
             assert agent["tokens"]["in"] == 200
             assert agent["tokens"]["out"] == 100
+            # active-model-display: live path surfaces API-authoritative model id
+            # on the wire. text_response_with_usage stamps "fake-model" on the
+            # AssistantMessage; ui_server passes it through verbatim.
+            assert agent["active_model"] == "fake-model"
+        finally:
+            await broker.shutdown_all()
+
+    async def test_active_model_on_api_state_live_path(self, monkeypatch):
+        """active-model-display: ui_server live path surfaces active_model on
+        /api/state for both pre-turn (None) and post-turn (API model id)
+        states. Closes the regression-guard gap on the live agent_entry —
+        without this, an accidental drop of the key from ui_server's
+        agent_entry dict would not be caught by any test.
+
+        Tombstone preservation is covered separately by
+        test_active_model_preserved_at_tombstone in test_e2e_token_cost.py
+        (which exercises the broker's tombstone fields directly).
+        """
+        from claude_crew.broker import LEAD_ID, Broker
+        from claude_crew.envelope import Envelope, new_message_id
+        from tests.fakes.sdk import text_response_with_usage
+
+        broker = Broker()
+        try:
+            # (a) Spawned but no message sent — pre-turn state.
+            tid_pre, _ = await self._spawn_sdk_teammate(
+                broker, monkeypatch, scripted_responses=[],
+            )
+
+            # (b) Spawned and driven through one turn — post-turn state.
+            tid_live, _ = await self._spawn_sdk_teammate(
+                broker, monkeypatch,
+                scripted_responses=[text_response_with_usage(
+                    "ok",
+                    turn_input_tokens=50,
+                    turn_output_tokens=5,
+                    cumulative_cost_usd=0.01,
+                )],
+            )
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender=LEAD_ID, recipient=tid_live, timestamp=0.0,
+                payload="go",
+            ))
+            await self._wait_for_lead(broker, 1)
+
+            ui = UIServer(broker, port=0)
+            instance, _ = ui._build_local_instance(broker.snapshot(log_limit=200))
+            by_id = {a["id"]: a for a in instance["agents"]}
+
+            assert tid_pre in by_id, "pre-turn live teammate should appear"
+            assert tid_live in by_id, "post-turn live teammate should appear"
+
+            # Pre-turn: key present, value None — UI can render "configured" fallback.
+            assert "active_model" in by_id[tid_pre]
+            assert by_id[tid_pre]["active_model"] is None
+
+            # Post-turn: API-authoritative id surfaces verbatim.
+            assert by_id[tid_live]["active_model"] == "fake-model"
         finally:
             await broker.shutdown_all()
 

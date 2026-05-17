@@ -454,23 +454,48 @@
       return <span className={`dot ${status}`} style={{ width: size, height: size }}/>;
     }
 
+    // Map a full Claude model id ("claude-opus-4-7") OR a short family
+    // name ("opus") to its short family name. Returns the input unchanged
+    // when it doesn't match a known family.
+    function modelFamily(id) {
+      if (!id) return id;
+      const s = String(id).toLowerCase();
+      if (s.includes("opus")) return "opus";
+      if (s.includes("sonnet")) return "sonnet";
+      if (s.includes("haiku")) return "haiku";
+      return s;
+    }
+
     // --- ModelBadge ---
-    function ModelBadge({ model }) {
+    // Renders the model family. Prefers `activeModel` (API-authoritative,
+    // from AssistantMessage.model) over `model` (the configured/intended
+    // value). When falling back to the configured value (no assistant turn
+    // observed yet), renders dim/italic so operators can tell intent vs.
+    // observed at a glance. Tooltip carries the full ids for inspection.
+    function ModelBadge({ model, activeModel }) {
+      const observed = !!activeModel;
+      const displayId = activeModel || model;
+      const fam = modelFamily(displayId);
       const map = {
         "opus":   { hue: 290, label: "opus" },
         "sonnet": { hue: 220, label: "sonnet" },
         "haiku":  { hue: 150, label: "haiku" },
       };
-      const m = map[model] || { hue: 250, label: model };
+      const m = map[fam] || { hue: 250, label: fam };
       const fg = `oklch(0.42 0.10 ${m.hue})`;
       const bg = `oklch(0.42 0.10 ${m.hue} / 0.10)`;
       const bd = `oklch(0.42 0.10 ${m.hue} / 0.30)`;
+      const title = observed
+        ? `active model: ${activeModel}`
+        : `configured: ${model || "(unknown)"} — no assistant response observed yet`;
       return (
-        <span className="mono" style={{
+        <span className="mono" title={title} style={{
           display: "inline-flex", alignItems: "center", height: 18,
           padding: "0 6px", borderRadius: 4, fontSize: 10.5,
           color: fg, background: bg, border: `1px solid ${bd}`,
           letterSpacing: "0.02em", textTransform: "lowercase",
+          opacity: observed ? 1 : 0.55,
+          fontStyle: observed ? "normal" : "italic",
         }}>{m.label}</span>
       );
     }
@@ -549,7 +574,7 @@
     }
 
     // --- ConfigDetailPanel ---
-    function ConfigDetailPanel({ config, agentRole, onClose }) {
+    function ConfigDetailPanel({ config, agentRole, configuredModel, activeModel, onClose }) {
       useEffect(() => {
         const handler = (e) => { if (e.key === 'Escape') onClose(); };
         document.addEventListener('keydown', handler);
@@ -575,12 +600,71 @@
               }}>✕</button>
             </div>
 
-            {config.model && (
-              <div className="tm-detail-section">
-                <div className="tm-detail-label">model</div>
-                <div className="tm-detail-value">{config.model}</div>
-              </div>
-            )}
+            {(config.model || configuredModel || activeModel) && (() => {
+              // Render the model chain: pack → override → active. Collapse to a
+              // single "active" line when all three resolve to the same family.
+              // - pack:     config.model is the AgentDefinition.model (resolved
+              //             from pack frontmatter). The "intended default" for
+              //             this role.
+              // - override: configuredModel (agent.model on /api/state) is the
+              //             value passed at spawn (or pack default normalized).
+              //             A user-supplied override is detected by family-level
+              //             divergence from the pack value.
+              // - active:   activeModel is API-authoritative (the model the
+              //             Anthropic API actually used on the last response).
+              const pack = config.model || null;
+              const override = configuredModel || null;
+              const active = activeModel || null;
+              const packFam = pack ? modelFamily(pack) : null;
+              const overrideFam = override ? modelFamily(override) : null;
+              const activeFam = active ? modelFamily(active) : null;
+              // Detect a "real" override: configured family differs from pack.
+              const overrideDiffers =
+                override && pack && overrideFam !== packFam;
+              // Active diverges when it's observed AND it doesn't match
+              // whichever upstream we trust (override > pack).
+              const upstreamFam = overrideDiffers ? overrideFam : packFam;
+              const activeDiverges = active && upstreamFam && activeFam !== upstreamFam;
+              const collapse = !overrideDiffers && !activeDiverges;
+              return (
+                <div className="tm-detail-section">
+                  <div className="tm-detail-label">model</div>
+                  {collapse ? (
+                    <div className="tm-detail-value">
+                      {active || override || pack}
+                      {!active && (
+                        <span style={{ color: "var(--fg-3)", marginLeft: 6, fontStyle: "italic" }}>
+                          (configured; no API response observed yet)
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="tm-detail-value" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      {pack && (
+                        <div>
+                          <span style={{ color: "var(--fg-3)" }}>pack default: </span>
+                          <span>{pack}</span>
+                        </div>
+                      )}
+                      {overrideDiffers && (
+                        <div>
+                          <span style={{ color: "var(--fg-3)" }}>spawn override: </span>
+                          <span>{override}</span>
+                        </div>
+                      )}
+                      <div>
+                        <span style={{ color: "var(--fg-3)" }}>active (API): </span>
+                        <span>
+                          {active || (
+                            <em style={{ color: "var(--fg-3)" }}>not observed yet</em>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {(config.permission_mode || config.effort) && (
               <div style={{ display: 'flex', gap: 24 }}>
@@ -967,7 +1051,7 @@
               <StatusDot status={agent.status}/>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-              <ModelBadge model={agent.model}/>
+              <ModelBadge model={agent.model} activeModel={agent.active_model}/>
               <ContextWindowBar
                 lastTurn={agent.last_turn || { in: 0, out: 0 }}
                 totalIn={agent.tokens.in}
@@ -1219,6 +1303,8 @@
             <ConfigDetailPanel
               config={openPanel.config}
               agentRole={openPanel.role}
+              configuredModel={openPanel.model}
+              activeModel={openPanel.active_model}
               onClose={() => setOpenPanel(null)}
             />
           )}
