@@ -208,6 +208,7 @@ class UIServer:
                 agent_out = int(snap.get("total_output_tokens", 0))
                 agent_last_in = int(snap.get("last_turn_input_tokens", 0))
                 agent_last_out = int(snap.get("last_turn_output_tokens", 0))
+                agent_last_peak = int(snap.get("last_turn_peak_invocation_input_tokens", 0))
 
                 # F22 D-8: API surface freeze. tools[] = full set of names (frozen
                 # as-of-#22, no new consumers). current_tool = last-started scalar
@@ -223,7 +224,11 @@ class UIServer:
                     "lastMsg": _ts(last_activity),
                     "cost": agent_cost,
                     "tokens": {"in": agent_in, "out": agent_out},
-                    "last_turn": {"in": agent_last_in, "out": agent_last_out},
+                    "last_turn": {
+                        "in": agent_last_in,
+                        "out": agent_last_out,
+                        "peak_in": agent_last_peak,
+                    },
                     "tools": current_tool_names,
                     "current_tool": snap.get("current_tool"),
                     "oldest_in_flight": oldest_in_flight,
@@ -252,6 +257,7 @@ class UIServer:
                 agent_out = int(info.total_output_tokens_at_death or 0)
                 agent_last_in = int(info.last_turn_input_tokens_at_death or 0)
                 agent_last_out = int(info.last_turn_output_tokens_at_death or 0)
+                agent_last_peak = int(info.last_turn_peak_invocation_input_tokens_at_death or 0)
                 total_cost += agent_cost
                 total_in += agent_in
                 total_out += agent_out
@@ -268,7 +274,11 @@ class UIServer:
                         "lastMsg": _ts(info.last_activity_at_wallclock_at_death),
                         "cost": agent_cost,
                         "tokens": {"in": agent_in, "out": agent_out},
-                        "last_turn": {"in": agent_last_in, "out": agent_last_out},
+                        "last_turn": {
+                            "in": agent_last_in,
+                            "out": agent_last_out,
+                            "peak_in": agent_last_peak,
+                        },
                         "tools": [],
                         "current_tool": None,
                         "oldest_in_flight": None,

@@ -419,26 +419,32 @@
     }
 
     // --- ContextWindowBar ---
-    // Renders the LAST turn's input tokens as utilization vs. the model's
-    // context window. This is the cliff signal — cumulative tokens don't tell
-    // you whether the next turn will fit. Tooltip shows last-turn out + the
-    // session cumulative for context.
+    // Renders the PEAK single-LLM-invocation input from the last turn as
+    // utilization vs. the model's context window. This is the actual cliff
+    // signal — each tool call inside a turn triggers a separate LLM invocation,
+    // and the API bills the SUM (which can be many times the window size for a
+    // tool-heavy turn). The peak-per-invocation is what tells you whether any
+    // one invocation is near the wall. Tooltip exposes both numbers so the
+    // distinction is visible.
     function ContextWindowBar({ lastTurn, totalIn, totalOut }) {
-      const used = lastTurn && typeof lastTurn.in === "number" ? lastTurn.in : 0;
-      const out  = lastTurn && typeof lastTurn.out === "number" ? lastTurn.out : 0;
-      const pct  = Math.min(1, used / CONTEXT_WINDOW_LIMIT);
+      const peak       = lastTurn && typeof lastTurn.peak_in === "number" ? lastTurn.peak_in : 0;
+      const turnSumIn  = lastTurn && typeof lastTurn.in      === "number" ? lastTurn.in      : 0;
+      const turnSumOut = lastTurn && typeof lastTurn.out     === "number" ? lastTurn.out     : 0;
+      const pct  = Math.min(1, peak / CONTEXT_WINDOW_LIMIT);
       const cls  = ctxBarClass(pct);
       const widthPct = (pct * 100).toFixed(1) + "%";
       const tooltip =
-        `last turn: ${used.toLocaleString()} in · ${out.toLocaleString()} out` +
-        ` (${(pct * 100).toFixed(0)}% of ${fmtTokens(CONTEXT_WINDOW_LIMIT)})\n` +
+        `peak invocation: ${peak.toLocaleString()} in` +
+        ` (${(pct * 100).toFixed(0)}% of ${fmtTokens(CONTEXT_WINDOW_LIMIT)} window)\n` +
+        `last turn billed: ${turnSumIn.toLocaleString()} in · ${turnSumOut.toLocaleString()} out` +
+        ` (sum across all LLM calls in the turn)\n` +
         `cumulative: ${totalIn.toLocaleString()} in · ${totalOut.toLocaleString()} out`;
       return (
         <span className="ctx-window-bar" title={tooltip}>
           <span className="ctx-window-bar-track">
             <span className={`ctx-window-bar-fill ${cls}`} style={{ width: widthPct }}/>
           </span>
-          <span>{fmtTokens(used)}/{fmtTokens(CONTEXT_WINDOW_LIMIT)}</span>
+          <span>{fmtTokens(peak)}/{fmtTokens(CONTEXT_WINDOW_LIMIT)}</span>
         </span>
       );
     }
