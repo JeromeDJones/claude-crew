@@ -256,6 +256,9 @@ class Teammate(ABC):
             "last_turn_input_tokens": 0,
             "last_turn_output_tokens": 0,
             "last_turn_peak_invocation_input_tokens": 0,
+            # API-authoritative model from the most recent AssistantMessage.
+            # Base value is None — SdkTeammate overrides with the observed id.
+            "active_model": None,
         }
 
 

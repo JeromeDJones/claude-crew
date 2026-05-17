@@ -219,6 +219,11 @@ class UIServer:
                     "role": info.role,
                     "name": info.name,
                     "model": _normalize_model(model_raw),
+                    # API-authoritative model id from the most recent
+                    # AssistantMessage. None until the first assistant
+                    # turn completes. Raw id (not normalized) so the UI
+                    # can show the exact value Anthropic returned.
+                    "active_model": snap.get("active_model"),
                     "status": status,
                     "uptime": int(now - info.spawned_at),
                     "lastMsg": _ts(last_activity),
@@ -269,6 +274,9 @@ class UIServer:
                         "role": info.role,
                         "name": info.name,
                         "model": "sonnet",  # model unknown post-death; normalized default
+                        # API-authoritative model preserved from tombstone (None if
+                        # no AssistantMessage was observed before death).
+                        "active_model": info.active_model_at_death,
                         "status": "dead",
                         "uptime": int((info.died_at_wallclock or now) - info.spawned_at),
                         "lastMsg": _ts(info.last_activity_at_wallclock_at_death),

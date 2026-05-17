@@ -155,6 +155,11 @@ class TurnDrainResult:
     cumulative_cost_usd: float | None = None
     # None = no AssistantMessage with valid usage was observed (interrupted turn etc.).
     peak_invocation_input_tokens: int | None = None
+    # active_model: last AssistantMessage.model observed this turn, taken
+    # directly from the Anthropic API response payload (authoritative model
+    # the API used to generate the response). None when no AssistantMessage
+    # was observed.
+    last_assistant_model: str | None = None
 
 
 async def _collect_response_text(
@@ -175,6 +180,14 @@ async def _collect_response_text(
     - Terminates when the SDK iterator terminates (typically at ResultMessage).
     - Returns TurnDrainResult(text="", failed_task_notifs=[]) if nothing of
       substance was observed.
+
+    AssistantMessage reads. The inner _extract_token_cost_from_rm helper
+    holds the D-1 invariant that ResultMessage is the single source for
+    billing tokens/cost. The outer drain reads two additional fields off
+    AssistantMessage that are NOT billing signals and so do not violate
+    D-1: ``usage`` (per-invocation peak input for the cliff-detection UI)
+    and ``model`` (API-authoritative model id for the active-model chip).
+    Neither feeds token/cost accumulation.
 
     The caller must wrap this in asyncio.wait_for to bound non-termination.
     """
@@ -244,6 +257,7 @@ async def _collect_response_text(
     turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
     peak_invocation_input_tokens: int | None = None
+    last_assistant_model: str | None = None
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
         # event type (including RateLimitEvent, TaskNotificationMessage)
@@ -285,6 +299,13 @@ async def _collect_response_text(
                 )
             continue
         if isinstance(msg, AssistantMessage):
+            # API-authoritative model id (echoed back in each Messages-API
+            # response). Last AssistantMessage in the drain wins — for a
+            # well-behaved turn they are all the same; mid-turn model swaps
+            # are surfaced by reading the latest value.
+            ai_model = getattr(msg, "model", None)
+            if isinstance(ai_model, str) and ai_model:
+                last_assistant_model = ai_model
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
@@ -298,6 +319,20 @@ async def _collect_response_text(
             # exceeded the model's 200k context). Track the max across the turn
             # for the cliff-detection UI.
             ai_usage = getattr(msg, "usage", None)
+            if ai_usage is not None and not isinstance(ai_usage, dict):
+                # Quick-win telemetry: if the SDK ever changes AssistantMessage.usage
+                # from a dict to a typed object, the dict-branch below silently
+                # no-ops and last_turn_peak_invocation_input_tokens quietly zeros
+                # out. Surface the shape change loudly so operators have something
+                # to grep for. Logged once per occurrence (no rate limiting — this
+                # should never fire in normal operation).
+                logger.warning(
+                    "AssistantMessage.usage has unexpected type %s (expected dict). "
+                    "Cliff-signal capture will be silently skipped — likely an SDK "
+                    "upgrade changed the wire shape. Investigate before the next "
+                    "release.",
+                    type(ai_usage).__name__,
+                )
             if isinstance(ai_usage, dict):
                 try:
                     invocation_input = int(
@@ -318,6 +353,7 @@ async def _collect_response_text(
         turn_output_tokens=turn_output_tokens,
         cumulative_cost_usd=cumulative_cost_usd,
         peak_invocation_input_tokens=peak_invocation_input_tokens,
+        last_assistant_model=last_assistant_model,
     )
 
 
@@ -516,6 +552,11 @@ class SdkTeammate(Teammate):
         # *real* context-window utilization signal (distinct from the turn-
         # cumulative input above, which sums across all invocations).
         self._last_turn_peak_invocation_input_tokens: int = 0
+        # API-authoritative model id from the most recent AssistantMessage.
+        # None until the first assistant message arrives. Reflects what the
+        # Anthropic API actually used to serve the response — distinct from
+        # the configured/override model passed at spawn time.
+        self._last_assistant_model: str | None = None
 
         # F7 subagent-tracking namespace (completely separate from F8 tool-tracking)
         self._subagent_uses: dict[str, _SubagentUseEntry] = {}
@@ -967,6 +1008,9 @@ class SdkTeammate(Teammate):
         snap["last_turn_input_tokens"] = self._last_turn_input_tokens
         snap["last_turn_output_tokens"] = self._last_turn_output_tokens
         snap["last_turn_peak_invocation_input_tokens"] = self._last_turn_peak_invocation_input_tokens
+        # API-authoritative model from the last observed AssistantMessage.
+        # None until the first assistant message arrives this session.
+        snap["active_model"] = self._last_assistant_model
         # Build current_subagents from BOTH in-flight and limbo-state scratch entries (D10)
         subagent_entries = [
             {
@@ -1244,6 +1288,10 @@ class SdkTeammate(Teammate):
                 # "session peak." The dashboard's context-window bar uses this as
                 # the numerator vs. the model's context window limit.
                 self._last_turn_peak_invocation_input_tokens = result.peak_invocation_input_tokens
+            if result.last_assistant_model is not None:
+                # API-authoritative model id. Overwrite per turn so the
+                # snapshot always reflects the most recent observed model.
+                self._last_assistant_model = result.last_assistant_model
             # Success path: text/no-text/SC-8(a) subagent failure synthesis.
             text = result.text
             if not text:

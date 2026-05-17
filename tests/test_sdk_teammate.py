@@ -8,6 +8,7 @@ Broker — same approach as test_stub_teammate.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import types
 from typing import Any
@@ -1726,6 +1727,100 @@ class TestCollectResponseTextT2:
         # failed TNM (null tool_use_id) still counted in failed_task_notifs
         assert len(result.failed_task_notifs) == 1
         assert result.failed_task_notifs[0] is tnm_no_id
+
+    async def test_last_assistant_model_captures_api_model(self) -> None:
+        """active-model-display: TurnDrainResult.last_assistant_model carries
+        the AssistantMessage.model verbatim (API-authoritative model id).
+
+        Given the SDK yields one AssistantMessage with model="claude-opus-4-7";
+        When _collect_response_text drains the stream;
+        Then result.last_assistant_model == "claude-opus-4-7".
+        """
+        class _FakeClient:
+            async def receive_response(self):
+                yield AssistantMessage(
+                    content=[TextBlock(text="hi")],
+                    model="claude-opus-4-7",
+                )
+
+        result = await _collect_response_text(_FakeClient())
+        assert result.last_assistant_model == "claude-opus-4-7"
+
+    async def test_last_assistant_model_latest_wins(self) -> None:
+        """active-model-display: when multiple AssistantMessages arrive in a
+        turn (subagent dispatch, multi-step reasoning), the most recently
+        observed model wins. Simulates a turn where the parent invocation
+        is opus but a fallback message lands as sonnet last.
+        """
+        class _FakeClient:
+            async def receive_response(self):
+                yield AssistantMessage(
+                    content=[TextBlock(text="first")],
+                    model="claude-opus-4-7",
+                )
+                yield AssistantMessage(
+                    content=[TextBlock(text="second")],
+                    model="claude-sonnet-4-6",
+                )
+
+        result = await _collect_response_text(_FakeClient())
+        assert result.last_assistant_model == "claude-sonnet-4-6"
+
+    async def test_last_assistant_model_none_when_no_assistant_message(self) -> None:
+        """active-model-display: a turn with no AssistantMessage (only TNMs,
+        rate-limit-allowed, etc.) leaves last_assistant_model as None so the
+        caller knows nothing was observed.
+        """
+        tnm = self._make_tnm("completed", task_id="t1", uuid="tn-1", tool_use_id="tu-1")
+
+        class _FakeClient:
+            async def receive_response(self):
+                yield tnm
+
+        result = await _collect_response_text(_FakeClient())
+        assert result.last_assistant_model is None
+
+    async def test_assistant_message_usage_non_dict_emits_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """active-model-display follow-up: if the SDK ever changes
+        AssistantMessage.usage from a dict to a typed object, emit a WARNING
+        so the silent zeroing of last_turn_peak_invocation_input_tokens is
+        surfaced loudly. Catches the SDK-upgrade shape-change failure mode
+        the dict-branch would otherwise hide.
+        """
+        class _FakeUsage:
+            input_tokens = 1000
+
+        class _FakeClient:
+            async def receive_response(self):
+                # Stamp a non-dict usage value on the AssistantMessage.
+                msg = AssistantMessage(content=[TextBlock(text="x")], model="m")
+                msg.usage = _FakeUsage()  # type: ignore[assignment]
+                yield msg
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            result = await _collect_response_text(_FakeClient())
+
+        # Cliff signal silently zeroes (existing behavior — that's the bug
+        # the warning surfaces), but the warning fires so it's discoverable.
+        assert result.peak_invocation_input_tokens is None
+        assert any(
+            "AssistantMessage.usage has unexpected type" in r.message
+            for r in caplog.records
+        ), f"expected SDK-shape-change warning; got {[r.message for r in caplog.records]}"
+
+    async def test_last_assistant_model_ignores_empty_string(self) -> None:
+        """active-model-display: defensively, an AssistantMessage with an
+        empty-string model leaves last_assistant_model unchanged (None when
+        no prior valid model was seen).
+        """
+        class _FakeClient:
+            async def receive_response(self):
+                yield AssistantMessage(content=[TextBlock(text="x")], model="")
+
+        result = await _collect_response_text(_FakeClient())
+        assert result.last_assistant_model is None
 
     async def test_handle_one_turn_synthesis_uses_failed_task_notifs(
         self, broker, monkeypatch,
