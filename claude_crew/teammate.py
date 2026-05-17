@@ -255,6 +255,7 @@ class Teammate(ABC):
             "total_cost_usd": 0.0,
             "last_turn_input_tokens": 0,
             "last_turn_output_tokens": 0,
+            "last_turn_peak_invocation_input_tokens": 0,
         }
 
 

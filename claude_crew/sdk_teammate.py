@@ -137,6 +137,14 @@ class TurnDrainResult:
     cumulative_cost_usd: session-cumulative cost from ResultMessage.total_cost_usd.
         Overwrite (not accumulate) — the SDK already maintains the running total.
         None if ResultMessage was absent or total_cost_usd was None/malformed.
+    peak_invocation_input_tokens: largest single-LLM-invocation input observed in
+        this turn, derived from ``AssistantMessage.usage`` (each AssistantMessage
+        corresponds to one LLM call inside the turn). This is the **cliff signal**
+        — the actual context-window utilization at any one moment — distinct from
+        ``turn_input_tokens`` which is the SUM across all invocations in the turn
+        (i.e., the billing total, which can be many times the context window for
+        a long tool-using turn). Use this for context-window UI; use
+        ``turn_input_tokens`` for cost.
     """
 
     text: str
@@ -145,6 +153,8 @@ class TurnDrainResult:
     turn_input_tokens: int | None = None
     turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
+    # None = no AssistantMessage with valid usage was observed (interrupted turn etc.).
+    peak_invocation_input_tokens: int | None = None
 
 
 async def _collect_response_text(
@@ -233,6 +243,7 @@ async def _collect_response_text(
     turn_input_tokens: int | None = None
     turn_output_tokens: int | None = None
     cumulative_cost_usd: float | None = None
+    peak_invocation_input_tokens: int | None = None
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
         # event type (including RateLimitEvent, TaskNotificationMessage)
@@ -277,12 +288,36 @@ async def _collect_response_text(
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
+            # Cliff-signal capture: each AssistantMessage corresponds to one
+            # LLM invocation inside the turn. Its usage.input_tokens is the
+            # single-invocation context window size. ResultMessage.usage (read
+            # above) is the SUM across all invocations in the turn — a billing
+            # number that can be many times the context window for a tool-heavy
+            # turn (verified: a planner with ~5 subagent dispatches showed
+            # ResultMessage.usage.input_tokens ≈ 970k while no single invocation
+            # exceeded the model's 200k context). Track the max across the turn
+            # for the cliff-detection UI.
+            ai_usage = getattr(msg, "usage", None)
+            if isinstance(ai_usage, dict):
+                try:
+                    invocation_input = int(
+                        ai_usage.get("input_tokens", 0)
+                        + ai_usage.get("cache_read_input_tokens", 0)
+                        + ai_usage.get("cache_creation_input_tokens", 0)
+                    )
+                except (TypeError, ValueError):
+                    invocation_input = None
+                if invocation_input is not None and invocation_input > 0:
+                    if (peak_invocation_input_tokens is None
+                            or invocation_input > peak_invocation_input_tokens):
+                        peak_invocation_input_tokens = invocation_input
     return TurnDrainResult(
         text="".join(text_parts),
         failed_task_notifs=failed_task_notifs,
         turn_input_tokens=turn_input_tokens,
         turn_output_tokens=turn_output_tokens,
         cumulative_cost_usd=cumulative_cost_usd,
+        peak_invocation_input_tokens=peak_invocation_input_tokens,
     )
 
 
@@ -477,6 +512,10 @@ class SdkTeammate(Teammate):
         # Last-turn deltas — context-window pressure signal. Overwrite each turn.
         self._last_turn_input_tokens: int = 0
         self._last_turn_output_tokens: int = 0
+        # Peak single-LLM-invocation input within the most recent turn — the
+        # *real* context-window utilization signal (distinct from the turn-
+        # cumulative input above, which sums across all invocations).
+        self._last_turn_peak_invocation_input_tokens: int = 0
 
         # F7 subagent-tracking namespace (completely separate from F8 tool-tracking)
         self._subagent_uses: dict[str, _SubagentUseEntry] = {}
@@ -927,6 +966,7 @@ class SdkTeammate(Teammate):
         snap["total_cost_usd"] = self._total_cost_usd
         snap["last_turn_input_tokens"] = self._last_turn_input_tokens
         snap["last_turn_output_tokens"] = self._last_turn_output_tokens
+        snap["last_turn_peak_invocation_input_tokens"] = self._last_turn_peak_invocation_input_tokens
         # Build current_subagents from BOTH in-flight and limbo-state scratch entries (D10)
         subagent_entries = [
             {
@@ -1199,6 +1239,11 @@ class SdkTeammate(Teammate):
                 self._last_turn_output_tokens = result.turn_output_tokens  # overwrite (per-turn delta)
             if result.cumulative_cost_usd is not None:
                 self._total_cost_usd = result.cumulative_cost_usd  # overwrite (cumulative)
+            if result.peak_invocation_input_tokens is not None:
+                # Overwrite per turn — this is "last turn's peak invocation," not
+                # "session peak." The dashboard's context-window bar uses this as
+                # the numerator vs. the model's context window limit.
+                self._last_turn_peak_invocation_input_tokens = result.peak_invocation_input_tokens
             # Success path: text/no-text/SC-8(a) subagent failure synthesis.
             text = result.text
             if not text:

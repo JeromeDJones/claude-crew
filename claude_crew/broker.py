@@ -66,6 +66,10 @@ class TeammateInfo:
     # context-window bar keeps its final reading on dead teammates.
     last_turn_input_tokens_at_death: int | None = None
     last_turn_output_tokens_at_death: int | None = None
+    # Peak per-invocation input from the most recent turn at death — the real
+    # cliff signal (single-invocation context size, distinct from the turn-cumulative
+    # number above which sums across all LLM invocations in the turn).
+    last_turn_peak_invocation_input_tokens_at_death: int | None = None
     # F19 D-7: per-teammate completed-tool-events snapshot at tombstone time.
     # Captured AFTER _close_open_tools runs (step 8c) so abandoned/killed events
     # land in this tuple. None during the brief window between tombstone (step 5,
@@ -402,6 +406,9 @@ class Broker:
                 total_cost_usd_at_death: float = snap.get("total_cost_usd", 0.0)
                 last_turn_input_tokens_at_death: int = snap.get("last_turn_input_tokens", 0)
                 last_turn_output_tokens_at_death: int = snap.get("last_turn_output_tokens", 0)
+                last_turn_peak_invocation_input_tokens_at_death: int = snap.get(
+                    "last_turn_peak_invocation_input_tokens", 0
+                )
             except AttributeError:
                 last_activity = None
                 idle_at_death = None
@@ -413,6 +420,7 @@ class Broker:
                 total_cost_usd_at_death = None
                 last_turn_input_tokens_at_death = None
                 last_turn_output_tokens_at_death = None
+                last_turn_peak_invocation_input_tokens_at_death = None
         else:
             last_activity = None
             idle_at_death = None
@@ -424,6 +432,7 @@ class Broker:
             total_cost_usd_at_death = None
             last_turn_input_tokens_at_death = None
             last_turn_output_tokens_at_death = None
+            last_turn_peak_invocation_input_tokens_at_death = None
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(
@@ -441,6 +450,7 @@ class Broker:
             total_cost_usd_at_death=total_cost_usd_at_death,
             last_turn_input_tokens_at_death=last_turn_input_tokens_at_death,
             last_turn_output_tokens_at_death=last_turn_output_tokens_at_death,
+            last_turn_peak_invocation_input_tokens_at_death=last_turn_peak_invocation_input_tokens_at_death,
         )
 
         # 6. Pop from active set
@@ -827,6 +837,7 @@ class Broker:
                 "total_cost_usd": info.total_cost_usd_at_death if info.total_cost_usd_at_death is not None else 0.0,
                 "last_turn_input_tokens": info.last_turn_input_tokens_at_death if info.last_turn_input_tokens_at_death is not None else 0,
                 "last_turn_output_tokens": info.last_turn_output_tokens_at_death if info.last_turn_output_tokens_at_death is not None else 0,
+                "last_turn_peak_invocation_input_tokens": info.last_turn_peak_invocation_input_tokens_at_death if info.last_turn_peak_invocation_input_tokens_at_death is not None else 0,
             }
             # Config snapshot retained from spawn (omit key when no AgentDef resolved).
             config = self._configs.get(teammate_id)
@@ -868,6 +879,7 @@ class Broker:
             "total_cost_usd": snap.get("total_cost_usd", 0.0),
             "last_turn_input_tokens": snap.get("last_turn_input_tokens", 0),
             "last_turn_output_tokens": snap.get("last_turn_output_tokens", 0),
+            "last_turn_peak_invocation_input_tokens": snap.get("last_turn_peak_invocation_input_tokens", 0),
         }
         # Config snapshot from spawn time (omit key when no AgentDef resolved).
         config = self._configs.get(teammate_id)

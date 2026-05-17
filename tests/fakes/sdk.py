@@ -58,17 +58,23 @@ def text_response_with_usage(
     cumulative_cost_usd: float,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
+    invocation_inputs: list[int] | None = None,
 ) -> list[Any]:
     """text_response variant that scripts ResultMessage with per-turn usage/cumulative cost.
 
     turn_input_tokens: per-turn input token count (usage.input_tokens value).
+        This is the API billing total — the SUM across every LLM invocation in
+        the turn. For a turn with multiple tool calls, it can be many times
+        the single-invocation context size.
     turn_output_tokens: per-turn output token count (usage.output_tokens value).
     cumulative_cost_usd: session-cumulative cost (ResultMessage.total_cost_usd).
     cache_read/creation_input_tokens: cache token counts (added to usage dict).
-
-    The helper builds ResultMessage.usage with the per-turn values plus cache splits,
-    which SdkTeammate accumulates across turns (D-3: per-turn sum = input_tokens +
-    cache_read_input_tokens + cache_creation_input_tokens).
+    invocation_inputs: optional list of per-LLM-invocation input token counts.
+        When provided, the script emits one AssistantMessage *with* a usage dict
+        for each entry — exercising the peak-invocation tracking path. When
+        None (default), a single AssistantMessage with no usage is emitted
+        (legacy behavior — existing tests assume this and don't assert on the
+        peak field).
     """
     usage: dict[str, int] = {
         "input_tokens": turn_input_tokens,
@@ -78,8 +84,31 @@ def text_response_with_usage(
         usage["cache_read_input_tokens"] = cache_read_input_tokens
     if cache_creation_input_tokens:
         usage["cache_creation_input_tokens"] = cache_creation_input_tokens
+
+    if invocation_inputs is None:
+        # Legacy single-AssistantMessage path — no per-invocation usage.
+        assistant_msgs: list[Any] = [
+            AssistantMessage(content=[TextBlock(text=text)], model="fake-model"),
+        ]
+    else:
+        # Multi-invocation path — one AssistantMessage per invocation, each
+        # with its own usage dict carrying the single-invocation input. Only
+        # the LAST AssistantMessage carries the text payload (mirrors real SDK
+        # behavior — text comes from the final synthesis step).
+        assistant_msgs = []
+        for i, inv_input in enumerate(invocation_inputs):
+            is_last = i == len(invocation_inputs) - 1
+            content_blocks = [TextBlock(text=text)] if is_last else []
+            assistant_msgs.append(
+                AssistantMessage(
+                    content=content_blocks,
+                    model="fake-model",
+                    usage={"input_tokens": inv_input, "output_tokens": 0},
+                )
+            )
+
     return [
-        AssistantMessage(content=[TextBlock(text=text)], model="fake-model"),
+        *assistant_msgs,
         ResultMessage(
             subtype="success",
             duration_ms=0,

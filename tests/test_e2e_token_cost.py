@@ -381,6 +381,70 @@ async def test_e2e_kill_mid_turn_preserves_last_cumulative(
         await broker.shutdown_all()
 
 
+@pytest.mark.asyncio
+async def test_peak_invocation_input_tracks_single_largest_llm_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug fix 2026-05-17: ResultMessage.usage.input_tokens is the SUM across
+    every LLM invocation in the turn (the API billing total). For a tool-using
+    turn it can be many times the model's context window. The context-window
+    bar should NOT use that number — it should use the peak single-invocation
+    input, which is what each AssistantMessage.usage.input_tokens carries.
+
+    This test scripts a turn with three AssistantMessages whose individual
+    inputs are 80k / 195k / 130k (simulating a 3-invocation turn). The final
+    ResultMessage reports the billing total: 405k. The teammate snapshot must
+    expose:
+      - last_turn_input_tokens = 405,000 (billing — unchanged)
+      - last_turn_peak_invocation_input_tokens = 195,000 (cliff signal — NEW)
+
+    Without this fix, the dashboard would show "405k/200k" which is nonsense
+    (a single invocation never exceeded the context window).
+    """
+    fake = FakeSDKClient(
+        scripted_responses=[
+            text_response_with_usage(
+                "done",
+                turn_input_tokens=405_000,  # billing total (sum across invocations)
+                turn_output_tokens=1_000,
+                cumulative_cost_usd=2.50,
+                invocation_inputs=[80_000, 195_000, 130_000],  # per-invocation
+            ),
+        ]
+    )
+    _patch_sdk(monkeypatch, fake)
+
+    broker = Broker()
+    try:
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_sdk_factory)
+        await _send(broker, tid, "do a tool-heavy thing")
+        await _wait_lead(broker, 1)
+
+        snap = broker._teammates[tid].status_snapshot()
+
+        # Billing total — unchanged semantics, still the API-summed input.
+        assert snap["last_turn_input_tokens"] == 405_000, (
+            f"expected last_turn_input_tokens=405000 (API billing total); "
+            f"got {snap['last_turn_input_tokens']}"
+        )
+
+        # Peak per-invocation — the cliff signal the dashboard bar should use.
+        assert snap["last_turn_peak_invocation_input_tokens"] == 195_000, (
+            f"expected last_turn_peak_invocation_input_tokens=195000 "
+            f"(max of 80k/195k/130k single-invocation inputs); got "
+            f"{snap['last_turn_peak_invocation_input_tokens']}"
+        )
+
+        # Sanity: peak < billing total — confirms the new field captures the
+        # right thing and isn't accidentally aliased to the billing sum.
+        assert (
+            snap["last_turn_peak_invocation_input_tokens"]
+            < snap["last_turn_input_tokens"]
+        ), "peak must be strictly less than billing sum for multi-invocation turns"
+    finally:
+        await broker.shutdown_all()
+
+
 @pytest.mark.skipif(
     os.environ.get("CLAUDE_CREW_LIVE_TESTS") != "1",
     reason="live API gated; set CLAUDE_CREW_LIVE_TESTS=1 to run",
