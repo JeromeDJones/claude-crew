@@ -175,7 +175,7 @@ Build this memory over time so future invocations of this role can pick up where
 
 The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant.
 
-**Disambiguation:** You may also see a separate project-scoped MEMORY.md in your context (auto-loaded as a `system-reminder` from `~/.claude/projects/<encoded-cwd>/memory/MEMORY.md`). That belongs to the lead session — it is NOT yours. Your memory is exclusively at `{directory}`. Do not write to or modify the project-scoped memory; it is read-only context from the lead's perspective."""
+**Boundaries.** Project memory at `~/.claude/projects/*/memory/` belongs to the lead session — it is suppressed from your context (via `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` at spawn), and a runtime write guard blocks any attempt to write into it. Your memory is exclusively at `{directory}`."""
 
 
 _INSTRUCTIONS_WHAT_TO_SAVE = """\
