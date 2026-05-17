@@ -474,6 +474,9 @@ class SdkTeammate(Teammate):
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
         self._total_cost_usd: float = 0.0
+        # Last-turn deltas — context-window pressure signal. Overwrite each turn.
+        self._last_turn_input_tokens: int = 0
+        self._last_turn_output_tokens: int = 0
 
         # F7 subagent-tracking namespace (completely separate from F8 tool-tracking)
         self._subagent_uses: dict[str, _SubagentUseEntry] = {}
@@ -922,6 +925,8 @@ class SdkTeammate(Teammate):
         snap["total_input_tokens"] = self._total_input_tokens
         snap["total_output_tokens"] = self._total_output_tokens
         snap["total_cost_usd"] = self._total_cost_usd
+        snap["last_turn_input_tokens"] = self._last_turn_input_tokens
+        snap["last_turn_output_tokens"] = self._last_turn_output_tokens
         # Build current_subagents from BOTH in-flight and limbo-state scratch entries (D10)
         subagent_entries = [
             {
@@ -1175,8 +1180,10 @@ class SdkTeammate(Teammate):
             # D-8: only assign when not None (malformed/missing → unchanged).
             if result.turn_input_tokens is not None:
                 self._total_input_tokens += result.turn_input_tokens  # accumulate
+                self._last_turn_input_tokens = result.turn_input_tokens  # overwrite (per-turn delta)
             if result.turn_output_tokens is not None:
                 self._total_output_tokens += result.turn_output_tokens  # accumulate
+                self._last_turn_output_tokens = result.turn_output_tokens  # overwrite (per-turn delta)
             if result.cumulative_cost_usd is not None:
                 self._total_cost_usd = result.cumulative_cost_usd  # overwrite (cumulative)
             # Success path: text/no-text/SC-8(a) subagent failure synthesis.

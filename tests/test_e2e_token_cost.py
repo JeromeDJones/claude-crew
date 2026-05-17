@@ -260,6 +260,15 @@ async def test_e2e_malformed_midstream_does_not_corrupt_totals(
         assert snap["total_output_tokens"] == 250, (
             f"expected accumulated 250 (50+200); got {snap['total_output_tokens']}"
         )
+        # Last-turn (per-turn delta, overwrite semantics) reflects turn 3's
+        # values — the most recent successful turn. Turn 2 was malformed
+        # (no usage extracted) so it doesn't overwrite the last-turn fields.
+        assert snap["last_turn_input_tokens"] == 400, (
+            f"expected last-turn input 400 (turn 3); got {snap['last_turn_input_tokens']}"
+        )
+        assert snap["last_turn_output_tokens"] == 200, (
+            f"expected last-turn output 200 (turn 3); got {snap['last_turn_output_tokens']}"
+        )
 
         # WARNING must have been logged for the malformed turn-2 usage.
         warning_records = [
@@ -352,6 +361,13 @@ async def test_e2e_kill_mid_turn_preserves_last_cumulative(
         )
         assert info.total_output_tokens_at_death == 50, (
             f"expected at_death output_tokens 50; got {info.total_output_tokens_at_death}"
+        )
+        # Last-turn at_death preserves turn-1's per-turn values (the only completed turn).
+        assert info.last_turn_input_tokens_at_death == 100, (
+            f"expected at_death last_turn_input 100; got {info.last_turn_input_tokens_at_death}"
+        )
+        assert info.last_turn_output_tokens_at_death == 50, (
+            f"expected at_death last_turn_output 50; got {info.last_turn_output_tokens_at_death}"
         )
 
         # get_teammate_status on the dead branch also returns the correct at-death values.
