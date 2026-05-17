@@ -272,15 +272,8 @@ class Broker:
         disallowed_tools = list(dt_raw) if dt_raw is not None else []
 
         # skills: list[str] — spec data contract is always list[str].
-        # "all" literal is normalized to ["all"] so downstream consumers always
-        # see a list (len("all") == 3 would be a misleading chip count).
         skills_raw = getattr(agent_def, "skills", None)
-        if skills_raw is None:
-            pack_skills: list[str] = []
-        elif isinstance(skills_raw, str):
-            pack_skills = [skills_raw]  # "all" literal → single-element list
-        else:
-            pack_skills = list(skills_raw)
+        pack_skills: list[str] = list(skills_raw) if skills_raw is not None else []
 
         # mcp_servers: names only
         mcp_raw = getattr(agent_def, "mcpServers", None)

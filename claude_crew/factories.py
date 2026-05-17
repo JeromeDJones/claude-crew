@@ -129,25 +129,24 @@ def _propagates_to_root(logger_name: str) -> bool:
 
 def _direct_attach_fallbacks(
     handler: StartupDiagCollector,
-) -> list[logging.Logger]:
+) -> tuple[list[logging.Logger], list[tuple[logging.Logger, int]]]:
     """Direct-attach ``handler`` to any source logger that fails the
-    propagation probe. Returns the list of loggers we attached to so the
-    caller can detach symmetrically on context exit.
+    propagation probe. Returns ``(attached, restore_pairs)`` so the caller
+    can detach symmetrically and restore source-logger levels on context
+    exit without coupling state onto the handler instance.
     """
     attached: list[logging.Logger] = []
+    restore_pairs: list[tuple[logging.Logger, int]] = []
     for name in _STARTUP_SOURCE_LOGGERS:
         if _propagates_to_root(name):
             continue
         src = logging.getLogger(name)
         src.addHandler(handler)
-        # Ensure the source logger's effective level lets INFO through;
-        # otherwise the handler never gets called even with direct attach.
         if src.level == logging.NOTSET or src.level > logging.INFO:
-            # Don't permanently lower — record original and restore later.
-            handler._restore_levels.append((src, src.level))  # type: ignore[attr-defined]
+            restore_pairs.append((src, src.level))
             src.setLevel(logging.INFO)
         attached.append(src)
-    return attached
+    return attached, restore_pairs
 
 
 def default_factory(
@@ -189,12 +188,9 @@ def default_factory(
         # fallbacks cover any source logger that was silenced upstream.
         collector_handler: StartupDiagCollector
         with collect_startup_diagnostics() as collector_handler:
-            # Initialize the per-handler restore list used by the
-            # direct-attach helper. The context manager restores the
-            # *root* logger's level on exit; source-logger levels we
-            # touched here are restored manually below.
-            collector_handler._restore_levels = []  # type: ignore[attr-defined]
-            extra_attached = _direct_attach_fallbacks(collector_handler)
+            extra_attached, restore_pairs = _direct_attach_fallbacks(
+                collector_handler
+            )
             try:
                 # Pass home_dir/project_root only when explicitly provided so
                 # existing tests that monkeypatch build_merged_pack with a
@@ -210,7 +206,7 @@ def default_factory(
             finally:
                 for src in extra_attached:
                     src.removeHandler(collector_handler)
-                for src, prev in collector_handler._restore_levels:  # type: ignore[attr-defined]
+                for src, prev in restore_pairs:
                     src.setLevel(prev)
         startup_diagnostics = collector_handler.freeze()
 
@@ -273,24 +269,14 @@ def default_factory(
                 agent_def = merged_pack.get(role)
                 if agent_def is not None:
                     pack_tools = agent_def.tools or []
-                    pack_skills = agent_def.skills
-                    # skills may be "all" literal or a list; only merge when it's a list
-                    if isinstance(pack_skills, str):
-                        # "all" literal — keep as-is, just append extras without duplication
-                        effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
-                        patched_def = dataclasses.replace(
-                            agent_def,
-                            tools=effective_tools,
-                        )
-                    else:
-                        pack_skills_list = pack_skills or []
-                        effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
-                        effective_skills = list(dict.fromkeys(pack_skills_list + (extra_skills or [])))
-                        patched_def = dataclasses.replace(
-                            agent_def,
-                            tools=effective_tools,
-                            skills=effective_skills,
-                        )
+                    pack_skills = agent_def.skills or []
+                    effective_tools = list(dict.fromkeys(pack_tools + (extra_tools or [])))
+                    effective_skills = list(dict.fromkeys(pack_skills + (extra_skills or [])))
+                    patched_def = dataclasses.replace(
+                        agent_def,
+                        tools=effective_tools,
+                        skills=effective_skills,
+                    )
                 else:
                     # Role not in pack — create a synthetic AgentDefinition for extras only.
                     patched_def = AgentDefinition(
