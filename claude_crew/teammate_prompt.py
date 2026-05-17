@@ -39,9 +39,15 @@ NEGATIVE_PATTERNS: tuple[str, ...] = (
 # Section sentinels (Markdown headings) for ordering assertions.
 # Tests assert these appear in the assembled prompt in this order.
 SENTINEL_CONTEXT = "## Operating context"
-SENTINEL_SUBAGENTS = "## Available subagents"
 SENTINEL_DELEGATION = "## Delegation"
 SENTINEL_MEMORY = "## Memory from prior sessions"
+
+# Historical note (2026-05-17): SENTINEL_SUBAGENTS / _build_subagent_list
+# were removed. The framework-injected Agent tool description already
+# carries per-agent names + descriptions + tool surfaces — including names
+# alone in the spawn-time prompt was duplication costing ~700 tokens per
+# LLM invocation across every teammate. Routing signal is unchanged; the
+# delegation section now points at the Agent tool's parameter docs.
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +70,10 @@ the lead). Don't ask the lead to load files a subagent could fetch.
 
 {explorer_hint}
 
-Route work by reading each subagent's description above. If a dispatched
-subagent reports it can't complete the work because it lacks a tool,
-switch to a different subagent or handle that step directly.
+Route work by reading each subagent's description in the Agent tool's
+parameter documentation. If a dispatched subagent reports it can't complete
+the work because it lacks a tool, switch to a different subagent or handle
+that step directly.
 """
 
 
@@ -85,26 +92,27 @@ def build_teammate_prompt(
 
     Returns: pack_body + "\\n\\n" + addendum
 
-    The addendum contains three ordered sections delimited by SENTINEL_*
-    constants, plus an optional fourth when memory_section is provided:
+    The addendum contains two ordered sections delimited by SENTINEL_*
+    constants, plus an optional third when memory_section is provided:
       1. SENTINEL_CONTEXT    — corrects leaf-context language for teammate use
-      2. SENTINEL_SUBAGENTS  — sorted subagent roster, self excluded
-      3. SENTINEL_DELEGATION — delegation heuristic + conditional explorer hint
-      4. SENTINEL_MEMORY     — injected when pack declares memory: user (optional)
+      2. SENTINEL_DELEGATION — delegation heuristic + conditional explorer hint
+      3. SENTINEL_MEMORY     — injected when pack declares memory: user (optional)
+
+    The ``role`` argument is kept on the API for backward compatibility and
+    future use (e.g., role-scoped memory selection); it is currently
+    unused by the assembly logic now that the subagent list has been removed.
 
     Args:
-        role: the teammate's own role key; filtered out of the subagent list
-              (a teammate cannot delegate to itself).
+        role: the teammate's own role key.
         pack_body: raw pack body text, no substrate framing, no frontmatter.
         agents: the agents dict (role-key → AgentDefinition); used for the
-                subagent list and the explorer-hint conditional. Defensive on
-                missing or malformed description fields.
+                explorer-hint conditional only. Defensive on absent ``explorer``.
         memory_section: pre-built memory section string from
                         teammate_memory.build_memory_section, or None.
     """
-    subagent_section = _build_subagent_list(role, agents)
+    del role  # retained on the API; unused since subagent-list removal (2026-05-17)
     delegation = _DELEGATION_TEMPLATE.format(explorer_hint=_explorer_hint(agents))
-    parts = [_CONTEXT_OVERRIDE, subagent_section, delegation]
+    parts = [_CONTEXT_OVERRIDE, delegation]
     if memory_section is not None:
         parts.append(memory_section)
     addendum = "\n\n".join(parts)
@@ -114,30 +122,6 @@ def build_teammate_prompt(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-
-def _build_subagent_list(self_role: str, agents: dict[str, Any]) -> str:
-    """Build the ## Available subagents section.
-
-    - Sorted by name (stable ordering across Python versions and envs).
-    - Excludes self_role (a teammate cannot delegate to itself).
-    - Defensive on missing / non-string description (user packs may be
-      malformed; fall back to name-only, never raise).
-    - Name + description only. Tool surfaces are not enumerated; routing
-      follows from the description, with the delegation section's
-      tool-surface-error fallback for mis-routes.
-    """
-    lines = [SENTINEL_SUBAGENTS, ""]
-    for name in sorted(agents.keys()):
-        if name == self_role:
-            continue
-        defn = agents[name]
-        desc = getattr(defn, "description", None)
-        if isinstance(desc, str) and desc.strip():
-            lines.append(f"- **{name}** — {desc.strip()}")
-        else:
-            lines.append(f"- **{name}**")
-    return "\n".join(lines)
 
 
 def _explorer_hint(agents: dict[str, Any]) -> str:

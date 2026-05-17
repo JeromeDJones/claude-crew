@@ -25,8 +25,6 @@ from claude_crew.teammate_prompt import (
     NEGATIVE_PATTERNS,
     SENTINEL_CONTEXT,
     SENTINEL_DELEGATION,
-    SENTINEL_SUBAGENTS,
-    _build_subagent_list,
     _explorer_hint,
     build_teammate_prompt,
 )
@@ -103,19 +101,33 @@ class TestStaticContradictionLint:
 
 
 class TestSentinelOrdering:
-    """SC-2 — all sentinels appear in the documented order."""
+    """SC-2 — all sentinels appear in the documented order.
+
+    SENTINEL_SUBAGENTS was removed 2026-05-17 (its content duplicated the
+    framework-injected Agent tool description). The addendum now contains
+    Operating context → Delegation.
+    """
 
     def test_assembled_prompt_contains_all_sentinels(
         self, default_pack_agents, default_pack_bodies
     ) -> None:
         body = default_pack_bodies["planner"]
         assembled = build_teammate_prompt("planner", body, default_pack_agents)
-        for sentinel in (
-            SENTINEL_CONTEXT,
-            SENTINEL_SUBAGENTS,
-            SENTINEL_DELEGATION,
-        ):
+        for sentinel in (SENTINEL_CONTEXT, SENTINEL_DELEGATION):
             assert sentinel in assembled, f"Sentinel {sentinel!r} missing from assembled prompt"
+
+    def test_subagent_list_section_is_gone(
+        self, default_pack_agents, default_pack_bodies
+    ) -> None:
+        """The ## Available subagents block is intentionally absent — its
+        content duplicated the framework-injected Agent tool description
+        (verified by the planner context audit, 2026-05-17)."""
+        body = default_pack_bodies["planner"]
+        assembled = build_teammate_prompt("planner", body, default_pack_agents)
+        assert "## Available subagents" not in assembled, (
+            "Subagent list section must NOT appear in assembled prompt — "
+            "it duplicated Agent tool description content"
+        )
 
     def test_sentinels_appear_in_documented_order(
         self, default_pack_agents, default_pack_bodies
@@ -123,88 +135,20 @@ class TestSentinelOrdering:
         body = default_pack_bodies["planner"]
         assembled = build_teammate_prompt("planner", body, default_pack_agents)
         ctx_idx = assembled.index(SENTINEL_CONTEXT)
-        sub_idx = assembled.index(SENTINEL_SUBAGENTS)
         deleg_idx = assembled.index(SENTINEL_DELEGATION)
-        assert ctx_idx < sub_idx < deleg_idx, (
-            f"Sentinel order wrong: CONTEXT={ctx_idx}, SUBAGENTS={sub_idx}, "
-            f"DELEGATION={deleg_idx}"
+        assert ctx_idx < deleg_idx, (
+            f"Sentinel order wrong: CONTEXT={ctx_idx}, DELEGATION={deleg_idx}"
         )
 
 
 # ---------------------------------------------------------------------------
-# D-3 / R-1 / R-2  Peer list correctness
+# Removed 2026-05-17: TestSubagentList class. _build_subagent_list was deleted
+# along with the ## Available subagents section in the addendum. The framework-
+# injected Agent tool description already carries names + per-agent descriptions
+# + tool surfaces; repeating any of that in the spawn-time prompt was ~700 tokens
+# of pure duplication per LLM invocation. Section absence is guarded by
+# TestSentinelOrdering.test_subagent_list_section_is_gone above.
 # ---------------------------------------------------------------------------
-
-
-class TestSubagentList:
-    """Tests for _build_subagent_list: self-exclusion, sort order, description handling."""
-
-    def test_subagent_list_excludes_self(self, default_pack_agents) -> None:
-        result = _build_subagent_list("planner", default_pack_agents)
-        # Should not appear as a peer list entry
-        assert "- **planner**" not in result, (
-            "planner must not list itself as a peer"
-        )
-
-    def test_subagent_list_sorted_by_name(self, default_pack_agents) -> None:
-        # Use a role not in the pack so all agents appear as peers.
-        result = _build_subagent_list("nonexistent-role", default_pack_agents)
-        # Extract names from lines matching "- **<name>**"
-        names = [
-            line.split("**")[1]
-            for line in result.splitlines()
-            if line.startswith("- **")
-        ]
-        assert names == sorted(names), (
-            f"Peer list is not sorted alphabetically: {names}"
-        )
-
-    def test_subagent_list_includes_description_when_present(
-        self, default_pack_agents
-    ) -> None:
-        # explorer has a known description; exclude it from self so it appears
-        result = _build_subagent_list("nonexistent-role", default_pack_agents)
-        explorer_defn = default_pack_agents["explorer"]
-        expected_line = f"- **explorer** — {explorer_defn.description.strip()}"
-        assert expected_line in result, (
-            f"Expected description line {expected_line!r} not found in peer list:\n{result}"
-        )
-
-    def test_subagent_list_falls_back_to_name_only_when_description_missing(self) -> None:
-        ns = types.SimpleNamespace(description=None)
-        fake_agents: dict[str, Any] = {"alpha": ns}
-        result = _build_subagent_list("nonexistent-role", fake_agents)
-        assert "- **alpha**" in result
-        assert "—" not in result, "Name-only entry must not contain em-dash"
-
-    def test_subagent_list_falls_back_to_name_only_when_description_is_non_string(
-        self,
-    ) -> None:
-        ns = types.SimpleNamespace(description=123)
-        fake_agents: dict[str, Any] = {"beta": ns}
-        result = _build_subagent_list("nonexistent-role", fake_agents)
-        assert "- **beta**" in result
-        assert "—" not in result, "Non-string description must be treated as missing"
-
-    def test_subagent_list_omits_tools_sub_bullet(self, default_pack_agents) -> None:
-        """Per-agent tool surfaces are intentionally NOT listed (2026-05-08).
-
-        The tools sub-bullet was added 2026-05-01 to prevent mis-routing
-        (BACKLOG: parent dispatched a Bash task to a no-Bash subagent and
-        got a fail-soft fabrication). Removed because the per-agent context
-        cost outweighed the routing benefit. Mis-routing is mitigated by
-        a combination of (a) capability hints embedded in the descriptions
-        themselves ("read-only, no shell" etc.), (b) `general` carrying a
-        broad tool surface so shell work has a correct destination, and
-        (c) a tool-surface-error recovery hint in the delegation section.
-        """
-        result = _build_subagent_list("nonexistent-role", default_pack_agents)
-        assert "tools:" not in result, (
-            f"tools sub-bullet should not be rendered. Got:\n{result}"
-        )
-        # name + description still present
-        assert "- **explorer**" in result
-        assert "- **general**" in result
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +278,8 @@ class TestSdkTeammateIntegration:
             f"Pack body content {first_content!r} not found in system prompt"
         )
 
-        # All sentinels appear
-        for sentinel in (
-            SENTINEL_CONTEXT,
-            SENTINEL_SUBAGENTS,
-            SENTINEL_DELEGATION,
-        ):
+        # All sentinels appear (SUBAGENTS removed 2026-05-17 — duplicated Agent tool docs)
+        for sentinel in (SENTINEL_CONTEXT, SENTINEL_DELEGATION):
             assert sentinel in prompt, (
                 f"Sentinel {sentinel!r} missing from general teammate prompt"
             )
