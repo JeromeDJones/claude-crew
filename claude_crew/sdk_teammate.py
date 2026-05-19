@@ -160,6 +160,14 @@ class TurnDrainResult:
     # the API used to generate the response). None when no AssistantMessage
     # was observed.
     last_assistant_model: str | None = None
+    # stop_reason: the model's stop_reason from the last ResultMessage
+    # (e.g., "end_turn", "tool_use", "stop_sequence"). None if no ResultMessage
+    # was observed or the field was absent.
+    stop_reason: str | None = None
+    # content_block_types: list of content block kinds seen in the last
+    # AssistantMessage (e.g., ["text"], ["text", "tool_use"], ["thinking"]).
+    # Empty list if no AssistantMessage was observed. Shape only, no content.
+    content_block_types: list[str] = dataclasses.field(default_factory=list)
 
 
 async def _collect_response_text(
@@ -258,6 +266,8 @@ async def _collect_response_text(
     cumulative_cost_usd: float | None = None
     peak_invocation_input_tokens: int | None = None
     last_assistant_model: str | None = None
+    stop_reason: str | None = None
+    content_block_types: list[str] = []
     async for msg in client.receive_response():
         # D1 stamping order: invoke before any continue branch so every
         # event type (including RateLimitEvent, TaskNotificationMessage)
@@ -284,6 +294,10 @@ async def _collect_response_text(
                 turn_output_tokens = ro
             if rc is not None:
                 cumulative_cost_usd = rc
+            # Capture stop_reason from the last ResultMessage.
+            sr = getattr(msg, "stop_reason", None)
+            if isinstance(sr, str):
+                stop_reason = sr
             continue
         if isinstance(msg, TaskNotificationMessage):
             # Fire callback for ALL statuses (completed/failed/stopped) so
@@ -306,6 +320,8 @@ async def _collect_response_text(
             ai_model = getattr(msg, "model", None)
             if isinstance(ai_model, str) and ai_model:
                 last_assistant_model = ai_model
+            # Capture content block types (shape only) from the last AssistantMessage.
+            content_block_types = [type(block).__name__ for block in msg.content]
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
@@ -354,6 +370,8 @@ async def _collect_response_text(
         cumulative_cost_usd=cumulative_cost_usd,
         peak_invocation_input_tokens=peak_invocation_input_tokens,
         last_assistant_model=last_assistant_model,
+        stop_reason=stop_reason,
+        content_block_types=content_block_types,
     )
 
 
@@ -1308,12 +1326,92 @@ class SdkTeammate(Teammate):
                         message=f"subagent failed: {summary}",
                     )
                     return
-                await self._send_error_envelope(
-                    to=env.sender,
-                    code="invalid_response",
-                    message="model returned no text content",
-                )
-                return
+                # Retry on empty text with nudge. Up to 2 retries (3 total attempts).
+                retry_count = 0
+                max_retries = 2
+                original_prompt = prompt
+                last_result = result
+                while retry_count < max_retries:
+                    retry_count += 1
+                    nudged_prompt = (
+                        f"Your previous response was empty. "
+                        f"Please respond to this request: {original_prompt}"
+                    )
+                    try:
+                        await client.query(nudged_prompt, session_id=session_id)
+                        result = await asyncio.wait_for(
+                            _collect_response_text(client, self._stamp_activity, self._record_task_notif),
+                            timeout=self._backstop_seconds,
+                        )
+                        text = result.text
+                        if text:
+                            # Retry succeeded — update tokens and send response.
+                            if result.turn_input_tokens is not None:
+                                self._total_input_tokens += result.turn_input_tokens
+                                self._last_turn_input_tokens = result.turn_input_tokens
+                            if result.turn_output_tokens is not None:
+                                self._total_output_tokens += result.turn_output_tokens
+                                self._last_turn_output_tokens = result.turn_output_tokens
+                            if result.cumulative_cost_usd is not None:
+                                self._total_cost_usd = result.cumulative_cost_usd
+                            if result.peak_invocation_input_tokens is not None:
+                                self._last_turn_peak_invocation_input_tokens = result.peak_invocation_input_tokens
+                            if result.last_assistant_model is not None:
+                                self._last_assistant_model = result.last_assistant_model
+                            break
+                        # Still empty, continue retry loop.
+                        last_result = result
+                    except asyncio.TimeoutError:
+                        # Backstop fired on retry — treat as final failure.
+                        retry_count = max_retries
+                        break
+                    except RateLimitedError:
+                        # Rate limit on retry — escalate immediately.
+                        await self._send_error_envelope(
+                            to=env.sender, code="rate_limited",
+                            message="rate limited during empty-text retry",
+                        )
+                        return
+                    except Exception as retry_exc:
+                        # Other exception on retry — escalate immediately.
+                        exc_name = type(retry_exc).__name__
+                        if (
+                            "ProcessError" in exc_name
+                            or "CLIConnectionError" in exc_name
+                            or "BrokenPipe" in exc_name
+                        ):
+                            self._death_in_flight_envelope = env
+                            self._death_suspected = True
+                            return
+                        logger.warning(
+                            "retry query failed: teammate=%s role=%s exc=%s",
+                            self.id, self.role, retry_exc,
+                        )
+                        await self._send_error_envelope(
+                            to=env.sender, code=_classify_error(retry_exc),
+                            message=str(retry_exc),
+                        )
+                        return
+                if not text:
+                    # Exhausted retries — log structured entry and emit invalid_response.
+                    logger.warning(
+                        "empty_turn_exhausted_retries: teammate=%s role=%s "
+                        "stop_reason=%s content_block_types=%s "
+                        "last_turn_input_tokens=%s last_assistant_model=%s "
+                        "retry_count=%d",
+                        self.id, self.role,
+                        last_result.stop_reason,
+                        last_result.content_block_types,
+                        self._last_turn_input_tokens,
+                        self._last_assistant_model,
+                        retry_count,
+                    )
+                    await self._send_error_envelope(
+                        to=env.sender,
+                        code="invalid_response",
+                        message="model returned no text content",
+                    )
+                    return
             assert self._broker is not None
             await self._broker.send(Envelope(
                 id=new_message_id(),

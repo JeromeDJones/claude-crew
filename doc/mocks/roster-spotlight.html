@@ -1,0 +1,1596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>claude-crew · roster + spotlight mock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    /* Mirror dashboard.html palette exactly */
+    --bg-0: oklch(0.91 0.016 236);
+    --bg-1: oklch(0.83 0.026 237);
+    --bg-2: oklch(0.74 0.034 238);
+    --bg-3: oklch(0.64 0.042 239);
+    --bg-4: oklch(0.54 0.050 240);
+    --line: oklch(0.60 0.044 239);
+    --line-soft: oklch(0.72 0.032 238);
+    --fg-0: oklch(0.13 0.068 262);
+    --fg-1: oklch(0.22 0.074 260);
+    --fg-2: oklch(0.40 0.055 257);
+    --fg-3: oklch(0.55 0.040 253);
+    --accent:      oklch(0.55 0.210 240);
+    --accent-soft: oklch(0.55 0.210 240 / 0.14);
+    --accent-line: oklch(0.55 0.210 240 / 0.45);
+
+    --st-idle:     oklch(0.50 0.038 257);
+    --st-thinking: oklch(0.62 0.15 75);
+    --st-tool:     oklch(0.55 0.16 290);
+    --st-waiting:  oklch(0.55 0.16 240);
+    --st-done:     oklch(0.57 0.15 150);
+    --st-error:    oklch(0.53 0.18 25);
+
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Geist Mono', 'Fira Code', monospace;
+    --font-display: 'Fraunces', 'Inter', serif;
+  }
+
+  html, body { height: 100%; background: var(--bg-0); color: var(--fg-0); font-family: var(--font-sans); font-size: 13px; -webkit-font-smoothing: antialiased; }
+
+  body {
+    padding: 28px 28px 60px;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, oklch(0.55 0.210 240 / 0.07), transparent 60%),
+      radial-gradient(900px 500px at -5% 30%, oklch(0.62 0.15 75 / 0.05), transparent 60%),
+      var(--bg-0);
+  }
+
+  /* ---------- page chrome ---------- */
+  .page-header {
+    display: flex; align-items: baseline; gap: 18px;
+    margin-bottom: 22px; padding-bottom: 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .page-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 26px;
+    letter-spacing: -0.02em;
+    color: var(--fg-0);
+  }
+  .page-title em {
+    font-style: italic;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .page-sub {
+    font-size: 11.5px;
+    color: var(--fg-2);
+    letter-spacing: 0.02em;
+  }
+  .page-sub .mono { font-family: var(--font-mono); color: var(--fg-1); }
+
+  .scene-stack { display: flex; flex-direction: column; gap: 44px; }
+
+  .scene {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg-0);
+    overflow: hidden;
+    box-shadow: 0 1px 0 oklch(1 0 0 / 0.4) inset, 0 12px 32px -24px oklch(0.13 0.068 262 / 0.4);
+  }
+  .scene-header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--bg-1), var(--bg-0));
+  }
+  .scene-tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    padding: 3px 7px;
+    border: 1px solid var(--accent-line);
+    border-radius: 3px;
+    background: var(--accent-soft);
+  }
+  .scene-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg-0); }
+  .scene-desc  { font-size: 11.5px; color: var(--fg-2); }
+  .scene-desc strong { color: var(--fg-1); font-weight: 600; }
+  .scene-spacer { flex: 1; }
+  .scene-meta  { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); letter-spacing: 0.04em; }
+
+  /* ---------- layout ---------- */
+  .frame {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    height: 720px;
+    background: var(--bg-0);
+  }
+  .frame.tall { height: 820px; }
+
+  /* ---------- left rail ---------- */
+  .rail {
+    display: grid;
+    grid-template-rows: 1fr auto auto auto;
+    border-right: 1px solid var(--line);
+    background: var(--bg-1);
+    min-height: 0;
+  }
+
+  .rail-section-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 14px 7px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .rail-section-head .count {
+    color: var(--fg-1);
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  .rail-section-head .selected-badge {
+    margin-left: auto;
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+
+  .roster {
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .roster-list { display: flex; flex-direction: column; }
+
+  /* roster row */
+  .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 3px 22px 1fr;
+    gap: 10px;
+    align-items: stretch;
+    padding: 0;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .row:hover { background: var(--bg-2); }
+  .row.selected {
+    background: var(--bg-0);
+    box-shadow: inset -2px 0 0 var(--accent);
+  }
+  .row.selected::after {
+    content: "";
+    position: absolute;
+    inset: 0 -1px 0 auto;
+    width: 1px;
+    background: var(--bg-0);
+  }
+
+  .row-accent {
+    width: 3px;
+    background: transparent;
+  }
+  .row-accent.idle    { background: transparent; }
+  .row-accent.active  { background: var(--st-tool); opacity: 0.5; }
+  .row-accent.stuck   { background: var(--st-tool); opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
+  .row-accent.thinking{ background: var(--st-thinking); opacity: 0.7; animation: pulse 1.6s ease-in-out infinite; }
+  .row-accent.error   { background: var(--st-error); }
+  .row-accent.done    { background: var(--st-done); opacity: 0.6; }
+
+  .row-avatar {
+    align-self: center;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    color: oklch(0.98 0 0);
+    letter-spacing: 0.02em;
+    margin-left: 4px;
+  }
+  /* avatar palette — one of several deterministic hues */
+  .av-1 { background: oklch(0.55 0.16 240); }
+  .av-2 { background: oklch(0.55 0.16 290); }
+  .av-3 { background: oklch(0.57 0.15 150); }
+  .av-4 { background: oklch(0.62 0.15 75);  }
+  .av-5 { background: oklch(0.53 0.18 25);  color: oklch(0.99 0 0); }
+  .av-6 { background: oklch(0.50 0.10 200); }
+  .av-7 { background: oklch(0.45 0.14 320); }
+  .av-8 { background: oklch(0.50 0.038 257); }
+
+  .row-body {
+    display: grid;
+    grid-template-rows: auto auto;
+    row-gap: 3px;
+    padding: 8px 12px 8px 0;
+    min-width: 0;
+  }
+  .row-line-1 {
+    display: flex; align-items: center; gap: 8px;
+    min-width: 0;
+  }
+  .row-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fg-0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .row-role {
+    font-size: 11px;
+    color: var(--fg-3);
+    font-weight: 400;
+    margin-left: -3px;
+    flex-shrink: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row-id {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-3);
+    flex-shrink: 0;
+    letter-spacing: 0.02em;
+  }
+  .row-line-2 {
+    display: flex; align-items: center; gap: 8px;
+    min-width: 0;
+  }
+  .model-badge {
+    display: inline-flex; align-items: center;
+    height: 16px; padding: 0 6px;
+    border-radius: 3px;
+    background: var(--bg-2);
+    border: 1px solid var(--line-soft);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--fg-2);
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
+  }
+  .model-badge.opus { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+
+  .ctx-bar {
+    width: 56px;
+    height: 5px;
+    background: var(--bg-2);
+    border-radius: 2px;
+    overflow: hidden;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .ctx-bar > i {
+    display: block; height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .ctx-bar.warn > i  { background: var(--st-thinking); }
+  .ctx-bar.crit > i  { background: var(--st-error); }
+
+  .row-cost {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-2);
+    flex-shrink: 0;
+    letter-spacing: 0;
+  }
+  .row-ago {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-3);
+    flex-shrink: 0;
+  }
+
+  .row-line-3 {
+    grid-column: 3;
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 2px;
+    min-width: 0;
+  }
+  .tool-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 17px; padding: 0 7px;
+    border-radius: 3px;
+    background: var(--bg-2);
+    border: 1px solid var(--line-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-1);
+    max-width: 100%;
+    min-width: 0;
+  }
+  .tool-chip .name { color: var(--st-tool); font-weight: 600; }
+  .tool-chip .sep  { color: var(--fg-3); }
+  .tool-chip .elapsed { color: var(--fg-2); }
+  .tool-chip.stuck {
+    border-color: oklch(0.53 0.18 25 / 0.5);
+    background: oklch(0.53 0.18 25 / 0.10);
+  }
+  .tool-chip.stuck .name { color: var(--st-error); }
+  .tool-chip.stuck .elapsed { color: var(--st-error); font-weight: 600; }
+
+  .row-check {
+    position: absolute;
+    top: 9px; right: 9px;
+    width: 14px; height: 14px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--bg-0);
+    display: grid; place-items: center;
+    pointer-events: none;
+  }
+  .row.selected .row-check {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .row.selected .row-check::after {
+    content: "";
+    width: 7px; height: 4px;
+    border-left: 1.5px solid white;
+    border-bottom: 1.5px solid white;
+    transform: rotate(-45deg) translate(0px, -1px);
+  }
+
+  /* ---------- pinned panels ---------- */
+  .pinned {
+    border-top: 1px solid var(--line);
+    background: var(--bg-1);
+  }
+  .pinned .body {
+    padding: 8px 14px 12px;
+    font-size: 11px;
+    color: var(--fg-2);
+  }
+  .terminated-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0;
+    color: var(--fg-3);
+    font-size: 11px;
+  }
+  .terminated-row .name {
+    text-decoration: line-through;
+    text-decoration-color: var(--fg-3);
+  }
+  .terminated-row .ago {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .notice {
+    display: flex; gap: 8px;
+    padding: 6px 0;
+    font-size: 10.5px;
+    color: var(--fg-2);
+    line-height: 1.45;
+  }
+  .notice .cat {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--st-thinking);
+  }
+
+  .topology {
+    border-top: 1px solid var(--line);
+    background: var(--bg-0);
+  }
+  .topology .body {
+    padding: 12px 14px 14px;
+  }
+  .topo-graph {
+    height: 92px;
+    background:
+      linear-gradient(90deg, var(--line-soft) 1px, transparent 1px) 0 0 / 22px 22px,
+      linear-gradient(0deg, var(--line-soft) 1px, transparent 1px) 0 0 / 22px 22px,
+      var(--bg-0);
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    position: relative;
+    overflow: hidden;
+  }
+  .topo-node {
+    position: absolute;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--bg-0);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 1px var(--fg-3);
+  }
+  .topo-node.lead {
+    background: var(--accent);
+    width: 22px; height: 22px;
+    box-shadow: 0 0 0 1px var(--accent), 0 0 14px var(--accent-line);
+  }
+  .topo-edge {
+    position: absolute;
+    height: 1px;
+    background: var(--line);
+    transform-origin: 0 0;
+  }
+  .topo-edge.active { background: var(--accent); opacity: 0.8; }
+
+  /* ---------- spotlight pane ---------- */
+  .spotlight {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-0);
+  }
+  .spotlight-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--bg-0), oklch(0.91 0.016 236 / 0));
+    flex-shrink: 0;
+  }
+  .spotlight-bar .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--fg-3);
+  }
+  .spotlight-bar .count {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-weight: 500;
+    font-size: 15px;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+  }
+  .spotlight-bar .of {
+    font-size: 11px; color: var(--fg-2);
+  }
+  .spotlight-bar .tools {
+    margin-left: auto;
+    display: flex; gap: 6px;
+  }
+  .toolbtn {
+    height: 22px; padding: 0 9px;
+    display: inline-flex; align-items: center; gap: 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg-0);
+    font-size: 11px;
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+  }
+  .toolbtn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+
+  .columns {
+    flex: 1;
+    display: grid;
+    gap: 1px;
+    background: var(--line);
+    min-height: 0;
+  }
+  .columns.cols-1 { grid-template-columns: 1fr; }
+  .columns.cols-2 { grid-template-columns: 1fr 1fr; }
+  .columns.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+  .col {
+    display: flex; flex-direction: column;
+    background: var(--bg-0);
+    min-width: 0;
+    min-height: 0;
+  }
+  .col-accent { height: 3px; flex-shrink: 0; }
+  .col-accent.active { background: var(--st-tool); opacity: 0.5; }
+  .col-accent.stuck { background: var(--st-tool); animation: pulse 1.6s ease-in-out infinite; }
+  .col-accent.thinking { background: var(--st-thinking); opacity: 0.7; animation: pulse 1.6s ease-in-out infinite; }
+  .col-accent.done { background: var(--st-done); opacity: 0.6; }
+
+  .col-header {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-1);
+    flex-shrink: 0;
+  }
+  .col-h1 { display: flex; align-items: center; gap: 8px; }
+  .col-h1 .name {
+    font-size: 12.5px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .col-h1 .role { font-weight: 400; color: var(--fg-3); margin-left: 5px; font-size: 11px; }
+  .col-h1 .id   { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); }
+  .col-h1 .dot  {
+    margin-left: auto;
+    width: 6px; height: 6px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .col-h2 { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+
+  .col-status {
+    padding: 6px 14px;
+    font-size: 10.5px;
+    color: var(--fg-2);
+    background: var(--bg-0);
+    border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: 6px;
+    flex-shrink: 0;
+  }
+  .col-status .ago { margin-left: auto; font-family: var(--font-mono); }
+
+  .col-tool-row {
+    height: 26px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--bg-0);
+    display: flex; align-items: center;
+    flex-shrink: 0;
+  }
+
+  .col-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    background:
+      linear-gradient(180deg, oklch(0.91 0.016 236 / 0) 0, oklch(0.91 0.016 236 / 0) 90%, var(--bg-1) 100%),
+      var(--bg-0);
+    display: flex; flex-direction: column; gap: 10px;
+    min-height: 0;
+  }
+  .msg {
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    padding: 8px 10px;
+    background: var(--bg-0);
+    box-shadow: 0 1px 0 oklch(1 0 0 / 0.5) inset;
+  }
+  .msg.user {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
+  .msg.tool {
+    background: oklch(0.74 0.034 238 / 0.4);
+    border-color: var(--line-soft);
+  }
+  .msg .head {
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-3);
+    margin-bottom: 5px;
+  }
+  .msg .head .who { color: var(--fg-1); font-weight: 600; }
+  .msg .head .when { margin-left: auto; color: var(--fg-3); text-transform: none; letter-spacing: 0; }
+  .msg .body { font-size: 12px; color: var(--fg-1); line-height: 1.5; }
+  .msg .body code {
+    font-family: var(--font-mono);
+    background: var(--bg-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+
+  .col-input {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-1);
+    flex-shrink: 0;
+    display: flex; gap: 8px;
+  }
+  .col-input .field {
+    flex: 1; height: 30px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--bg-0);
+    padding: 0 10px;
+    font-size: 12px;
+    color: var(--fg-3);
+    display: flex; align-items: center;
+    font-style: italic;
+  }
+  .col-input .send {
+    width: 30px; height: 30px;
+    border-radius: 5px;
+    background: var(--accent);
+    color: white;
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 14px;
+  }
+
+  /* spotlight empty state */
+  .empty {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    padding: 40px;
+  }
+  .empty-card {
+    text-align: center;
+    max-width: 340px;
+  }
+  .empty-title {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-style: italic;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    margin-bottom: 8px;
+  }
+  .empty-body {
+    font-size: 12px;
+    color: var(--fg-2);
+    line-height: 1.55;
+  }
+
+  /* ---------- dots ---------- */
+  .dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot.idle        { background: var(--st-idle); }
+  .dot.thinking    { background: var(--st-thinking); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.tool-use    { background: var(--st-tool);     animation: pulse 1.6s ease-in-out infinite; }
+  .dot.waiting     { background: var(--st-waiting); }
+  .dot.active      { background: var(--st-done); }
+  .dot.done        { background: var(--st-done); }
+  .dot.error       { background: var(--st-error); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+  }
+
+  /* scrollbars */
+  .roster::-webkit-scrollbar, .col-stream::-webkit-scrollbar { width: 8px; }
+  .roster::-webkit-scrollbar-thumb, .col-stream::-webkit-scrollbar-thumb {
+    background: var(--bg-3); border-radius: 4px; border: 2px solid var(--bg-1);
+  }
+
+  /* legend at bottom */
+  .legend {
+    margin-top: 36px;
+    padding: 18px 22px;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    background: linear-gradient(180deg, oklch(0.83 0.026 237 / 0.35), oklch(0.91 0.016 236 / 0));
+    font-size: 11.5px;
+    color: var(--fg-2);
+    line-height: 1.6;
+  }
+  .legend strong { color: var(--fg-0); font-weight: 600; }
+  .legend code {
+    font-family: var(--font-mono);
+    background: var(--bg-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10.5px;
+    color: var(--fg-1);
+  }
+  .legend ul { padding-left: 18px; margin-top: 6px; }
+  .legend li { margin-bottom: 3px; }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1 class="page-title"><em>Mission Control</em> — Roster + Spotlight</h1>
+  <span class="page-sub">
+    Layout study for <span class="mono">doc/issues/N15-readability</span> &nbsp;·&nbsp;
+    target file <span class="mono">claude_crew/ui/dashboard.html</span>
+  </span>
+</div>
+
+<div class="scene-stack">
+
+  <!-- ================================================================ -->
+  <!-- SCENE 1 : N=3, all selected                                       -->
+  <!-- ================================================================ -->
+  <section class="scene">
+    <div class="scene-header">
+      <span class="scene-tag">scene 1</span>
+      <span class="scene-title">N = 3 · all selected</span>
+      <span class="scene-desc">Small crew. Roster <strong>and</strong> spotlight feel comfortable; nothing wasted.</span>
+      <span class="scene-spacer"></span>
+      <span class="scene-meta">3 live · 0 terminated · 1 startup notice</span>
+    </div>
+
+    <div class="frame">
+
+      <!-- ===== LEFT RAIL ===== -->
+      <aside class="rail">
+
+        <div style="display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+          <div class="rail-section-head">
+            Roster <span class="count">3</span>
+            <span class="selected-badge">3 spotlighted</span>
+          </div>
+          <div class="roster">
+            <div class="roster-list">
+
+              <!-- row 1 -->
+              <div class="row selected">
+                <div class="row-accent active"></div>
+                <div class="row-avatar av-1">PL</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">planner-α</span>
+                    <span class="row-role">planner</span>
+                    <span class="row-id">a3f2e1</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge opus">opus-4.7</span>
+                    <span class="ctx-bar"><i style="width:34%"></i></span>
+                    <span class="row-cost">$0.42</span>
+                    <span class="row-ago">14s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip"><span class="name">Read</span><span class="sep">·</span><span class="elapsed">3s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <!-- row 2 -->
+              <div class="row selected">
+                <div class="row-accent thinking"></div>
+                <div class="row-avatar av-3">SR</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">slice-reviewer</span>
+                    <span class="row-role">reviewer</span>
+                    <span class="row-id">b7c0d9</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge opus">opus-4.7</span>
+                    <span class="ctx-bar warn"><i style="width:62%"></i></span>
+                    <span class="row-cost">$1.18</span>
+                    <span class="row-ago">2s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">thinking…</span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <!-- row 3 -->
+              <div class="row selected">
+                <div class="row-accent idle"></div>
+                <div class="row-avatar av-6">CO</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">coordinator</span>
+                    <span class="row-role">coordinator</span>
+                    <span class="row-id">cc11ee</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">sonnet-4.6</span>
+                    <span class="ctx-bar"><i style="width:18%"></i></span>
+                    <span class="row-cost">$0.06</span>
+                    <span class="row-ago">1m12s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">idle</span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- terminated -->
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Terminated <span class="count">0</span></div>
+          <div class="body" style="padding-top:4px; color: var(--fg-3); font-size:11px; font-style:italic;">— none yet —</div>
+        </div>
+
+        <!-- startup notices -->
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Startup Notices <span class="count">1</span></div>
+          <div class="body">
+            <div class="notice">
+              <span class="cat">shadow</span>
+              <span><span class="mono" style="color:var(--fg-1);">~/.claude/agents/explorer.md</span> shadows bundled <span class="mono">explorer</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- topology -->
+        <div class="topology">
+          <div class="rail-section-head" style="border-bottom:none;">Topology</div>
+          <div class="body">
+            <div class="topo-graph">
+              <div class="topo-edge active" style="left:50%; top:50%; width:60px; transform: rotate(-150deg);"></div>
+              <div class="topo-edge active" style="left:50%; top:50%; width:55px; transform: rotate(-30deg);"></div>
+              <div class="topo-edge"        style="left:50%; top:50%; width:65px; transform: rotate(90deg);"></div>
+              <div class="topo-node lead" style="left:50%; top:50%;"></div>
+              <div class="topo-node av-1" style="left:18%; top:30%;"></div>
+              <div class="topo-node av-3" style="left:82%; top:32%;"></div>
+              <div class="topo-node av-6" style="left:50%; top:88%;"></div>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+
+      <!-- ===== SPOTLIGHT PANE ===== -->
+      <section class="spotlight">
+        <div class="spotlight-bar">
+          <span class="label">Spotlight</span>
+          <span class="count">3</span>
+          <span class="of">/ 3 live</span>
+          <div class="tools">
+            <button class="toolbtn">scroll-sync</button>
+            <button class="toolbtn">⤢ stack</button>
+            <button class="toolbtn primary">broadcast</button>
+          </div>
+        </div>
+
+        <div class="columns cols-3">
+
+          <!-- col 1 -->
+          <div class="col">
+            <div class="col-accent active"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-1" style="margin-left:0;">PL</span>
+                <div style="min-width:0;">
+                  <div class="name">planner-α<span class="role">planner</span></div>
+                  <div class="id">a3f2e1</div>
+                </div>
+                <span class="dot tool-use"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge opus">opus-4.7</span>
+                <span class="ctx-bar"><i style="width:34%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$0.42</span>
+              </div>
+            </div>
+            <div class="col-status">
+              <span class="dot tool-use"></span><span>tool-use</span>
+              <span class="ago">14s</span>
+            </div>
+            <div class="col-tool-row">
+              <span class="tool-chip"><span class="name">Read</span><span class="sep">·</span><span class="elapsed">3s</span></span>
+            </div>
+            <div class="col-stream">
+              <div class="msg">
+                <div class="head"><span class="who">planner-α</span><span class="when">14s ago</span></div>
+                <div class="body">Reading <code>doc/PRODUCT-VISION.md</code> to ground the brief in current strategy before drafting Phase 2.</div>
+              </div>
+              <div class="msg tool">
+                <div class="head"><span class="who">tool · Read</span><span class="when">12s ago</span></div>
+                <div class="body"><code>doc/PRODUCT-VISION.md</code> — 105.5 KB, 1,842 lines</div>
+              </div>
+              <div class="msg user">
+                <div class="head"><span class="who">you → planner-α</span><span class="when">28s ago</span></div>
+                <div class="body">Draft a 5-bullet phase plan. Cite vision sections by heading.</div>
+              </div>
+            </div>
+            <div class="col-input">
+              <div class="field">message planner-α…</div>
+              <div class="send">↵</div>
+            </div>
+          </div>
+
+          <!-- col 2 -->
+          <div class="col">
+            <div class="col-accent thinking"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-3" style="margin-left:0;">SR</span>
+                <div style="min-width:0;">
+                  <div class="name">slice-reviewer<span class="role">reviewer</span></div>
+                  <div class="id">b7c0d9</div>
+                </div>
+                <span class="dot thinking"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge opus">opus-4.7</span>
+                <span class="ctx-bar warn"><i style="width:62%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$1.18</span>
+              </div>
+            </div>
+            <div class="col-status">
+              <span class="dot thinking"></span><span>thinking</span>
+              <span class="ago">2s</span>
+            </div>
+            <div class="col-tool-row"></div>
+            <div class="col-stream">
+              <div class="msg">
+                <div class="head"><span class="who">slice-reviewer</span><span class="when">2s ago</span></div>
+                <div class="body">Cross-checking slice 3 against the spec acceptance criteria. Looking for the <code>tools=()</code> safe-default invariant.</div>
+              </div>
+              <div class="msg">
+                <div class="head"><span class="who">slice-reviewer</span><span class="when">38s ago</span></div>
+                <div class="body">Slice 2 PASS. Tags: <code>slice.adherence:green</code>, <code>slice.regression:green</code>, <code>slice.quality:amber-1</code> (missing sad-path on <code>_drain_response</code>).</div>
+              </div>
+            </div>
+            <div class="col-input">
+              <div class="field">message slice-reviewer…</div>
+              <div class="send">↵</div>
+            </div>
+          </div>
+
+          <!-- col 3 -->
+          <div class="col">
+            <div class="col-accent"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-6" style="margin-left:0;">CO</span>
+                <div style="min-width:0;">
+                  <div class="name">coordinator<span class="role">coordinator</span></div>
+                  <div class="id">cc11ee</div>
+                </div>
+                <span class="dot idle"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge">sonnet-4.6</span>
+                <span class="ctx-bar"><i style="width:18%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$0.06</span>
+              </div>
+            </div>
+            <div class="col-status">
+              <span class="dot idle"></span><span>idle</span>
+              <span class="ago">1m12s</span>
+            </div>
+            <div class="col-tool-row"></div>
+            <div class="col-stream">
+              <div class="msg">
+                <div class="head"><span class="who">coordinator</span><span class="when">1m12s ago</span></div>
+                <div class="body">Both reviewers spawned; standing by for verdicts. No pending escalations.</div>
+              </div>
+            </div>
+            <div class="col-input">
+              <div class="field">message coordinator…</div>
+              <div class="send">↵</div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+
+  <!-- ================================================================ -->
+  <!-- SCENE 2 : N=8, 2 selected                                         -->
+  <!-- ================================================================ -->
+  <section class="scene">
+    <div class="scene-header">
+      <span class="scene-tag">scene 2</span>
+      <span class="scene-title">N = 8 · 2 selected</span>
+      <span class="scene-desc">Eight agents in flight. Scan all eight in the rail; <strong>focus the two that matter</strong> in the main pane.</span>
+      <span class="scene-spacer"></span>
+      <span class="scene-meta">8 live · 2 terminated · 3 notices</span>
+    </div>
+
+    <div class="frame tall">
+
+      <aside class="rail">
+        <div style="display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+          <div class="rail-section-head">
+            Roster <span class="count">8</span>
+            <span class="selected-badge">2 spotlighted</span>
+          </div>
+          <div class="roster">
+            <div class="roster-list">
+
+              <div class="row selected">
+                <div class="row-accent stuck"></div>
+                <div class="row-avatar av-2">IM</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">implementor-3</span>
+                    <span class="row-role">implementor</span>
+                    <span class="row-id">d44a91</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">sonnet-4.6</span>
+                    <span class="ctx-bar warn"><i style="width:58%"></i></span>
+                    <span class="row-cost">$0.84</span>
+                    <span class="row-ago">9s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip stuck"><span class="name">Bash</span><span class="sep">·</span><span class="elapsed">12s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent active"></div>
+                <div class="row-avatar av-1">PL</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">planner</span>
+                    <span class="row-role">planner</span>
+                    <span class="row-id">a3f2e1</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge opus">opus-4.7</span>
+                    <span class="ctx-bar"><i style="width:42%"></i></span>
+                    <span class="row-cost">$0.74</span>
+                    <span class="row-ago">3s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip"><span class="name">Grep</span><span class="sep">·</span><span class="elapsed">1s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row selected">
+                <div class="row-accent thinking"></div>
+                <div class="row-avatar av-3">FR</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">feature-reviewer</span>
+                    <span class="row-role">reviewer</span>
+                    <span class="row-id">e02b7a</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge opus">opus-4.7</span>
+                    <span class="ctx-bar warn"><i style="width:71%"></i></span>
+                    <span class="row-cost">$2.14</span>
+                    <span class="row-ago">1s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">thinking…</span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent active"></div>
+                <div class="row-avatar av-3">SR</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">slice-reviewer</span>
+                    <span class="row-role">reviewer</span>
+                    <span class="row-id">b7c0d9</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge opus">opus-4.7</span>
+                    <span class="ctx-bar warn"><i style="width:64%"></i></span>
+                    <span class="row-cost">$1.32</span>
+                    <span class="row-ago">5s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip"><span class="name">Read</span><span class="sep">·</span><span class="elapsed">2s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent active"></div>
+                <div class="row-avatar av-2">IM</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">implementor-1</span>
+                    <span class="row-role">implementor</span>
+                    <span class="row-id">f1c6b3</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">sonnet-4.6</span>
+                    <span class="ctx-bar"><i style="width:39%"></i></span>
+                    <span class="row-cost">$0.48</span>
+                    <span class="row-ago">7s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip"><span class="name">Edit</span><span class="sep">·</span><span class="elapsed">1s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent active"></div>
+                <div class="row-avatar av-2">IM</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">implementor-2</span>
+                    <span class="row-role">implementor</span>
+                    <span class="row-id">9a4e02</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">sonnet-4.6</span>
+                    <span class="ctx-bar"><i style="width:48%"></i></span>
+                    <span class="row-cost">$0.61</span>
+                    <span class="row-ago">3s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span class="tool-chip"><span class="name">Bash</span><span class="sep">·</span><span class="elapsed">4s</span></span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent done"></div>
+                <div class="row-avatar av-4">EX</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">Explore-1</span>
+                    <span class="row-role">explorer</span>
+                    <span class="row-id">2b88ff</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">haiku-4</span>
+                    <span class="ctx-bar"><i style="width:21%"></i></span>
+                    <span class="row-cost">$0.04</span>
+                    <span class="row-ago">22s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span style="font-family:var(--font-mono); font-size:10px; color:var(--st-done);">done · awaiting next</span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+              <div class="row">
+                <div class="row-accent idle"></div>
+                <div class="row-avatar av-6">CO</div>
+                <div class="row-body">
+                  <div class="row-line-1">
+                    <span class="row-name">coordinator</span>
+                    <span class="row-role">coordinator</span>
+                    <span class="row-id">cc11ee</span>
+                  </div>
+                  <div class="row-line-2">
+                    <span class="model-badge">sonnet-4.6</span>
+                    <span class="ctx-bar"><i style="width:11%"></i></span>
+                    <span class="row-cost">$0.18</span>
+                    <span class="row-ago">2m04s</span>
+                  </div>
+                  <div class="row-line-3">
+                    <span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">idle</span>
+                  </div>
+                </div>
+                <div class="row-check"></div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Terminated <span class="count">2</span></div>
+          <div class="body" style="padding-top:4px;">
+            <div class="terminated-row">
+              <span class="dot done"></span>
+              <span class="name">general-purpose-1</span>
+              <span class="ago">5m ago</span>
+            </div>
+            <div class="terminated-row">
+              <span class="dot error"></span>
+              <span class="name">implementor-0</span>
+              <span class="ago" style="color:var(--st-error);">12m ago</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Startup Notices <span class="count">3</span></div>
+          <div class="body">
+            <div class="notice">
+              <span class="cat">shadow</span>
+              <span>project <span class="mono" style="color:var(--fg-1);">.claude/agents/explorer.md</span> shadows bundled <span class="mono">explorer</span></span>
+            </div>
+            <div class="notice">
+              <span class="cat">plugin</span>
+              <span><span class="mono" style="color:var(--fg-1);">context-mode</span> loaded · 12 tools registered</span>
+            </div>
+            <div class="notice">
+              <span class="cat">frontmatter</span>
+              <span><span class="mono" style="color:var(--fg-1);">researcher.md</span> uses unknown key <span class="mono">temp</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="topology">
+          <div class="rail-section-head" style="border-bottom:none;">Topology</div>
+          <div class="body">
+            <div class="topo-graph">
+              <div class="topo-edge active" style="left:50%; top:50%; width:80px; transform: rotate(-170deg);"></div>
+              <div class="topo-edge active" style="left:50%; top:50%; width:80px; transform: rotate(-130deg);"></div>
+              <div class="topo-edge"        style="left:50%; top:50%; width:80px; transform: rotate(-90deg);"></div>
+              <div class="topo-edge active" style="left:50%; top:50%; width:80px; transform: rotate(-50deg);"></div>
+              <div class="topo-edge"        style="left:50%; top:50%; width:80px; transform: rotate(-10deg);"></div>
+              <div class="topo-edge active" style="left:50%; top:50%; width:80px; transform: rotate(40deg);"></div>
+              <div class="topo-edge"        style="left:50%; top:50%; width:80px; transform: rotate(85deg);"></div>
+              <div class="topo-edge"        style="left:50%; top:50%; width:80px; transform: rotate(130deg);"></div>
+              <div class="topo-node lead" style="left:50%; top:50%;"></div>
+              <div class="topo-node av-2" style="left:10%; top:25%;"></div>
+              <div class="topo-node av-1" style="left:25%; top:10%;"></div>
+              <div class="topo-node av-3" style="left:55%; top:8%;"></div>
+              <div class="topo-node av-3" style="left:78%; top:18%;"></div>
+              <div class="topo-node av-2" style="left:90%; top:55%;"></div>
+              <div class="topo-node av-2" style="left:78%; top:85%;"></div>
+              <div class="topo-node av-4" style="left:30%; top:88%;"></div>
+              <div class="topo-node av-6" style="left:8%; top:70%;"></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="spotlight">
+        <div class="spotlight-bar">
+          <span class="label">Spotlight</span>
+          <span class="count">2</span>
+          <span class="of">/ 8 live</span>
+          <div class="tools">
+            <button class="toolbtn">scroll-sync</button>
+            <button class="toolbtn">⤢ stack</button>
+            <button class="toolbtn primary">broadcast</button>
+          </div>
+        </div>
+
+        <div class="columns cols-2">
+          <!-- spotlight col: implementor-3 (stuck) -->
+          <div class="col">
+            <div class="col-accent stuck"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-2" style="margin-left:0;">IM</span>
+                <div style="min-width:0;">
+                  <div class="name">implementor-3<span class="role">implementor</span></div>
+                  <div class="id">d44a91</div>
+                </div>
+                <span class="dot tool-use"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge">sonnet-4.6</span>
+                <span class="ctx-bar warn"><i style="width:58%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$0.84</span>
+              </div>
+            </div>
+            <div class="col-status">
+              <span class="dot tool-use"></span><span>tool-use · stuck</span>
+              <span class="ago">9s</span>
+            </div>
+            <div class="col-tool-row">
+              <span class="tool-chip stuck"><span class="name">Bash</span><span class="sep">·</span><span class="elapsed">12s</span></span>
+            </div>
+            <div class="col-stream">
+              <div class="msg tool">
+                <div class="head"><span class="who">tool · Bash</span><span class="when">12s ago — still running</span></div>
+                <div class="body"><code>uv run pytest tests/test_broker.py -k test_spawn_then_send -x</code></div>
+              </div>
+              <div class="msg">
+                <div class="head"><span class="who">implementor-3</span><span class="when">31s ago</span></div>
+                <div class="body">Running the broker spawn-and-send regression. If this hangs we likely regressed inbox draining.</div>
+              </div>
+              <div class="msg user">
+                <div class="head"><span class="who">you → implementor-3</span><span class="when">2m ago</span></div>
+                <div class="body">Validate that <code>kill_teammate</code> still tombstones (sad path test).</div>
+              </div>
+            </div>
+            <div class="col-input">
+              <div class="field">message implementor-3…</div>
+              <div class="send">↵</div>
+            </div>
+          </div>
+
+          <!-- spotlight col: feature-reviewer -->
+          <div class="col">
+            <div class="col-accent thinking"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-3" style="margin-left:0;">FR</span>
+                <div style="min-width:0;">
+                  <div class="name">feature-reviewer<span class="role">reviewer</span></div>
+                  <div class="id">e02b7a</div>
+                </div>
+                <span class="dot thinking"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge opus">opus-4.7</span>
+                <span class="ctx-bar warn"><i style="width:71%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$2.14</span>
+              </div>
+            </div>
+            <div class="col-status">
+              <span class="dot thinking"></span><span>thinking</span>
+              <span class="ago">1s</span>
+            </div>
+            <div class="col-tool-row"></div>
+            <div class="col-stream">
+              <div class="msg">
+                <div class="head"><span class="who">feature-reviewer</span><span class="when">1s ago</span></div>
+                <div class="body">Synthesizing across slices 1–4. Looking for cracks-fell-through between <code>broker.py</code> tombstone semantics and the dashboard's terminated-section filter.</div>
+              </div>
+              <div class="msg">
+                <div class="head"><span class="who">feature-reviewer</span><span class="when">48s ago</span></div>
+                <div class="body">Holistic check: spec line <em>"per-instance state must be keyed by activeId"</em> appears satisfied in <code>MCTopBar.tsx</code>. Cross-checking <code>TopologyWidget</code>…</div>
+              </div>
+            </div>
+            <div class="col-input">
+              <div class="field">message feature-reviewer…</div>
+              <div class="send">↵</div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+    </div>
+  </section>
+
+
+  <!-- ================================================================ -->
+  <!-- SCENE 3 : N=15, 3 selected (the stress case)                      -->
+  <!-- ================================================================ -->
+  <section class="scene">
+    <div class="scene-header">
+      <span class="scene-tag">scene 3 — stress</span>
+      <span class="scene-title">N = 15 · 3 selected</span>
+      <span class="scene-desc">Fifteen live agents. The roster <strong>never collapses</strong>; spotlight stays sane at three columns.</span>
+      <span class="scene-spacer"></span>
+      <span class="scene-meta">15 live · 4 terminated · 5 notices</span>
+    </div>
+
+    <div class="frame tall">
+
+      <aside class="rail">
+        <div style="display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+          <div class="rail-section-head">
+            Roster <span class="count">15</span>
+            <span class="selected-badge">3 spotlighted</span>
+          </div>
+          <div class="roster">
+            <div class="roster-list" id="roster15"></div>
+          </div>
+        </div>
+
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Terminated <span class="count">4</span></div>
+          <div class="body" style="padding-top:4px;">
+            <div class="terminated-row"><span class="dot done"></span><span class="name">implementor-0</span><span class="ago">18m</span></div>
+            <div class="terminated-row"><span class="dot done"></span><span class="name">Explore-old</span><span class="ago">22m</span></div>
+            <div class="terminated-row"><span class="dot error"></span><span class="name">general-purpose-2</span><span class="ago" style="color:var(--st-error);">31m</span></div>
+            <div class="terminated-row"><span class="dot done"></span><span class="name">slice-reviewer-α</span><span class="ago">44m</span></div>
+          </div>
+        </div>
+
+        <div class="pinned">
+          <div class="rail-section-head" style="border-bottom:none;">Startup Notices <span class="count">5</span></div>
+          <div class="body">
+            <div class="notice"><span class="cat">shadow</span><span>project <span class="mono" style="color:var(--fg-1);">.claude/agents/explorer.md</span> shadows bundled</span></div>
+            <div class="notice"><span class="cat">plugin</span><span><span class="mono" style="color:var(--fg-1);">context-mode</span> · 12 tools</span></div>
+            <div class="notice"><span class="cat">plugin</span><span><span class="mono" style="color:var(--fg-1);">repo-reactor</span> · 8 tools</span></div>
+            <div class="notice"><span class="cat">unknown</span><span>skill <span class="mono" style="color:var(--fg-1);">vibes-only</span> referenced, not found</span></div>
+            <div class="notice"><span class="cat">frontmatter</span><span><span class="mono" style="color:var(--fg-1);">researcher.md</span> unknown key <span class="mono">temp</span></span></div>
+          </div>
+        </div>
+
+        <div class="topology">
+          <div class="rail-section-head" style="border-bottom:none;">Topology</div>
+          <div class="body">
+            <div class="topo-graph" id="topo15"></div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="spotlight">
+        <div class="spotlight-bar">
+          <span class="label">Spotlight</span>
+          <span class="count">3</span>
+          <span class="of">/ 15 live</span>
+          <div class="tools">
+            <button class="toolbtn">scroll-sync</button>
+            <button class="toolbtn">⤢ stack</button>
+            <button class="toolbtn primary">broadcast</button>
+          </div>
+        </div>
+
+        <div class="columns cols-3">
+
+          <!-- col 1: planner -->
+          <div class="col">
+            <div class="col-accent active"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-1" style="margin-left:0;">PL</span>
+                <div style="min-width:0;">
+                  <div class="name">planner<span class="role">planner</span></div>
+                  <div class="id">a3f2e1</div>
+                </div>
+                <span class="dot tool-use"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge opus">opus-4.7</span>
+                <span class="ctx-bar"><i style="width:42%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$0.74</span>
+              </div>
+            </div>
+            <div class="col-status"><span class="dot tool-use"></span><span>tool-use</span><span class="ago">3s</span></div>
+            <div class="col-tool-row"><span class="tool-chip"><span class="name">Grep</span><span class="sep">·</span><span class="elapsed">1s</span></span></div>
+            <div class="col-stream">
+              <div class="msg tool"><div class="head"><span class="who">tool · Grep</span><span class="when">1s ago</span></div><div class="body"><code>"_drain_response"</code> in <code>claude_crew/sdk_teammate.py</code></div></div>
+              <div class="msg"><div class="head"><span class="who">planner</span><span class="when">18s ago</span></div><div class="body">Confirming spec invariant: the bounded drain wrapper around <code>client.receive_response()</code>. Need to cite line numbers in the breakout.</div></div>
+              <div class="msg user"><div class="head"><span class="who">you → planner</span><span class="when">2m ago</span></div><div class="body">Add a slice for the hang-budget timeout. Reference the project memory note.</div></div>
+            </div>
+            <div class="col-input"><div class="field">message planner…</div><div class="send">↵</div></div>
+          </div>
+
+          <!-- col 2: implementor-3 stuck -->
+          <div class="col">
+            <div class="col-accent stuck"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-2" style="margin-left:0;">IM</span>
+                <div style="min-width:0;">
+                  <div class="name">implementor-3<span class="role">implementor</span></div>
+                  <div class="id">d44a91</div>
+                </div>
+                <span class="dot tool-use"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge">sonnet-4.6</span>
+                <span class="ctx-bar warn"><i style="width:58%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$0.84</span>
+              </div>
+            </div>
+            <div class="col-status"><span class="dot tool-use"></span><span>tool-use · stuck</span><span class="ago">14s</span></div>
+            <div class="col-tool-row"><span class="tool-chip stuck"><span class="name">Bash</span><span class="sep">·</span><span class="elapsed">17s</span></span></div>
+            <div class="col-stream">
+              <div class="msg tool"><div class="head"><span class="who">tool · Bash</span><span class="when">17s — running</span></div><div class="body"><code>uv run pytest tests/test_live_sdk.py</code></div></div>
+              <div class="msg"><div class="head"><span class="who">implementor-3</span><span class="when">42s ago</span></div><div class="body">Live SDK gate is slow — expected. Will surface a failing case if the AgentDefinition serialization regressed.</div></div>
+            </div>
+            <div class="col-input"><div class="field">message implementor-3…</div><div class="send">↵</div></div>
+          </div>
+
+          <!-- col 3: feature-reviewer -->
+          <div class="col">
+            <div class="col-accent thinking"></div>
+            <div class="col-header">
+              <div class="col-h1">
+                <span class="row-avatar av-3" style="margin-left:0;">FR</span>
+                <div style="min-width:0;">
+                  <div class="name">feature-reviewer<span class="role">reviewer</span></div>
+                  <div class="id">e02b7a</div>
+                </div>
+                <span class="dot thinking"></span>
+              </div>
+              <div class="col-h2">
+                <span class="model-badge opus">opus-4.7</span>
+                <span class="ctx-bar crit"><i style="width:88%"></i></span>
+                <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--fg-2);">$2.14</span>
+              </div>
+            </div>
+            <div class="col-status"><span class="dot thinking"></span><span>thinking</span><span class="ago">1s</span></div>
+            <div class="col-tool-row"></div>
+            <div class="col-stream">
+              <div class="msg"><div class="head"><span class="who">feature-reviewer</span><span class="when">1s ago</span></div><div class="body">Cross-slice synthesis pass 3. Context at 88% — coordinator should consider a <code>/compact</code>.</div></div>
+              <div class="msg"><div class="head"><span class="who">feature-reviewer</span><span class="when">1m04s ago</span></div><div class="body">Verdict draft: <strong>PASS with notes</strong>. Two amber tags on <code>feature.integration</code>; no critical.</div></div>
+            </div>
+            <div class="col-input"><div class="field">message feature-reviewer…</div><div class="send">↵</div></div>
+          </div>
+
+        </div>
+
+      </section>
+
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <div class="legend">
+    <strong>Design notes for the implementor.</strong>
+    <ul>
+      <li>Roster rows are <strong>fixed-height</strong> (about 64px including the third line). At N=15 the rail scrolls; the pinned blocks (terminated / notices / topology) never compete with the roster for height.</li>
+      <li>The leading <strong>3px accent rail</strong> on each row carries the same semantic as today's <code>.agent-column-accent</code>: <code>idle</code> (transparent), <code>active</code> (tool, muted), <code>stuck</code> (tool ≥5s, full + pulse), <code>thinking</code> (orange, pulse), <code>done</code> (green, muted), <code>error</code> (red).</li>
+      <li>Selection is communicated <strong>three ways</strong> simultaneously: row background lifts to <code>--bg-0</code>, a 2px right-edge inset glows <code>--accent</code>, and the checkbox fills. Unambiguous at any density.</li>
+      <li>Spotlight pane is <strong>data-shape-identical</strong> to today's column. Same header, status row, tool-chip row, message stream, input. Reuses every existing component — this is a layout change, not a redesign.</li>
+      <li>Empty spotlight (zero selected) inverts to a centered prompt: <em>"Pick one or more agents from the roster to focus."</em></li>
+      <li>Topology is anchored bottom-left and <strong>never scrolls with roster</strong>. Stays the operator's persistent map.</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+  // Generate the 15-row roster for scene 3 to keep the markup compact.
+  const agents = [
+    { sel: false, accent: "active",   av: "av-1", iv: "PL", name: "planner",           role: "planner",      id: "a3f2e1", model: "opus-4.7",   modelClass: "opus", ctx: 42, ctxClass: "",     cost: "$0.74", ago: "3s",     chip: { name: "Grep",  el: "1s",  stuck:false } },
+    { sel: false, accent: "active",   av: "av-3", iv: "SR", name: "slice-reviewer",    role: "reviewer",     id: "b7c0d9", model: "opus-4.7",   modelClass: "opus", ctx: 64, ctxClass: "warn", cost: "$1.32", ago: "5s",     chip: { name: "Read",  el: "2s",  stuck:false } },
+    { sel: true,  accent: "thinking", av: "av-3", iv: "FR", name: "feature-reviewer",  role: "reviewer",     id: "e02b7a", model: "opus-4.7",   modelClass: "opus", ctx: 88, ctxClass: "crit", cost: "$2.14", ago: "1s",     chip: { thinking: true } },
+    { sel: false, accent: "active",   av: "av-2", iv: "IM", name: "implementor-1",     role: "implementor",  id: "f1c6b3", model: "sonnet-4.6", modelClass: "",     ctx: 39, ctxClass: "",     cost: "$0.48", ago: "7s",     chip: { name: "Edit",  el: "1s",  stuck:false } },
+    { sel: false, accent: "active",   av: "av-2", iv: "IM", name: "implementor-2",     role: "implementor",  id: "9a4e02", model: "sonnet-4.6", modelClass: "",     ctx: 48, ctxClass: "",     cost: "$0.61", ago: "3s",     chip: { name: "Bash",  el: "4s",  stuck:false } },
+    { sel: true,  accent: "stuck",    av: "av-2", iv: "IM", name: "implementor-3",     role: "implementor",  id: "d44a91", model: "sonnet-4.6", modelClass: "",     ctx: 58, ctxClass: "warn", cost: "$0.84", ago: "14s",    chip: { name: "Bash",  el: "17s", stuck:true  } },
+    { sel: false, accent: "active",   av: "av-2", iv: "IM", name: "implementor-4",     role: "implementor",  id: "70bc12", model: "sonnet-4.6", modelClass: "",     ctx: 22, ctxClass: "",     cost: "$0.29", ago: "2s",     chip: { name: "Write", el: "1s",  stuck:false } },
+    { sel: true,  accent: "active",   av: "av-1", iv: "PL", name: "planner-β",         role: "planner",      id: "8e1d44", model: "opus-4.7",   modelClass: "opus", ctx: 51, ctxClass: "warn", cost: "$0.96", ago: "4s",     chip: { name: "Read",  el: "2s",  stuck:false } },
+    { sel: false, accent: "done",     av: "av-4", iv: "EX", name: "Explore-1",         role: "explorer",     id: "2b88ff", model: "haiku-4",    modelClass: "",     ctx: 21, ctxClass: "",     cost: "$0.04", ago: "22s",    chip: { done: true } },
+    { sel: false, accent: "done",     av: "av-4", iv: "EX", name: "Explore-2",         role: "explorer",     id: "33aa11", model: "haiku-4",    modelClass: "",     ctx: 18, ctxClass: "",     cost: "$0.04", ago: "30s",    chip: { done: true } },
+    { sel: false, accent: "active",   av: "av-4", iv: "EX", name: "Explore-3",         role: "explorer",     id: "44bb22", model: "haiku-4",    modelClass: "",     ctx: 19, ctxClass: "",     cost: "$0.05", ago: "1s",     chip: { name: "Grep",  el: "1s",  stuck:false } },
+    { sel: false, accent: "active",   av: "av-7", iv: "GP", name: "general-purpose-1", role: "general",      id: "551122", model: "sonnet-4.6", modelClass: "",     ctx: 33, ctxClass: "",     cost: "$0.31", ago: "6s",     chip: { name: "Bash",  el: "2s",  stuck:false } },
+    { sel: false, accent: "active",   av: "av-7", iv: "GP", name: "general-purpose-2", role: "general",      id: "66cd33", model: "sonnet-4.6", modelClass: "",     ctx: 27, ctxClass: "",     cost: "$0.22", ago: "8s",     chip: { name: "Read",  el: "1s",  stuck:false } },
+    { sel: false, accent: "error",    av: "av-5", iv: "DR", name: "documenter",        role: "documenter",   id: "778800", model: "sonnet-4.6", modelClass: "",     ctx: 44, ctxClass: "",     cost: "$0.52", ago: "0s",     chip: { error: true } },
+    { sel: false, accent: "idle",     av: "av-6", iv: "CO", name: "coordinator",       role: "coordinator",  id: "cc11ee", model: "sonnet-4.6", modelClass: "",     ctx: 11, ctxClass: "",     cost: "$0.18", ago: "2m04s",  chip: { idle: true } },
+  ];
+
+  const roster = document.getElementById("roster15");
+  for (const a of agents) {
+    let chipNode = "";
+    if (a.chip.thinking)      chipNode = `<span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">thinking…</span>`;
+    else if (a.chip.idle)     chipNode = `<span style="font-family:var(--font-mono); font-size:10px; color:var(--fg-3);">idle</span>`;
+    else if (a.chip.done)     chipNode = `<span style="font-family:var(--font-mono); font-size:10px; color:var(--st-done);">done · awaiting next</span>`;
+    else if (a.chip.error)    chipNode = `<span style="font-family:var(--font-mono); font-size:10px; color:var(--st-error);">error · subprocess exit 1</span>`;
+    else                      chipNode = `<span class="tool-chip${a.chip.stuck ? ' stuck' : ''}"><span class="name">${a.chip.name}</span><span class="sep">·</span><span class="elapsed">${a.chip.el}</span></span>`;
+
+    roster.insertAdjacentHTML("beforeend", `
+      <div class="row${a.sel ? ' selected' : ''}">
+        <div class="row-accent ${a.accent}"></div>
+        <div class="row-avatar ${a.av}">${a.iv}</div>
+        <div class="row-body">
+          <div class="row-line-1">
+            <span class="row-name">${a.name}</span>
+            <span class="row-role">${a.role}</span>
+            <span class="row-id">${a.id}</span>
+          </div>
+          <div class="row-line-2">
+            <span class="model-badge ${a.modelClass}">${a.model}</span>
+            <span class="ctx-bar ${a.ctxClass}"><i style="width:${a.ctx}%"></i></span>
+            <span class="row-cost">${a.cost}</span>
+            <span class="row-ago">${a.ago}</span>
+          </div>
+          <div class="row-line-3">${chipNode}</div>
+        </div>
+        <div class="row-check"></div>
+      </div>
+    `);
+  }
+
+  // Generate a 15-node topology graph for scene 3.
+  const topo = document.getElementById("topo15");
+  if (topo) {
+    // lead in center
+    topo.insertAdjacentHTML("beforeend", `<div class="topo-node lead" style="left:50%; top:50%;"></div>`);
+    const total = 15;
+    for (let i = 0; i < total; i++) {
+      const angle = (i / total) * Math.PI * 2;
+      const r = 40 + (i % 3) * 6;
+      const x = 50 + Math.cos(angle) * r;
+      const y = 50 + Math.sin(angle) * r * 0.85;
+      const active = i % 3 !== 1;
+      const avClass = ["av-1","av-2","av-3","av-4","av-6","av-7","av-2","av-2","av-3","av-1","av-4","av-7","av-5","av-6","av-2"][i];
+      // edge
+      const edgeLen = r * 1.0; // approximate
+      const edgeAngle = (angle * 180) / Math.PI;
+      topo.insertAdjacentHTML("beforeend", `<div class="topo-edge${active ? ' active' : ''}" style="left:50%; top:50%; width:${edgeLen}%; transform: rotate(${edgeAngle}deg);"></div>`);
+      topo.insertAdjacentHTML("beforeend", `<div class="topo-node ${avClass}" style="left:${x}%; top:${y}%;"></div>`);
+    }
+  }
+</script>
+
+</body>
+</html>

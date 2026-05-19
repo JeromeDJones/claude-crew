@@ -6,6 +6,18 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-19] Investigation: SDK subprocess death after empty-turn recovery
+
+### Symptom: Is SDK CLI subprocess dying independently after empty assistant turns?
+
+- **What**: The empty-turn fix (PR #???) adds bounded retry + keep-alive on empty assistant text. Initial diagnosis: the empty turn itself doesn't crash the teammate loop (loop returns and waits for next envelope). But the original symptom reported subprocess death (`exit_code=1`) on the *next* `send_to`. This backlog entry tracks whether the subprocess is dying on its own after an empty turn (before the next turn's query), or whether the failure only surfaces when the next query() is sent.
+- **Where**: Investigation point: run the RepoReactor lead session that originally triggered the empty turn + death sequence with `CLAUDE_CREW_TRANSCRIPT_DIR` set to capture lifecycle logs. Check `sdk_teammate.py` liveness poll task (`_poll_task`, `_death_suspected` flag, `_begin_liveness_poll`) to see if any death signals fire during the empty-turn → retry → success sequence.
+- **Why it matters**: If the subprocess dies independently, the fix is incomplete — a keep-alive inside the loop doesn't help if the subprocess is already gone. The liveness poll would detect it, but there's a race: if the poll interval is 5s and the subprocess dies 0.1s after an empty turn, the operator's next send_to might race the detection. If the subprocess stays alive, the fix is sufficient; if it dies, we need either (a) aggressive polling (costly), (b) subprocess restart on empty-turn-with-side-effects detection (complex), or (c) accept the race as acceptable SLA (coordinator can re-spawn on next failure).
+- **Suggested action**: Operator should review the transcript from a real RepoReactor run that hit the empty-turn symptom, checking timestamps on poll messages and death signals. If no death is logged, the hypothesis is "subprocess dies only on next query" and the fix is sound. If death fires mid-interval, log a follow-up issue for subprocess-restart logic.
+- **Scope guardrail**: Not blocking the PR; the fix is safe (teammate stays alive through retries, lead can keep talking to it). This is a refinement for the next phase if the data shows subprocess death is independent.
+
+---
+
 ## [2026-05-18] Feature candidate: click-to-view tool output in dashboard stream
 
 ### Operator wants to inspect tool output without leaving Mission Control

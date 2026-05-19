@@ -386,7 +386,8 @@ class TestErrorPaths:
         self, broker, monkeypatch,
     ) -> None:
         # Tool-use only (Assumption A2): no TextBlocks → empty text → error.
-        fake = FakeSDKClient(scripted_responses=[[
+        # After retries exhaust, the error is emitted.
+        empty_response = [
             AssistantMessage(
                 content=[ToolUseBlock(id="tu-1", name="some_tool", input={})],
                 model="fake",
@@ -395,7 +396,11 @@ class TestErrorPaths:
                 subtype="success", duration_ms=0, duration_api_ms=0,
                 is_error=False, num_turns=1, session_id="default",
             ),
-        ]])
+        ]
+        # Provide 3 empty responses: original + 2 retries.
+        fake = FakeSDKClient(scripted_responses=[
+            empty_response, empty_response, empty_response
+        ])
         _patch_sdk(monkeypatch, fake)
 
         tid = await broker.spawn_teammate(
@@ -409,6 +414,87 @@ class TestErrorPaths:
         msgs = broker.get_messages(recipient=LEAD_ID)
         assert msgs[0].payload.get("error") == "invalid_response"
         assert "no text content" in msgs[0].payload.get("message", "")
+
+    async def test_empty_text_retry_succeeds_on_second_attempt(
+        self, broker, monkeypatch,
+    ) -> None:
+        # Empty first, then non-empty on retry. Lead should see the non-empty text.
+        empty_response = [
+            AssistantMessage(
+                content=[ToolUseBlock(id="tu-1", name="some_tool", input={})],
+                model="fake",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]
+        non_empty_response = text_response("success after retry")
+        fake = FakeSDKClient(scripted_responses=[
+            empty_response, non_empty_response
+        ])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        # Should be successful response, not error.
+        assert msgs[0].payload.get("error") is None
+        assert msgs[0].payload.get("text") == "success after retry"
+        # Verify that the retry query was sent (second query).
+        assert len(fake.queries_received) == 2
+        assert "empty" in fake.queries_received[1][0].lower()
+
+    async def test_empty_text_retry_with_failed_task_notifs_early_returns(
+        self, broker, monkeypatch,
+    ) -> None:
+        # When there are failed_task_notifs, the code should return the synthetic
+        # error WITHOUT retrying. This regression test ensures the retry logic
+        # doesn't interfere with the existing subagent-failure path.
+        response_with_failure = [
+            AssistantMessage(
+                content=[],  # Empty text
+                model="fake",
+            ),
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="task-1",
+                tool_use_id="tu-1",
+                status="failed",
+                output_file="",
+                summary="subagent exploded",
+                uuid="tn-1",
+                session_id="default",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]
+        fake = FakeSDKClient(scripted_responses=[response_with_failure])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        # Should be the synthesized subagent-failure error, not a generic empty-text error.
+        assert msgs[0].payload.get("error") == "invalid_response"
+        assert "subagent failed" in msgs[0].payload.get("message", "")
+        # Verify only ONE query was sent (no retries on failed_task_notifs path).
+        assert len(fake.queries_received) == 1
 
 
 # ---------- shutdown ----------
