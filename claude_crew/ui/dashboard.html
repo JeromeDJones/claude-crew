@@ -693,6 +693,61 @@
       );
     }
 
+    // --- EffortValue ---
+    // Renders the effort row in ConfigDetailPanel. Surfaces the gap between
+    // what the operator asked for (spawn-time kwarg) and what the teammate
+    // actually ran with (resolved value). Branches, in priority order:
+    //   1. Override + diverging pack default → render "<pack> → <resolved>
+    //      (requested override)" so the override is unmistakable.
+    //   2. Override + no pack default → render "<resolved> (requested override)"
+    //      so the operator sees their override didn't have anything to override.
+    //   3. No override + pack default matches resolved → "<resolved>
+    //      (pack default)" — origin is clear, no divergence to flag.
+    //   4. Fallback (override matches pack, or no provenance info on snapshot)
+    //      → plain "<resolved>".
+    function EffortValue({ resolved, requested, packDefault }) {
+      const hasOverride = requested != null;
+      const hasPack = packDefault != null;
+
+      if (hasOverride && hasPack && requested !== packDefault) {
+        return (
+          <div className="tm-detail-value" style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ color: "var(--fg-3)", textDecoration: "line-through" }}>
+              {packDefault}
+            </span>
+            <span style={{ color: "var(--fg-3)" }}>→</span>
+            <span>{resolved}</span>
+            <span style={{ color: "var(--fg-3)", fontWeight: 400, fontSize: 11 }}>
+              (requested override)
+            </span>
+          </div>
+        );
+      }
+      if (hasOverride && !hasPack) {
+        return (
+          <div className="tm-detail-value">
+            {resolved}
+            <span style={{ color: "var(--fg-3)", fontWeight: 400, marginLeft: 6, fontSize: 11 }}>
+              (requested override; no pack default)
+            </span>
+          </div>
+        );
+      }
+      if (!hasOverride && hasPack && packDefault === resolved) {
+        return (
+          <div className="tm-detail-value">
+            {resolved}
+            <span style={{ color: "var(--fg-3)", fontWeight: 400, marginLeft: 6, fontSize: 11 }}>
+              (pack default)
+            </span>
+          </div>
+        );
+      }
+      // Fallback: override == pack default (nothing to highlight), or
+      // snapshot lacks provenance fields entirely (legacy).
+      return <div className="tm-detail-value">{resolved}</div>;
+    }
+
     // --- ConfigDetailPanel ---
     function ConfigDetailPanel({ config, agentRole, configuredModel, activeModel, onClose }) {
       useEffect(() => {
@@ -797,7 +852,11 @@
                 {config.effort && (
                   <div className="tm-detail-section">
                     <div className="tm-detail-label">effort</div>
-                    <div className="tm-detail-value">{config.effort}</div>
+                    <EffortValue
+                      resolved={config.effort}
+                      requested={config.effort_requested}
+                      packDefault={config.effort_pack_default}
+                    />
                   </div>
                 )}
               </div>

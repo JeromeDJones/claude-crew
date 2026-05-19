@@ -269,6 +269,9 @@ class Broker:
                     "mcp_servers": [],
                     "system_prompt": system_prompt_override,
                     "effort": effort,
+                    # effort provenance: no pack ⇒ no pack default; resolved == requested.
+                    "effort_requested": effort,
+                    "effort_pack_default": None,
                     # All extras are net-new (no pack baseline to compare against)
                     "extra_tools": effective_tools[:],
                     "extra_skills": effective_skills[:],
@@ -300,7 +303,10 @@ class Broker:
                     mcp_names.append(entry.get("name", "<unnamed>"))
 
         # effort: kwarg override OR AgentDefinition.effort
-        resolved_effort = effort if effort is not None else getattr(agent_def, "effort", None)
+        # Capture both inputs separately so the dashboard can show
+        # operator "what we asked for" vs "what actually ran with".
+        effort_pack_default = getattr(agent_def, "effort", None)
+        resolved_effort = effort if effort is not None else effort_pack_default
 
         # permission_mode: kwarg override OR AgentDefinition.permissionMode
         resolved_pm = (
@@ -332,6 +338,11 @@ class Broker:
             "mcp_servers": mcp_names,
             "system_prompt": system_prompt_override if system_prompt_override is not None else getattr(agent_def, "prompt", None),
             "effort": resolved_effort,
+            # effort provenance fields (null-when-absent, never omitted):
+            # - effort_requested: the spawn-time kwarg only (None ⇒ no override)
+            # - effort_pack_default: AgentDefinition.effort (None ⇒ no pack default)
+            "effort_requested": effort,
+            "effort_pack_default": effort_pack_default,
             # Extra fields: always present as lists (empty when no extras)
             "extra_tools": net_extra_tools,
             "extra_skills": net_extra_skills,

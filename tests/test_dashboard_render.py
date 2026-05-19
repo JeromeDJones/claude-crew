@@ -568,3 +568,179 @@ def test_sc7_collapse_state_survives_poll(mixed_server_url, page):
     # Section must remain expanded
     assert page.locator(".terminated-row").count() > 0, \
         "Terminated section collapsed after poll cycle — state reset unexpectedly"
+
+
+# ── effort provenance (requested vs resolved) ────────────────────────────────
+
+
+DIVERGENT_EFFORT_CONFIG = {
+    "tools": ["Bash"],
+    "skills": [],
+    "permission_mode": "default",
+    "disallowed_tools": [],
+    "mcp_servers": [],
+    "system_prompt": "You are an effort-diverged agent for testing.",
+    "model": "claude-sonnet-4-6",
+    "effort": "high",            # what actually ran
+    "effort_requested": "high",  # operator's override at spawn
+    "effort_pack_default": "low",  # pack's declared effort
+}
+
+
+@pytest.fixture(scope="module")
+def divergent_effort_url():
+    """Broker with one teammate whose effort override diverges from its pack default."""
+    broker = Broker()
+    tid = f"t-effort-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=tid, name="planner", role="planner")
+    broker._teammates[tid] = tm
+    broker._inboxes[tid] = asyncio.Queue()
+    broker._info[tid] = TeammateInfo(
+        id=tid, name="planner", role="planner",
+        spawned_at=time.time(), alive=True,
+    )
+    broker._configs[tid] = DIVERGENT_EFFORT_CONFIG
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (divergent-effort) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_effort_panel_shows_requested_override_diverging_from_pack(
+    divergent_effort_url, page
+):
+    """When effort_requested overrides effort_pack_default, panel surfaces both.
+
+    The operator needs to see ``what we asked for`` (the spawn-time
+    override) distinct from ``what the pack declared``. Renders as
+    ``low → high (requested override)``.
+    """
+    page.goto(divergent_effort_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    page.locator(".tm-config-chips").first.click()
+    panel = page.locator(".tm-detail-panel")
+    panel.wait_for(state="visible", timeout=5000)
+
+    panel_text = panel.inner_text()
+    # Both inputs should appear; the resolved value is "high", pack was "low".
+    assert "low" in panel_text, (
+        f"Expected pack default 'low' in panel; got: {panel_text[:400]}"
+    )
+    assert "high" in panel_text, (
+        f"Expected resolved effort 'high' in panel; got: {panel_text[:400]}"
+    )
+    assert "requested override" in panel_text.lower(), (
+        f"Expected 'requested override' hint in panel; got: {panel_text[:400]}"
+    )
+
+
+PACK_ONLY_EFFORT_CONFIG = {
+    "tools": ["Bash"],
+    "skills": [],
+    "permission_mode": "default",
+    "disallowed_tools": [],
+    "mcp_servers": [],
+    "system_prompt": "You are a pack-only-effort agent for testing.",
+    "model": "claude-sonnet-4-6",
+    "effort": "medium",                # resolved == pack default (no override)
+    "effort_requested": None,
+    "effort_pack_default": "medium",
+}
+
+
+@pytest.fixture(scope="module")
+def pack_only_effort_url():
+    """Broker with one teammate whose effort came from pack default (no override)."""
+    broker = Broker()
+    tid = f"t-effort-pk-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=tid, name="builder", role="builder")
+    broker._teammates[tid] = tm
+    broker._inboxes[tid] = asyncio.Queue()
+    broker._info[tid] = TeammateInfo(
+        id=tid, name="builder", role="builder",
+        spawned_at=time.time(), alive=True,
+    )
+    broker._configs[tid] = PACK_ONLY_EFFORT_CONFIG
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (pack-only-effort) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_effort_panel_shows_pack_default_origin(pack_only_effort_url, page):
+    """When effort comes from pack default with no override, hint reads ``(pack default)``."""
+    page.goto(pack_only_effort_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    page.locator(".tm-config-chips").first.click()
+    panel = page.locator(".tm-detail-panel")
+    panel.wait_for(state="visible", timeout=5000)
+    panel_text = panel.inner_text()
+    assert "medium" in panel_text, f"Expected resolved effort 'medium'; got: {panel_text[:400]}"
+    assert "pack default" in panel_text.lower(), (
+        f"Expected 'pack default' hint in panel; got: {panel_text[:400]}"
+    )
+    assert "requested override" not in panel_text.lower(), (
+        "Pack-default-only case must not show 'requested override' hint"
+    )
