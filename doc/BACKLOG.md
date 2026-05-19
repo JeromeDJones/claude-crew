@@ -6,6 +6,24 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-18] Feature candidate: click-to-view tool output in dashboard stream
+
+### Operator wants to inspect tool output without leaving Mission Control
+
+- **What**: Make the tool-event lines in an agent's message stream clickable. Clicking `Read (ok, 0.04s)` (or any tool row) opens a modal showing the actual output that tool produced. Today the dashboard ships `ToolEvent` records with `args_summary` (redacted, capped 256B) and `error_summary` only — outputs are seen by the PostToolUse hook and discarded. Operator currently has to dig into the JSONL transcript on disk to see what a tool returned.
+- **Where**: Capture at `sdk_teammate.py` PostToolUse hook; store on `ToolEvent` (or a parallel keyed store to keep ToolEvent frozen/small); ship via a new lazy-fetch endpoint on `ui_server.py` (`GET /tool-output/<teammate_id>/<tool_use_id>`) — NOT inline on every snapshot push, outputs are too big; render on the dashboard by making the tool-event MiniMessage row clickable, opening `ConfigDetailPanel`-style modal with the body.
+- **Why it matters**: Tool outputs are the highest-bandwidth observability signal a coordinator has into what a teammate just did. "Read returned 0.04s" tells you almost nothing; the file contents tell you everything. Without it, the operator-in-the-loop pattern (the moat) is partially blind — coordinator can see *that* tools ran but not *what they produced*.
+- **Suggested size**: **M (~1-2 days)**. The size driver is **redaction of outputs, not capture**. The current `redaction.py` allowlist is args-only and assumes a known small input shape per tool; outputs are unbounded and can contain anything (shell stdout, file contents, web responses). Need a secret-pattern pass (`AKIA…`, `sk-…`, `ghp_…`, bearer tokens, `-----BEGIN PRIVATE KEY-----`, AWS session tokens) and a hard truncation cap (~4KB suggested). Also need a redaction-failure policy decision (see below).
+- **Open decision before scoping**: how should redaction failures behave?
+  1. Mask matched patterns inline (`AKIA[REDACTED]`) — default, most useful, leaks unmatched secrets.
+  2. Refuse to show the output at all if any pattern matches — safest, most annoying.
+  3. Show output verbatim with a "may contain sensitive data" badge — least safe.
+  Recommend (1) with a fail-loud line if redaction throws.
+- **Scope guardrails**: in-memory only (bounded per-teammate deque, ~50 events); no persistent JSONL of outputs (separate L-sized feature if wanted later); no syntax highlighting / diff view; copy-to-clipboard yes.
+- **Risk**: This is the first time output content crosses the broker boundary. Any redaction bug becomes a credential leak. Test the redaction patterns hard before shipping. Worth a sentinel pass before merge.
+
+---
+
 ## [2026-05-16] Feature: fidelity-audit-suite (#27)
 
 ### Wire `ResultMessage.usage` extraction into each live test body — CLOSED by fidelity-audit-followups (2026-05-16)
