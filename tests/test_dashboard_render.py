@@ -744,3 +744,171 @@ def test_effort_panel_shows_pack_default_origin(pack_only_effort_url, page):
     assert "requested override" not in panel_text.lower(), (
         "Pack-default-only case must not show 'requested override' hint"
     )
+
+
+# Sentinel M-1: branch 2 (override + no pack default) had no UI coverage.
+KWARG_ONLY_EFFORT_CONFIG = {
+    "tools": ["Bash"],
+    "skills": [],
+    "permission_mode": "default",
+    "disallowed_tools": [],
+    "mcp_servers": [],
+    "system_prompt": "You are a kwarg-only-effort agent for testing.",
+    "model": "claude-sonnet-4-6",
+    "effort": "high",
+    "effort_requested": "high",
+    "effort_pack_default": None,
+}
+
+
+@pytest.fixture(scope="module")
+def kwarg_only_effort_url():
+    """Broker with one teammate whose effort came from a kwarg with no pack default."""
+    broker = Broker()
+    tid = f"t-effort-kw-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=tid, name="builder", role="builder")
+    broker._teammates[tid] = tm
+    broker._inboxes[tid] = asyncio.Queue()
+    broker._info[tid] = TeammateInfo(
+        id=tid, name="builder", role="builder",
+        spawned_at=time.time(), alive=True,
+    )
+    broker._configs[tid] = KWARG_ONLY_EFFORT_CONFIG
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (kwarg-only-effort) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_effort_panel_shows_kwarg_only_no_pack(kwarg_only_effort_url, page):
+    """Branch 2 of EffortValue: override + no pack default surfaces "no pack default" hint."""
+    page.goto(kwarg_only_effort_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    page.locator(".tm-config-chips").first.click()
+    panel = page.locator(".tm-detail-panel")
+    panel.wait_for(state="visible", timeout=5000)
+    panel_text = panel.inner_text()
+    assert "high" in panel_text, f"Expected resolved effort 'high'; got: {panel_text[:400]}"
+    assert "no pack default" in panel_text.lower(), (
+        f"Expected 'no pack default' hint; got: {panel_text[:400]}"
+    )
+    assert "→" not in panel_text, (
+        f"Branch 2 should not render the divergence arrow; got: {panel_text[:400]}"
+    )
+
+
+# Sentinel L-1: legacy snapshots (no provenance keys) must render plain.
+LEGACY_EFFORT_CONFIG = {
+    "tools": ["Bash"],
+    "skills": [],
+    "permission_mode": "default",
+    "disallowed_tools": [],
+    "mcp_servers": [],
+    "system_prompt": "You are a legacy-config agent for testing.",
+    "model": "claude-sonnet-4-6",
+    "effort": "high",
+    # effort_requested / effort_pack_default deliberately absent — pre-feature shape.
+}
+
+
+@pytest.fixture(scope="module")
+def legacy_effort_url():
+    """Broker with one teammate whose config omits the new provenance keys."""
+    broker = Broker()
+    tid = f"t-effort-lg-{uuid.uuid4().hex[:10]}"
+    tm = StubTeammate(id=tid, name="builder", role="builder")
+    broker._teammates[tid] = tm
+    broker._inboxes[tid] = asyncio.Queue()
+    broker._info[tid] = TeammateInfo(
+        id=tid, name="builder", role="builder",
+        spawned_at=time.time(), alive=True,
+    )
+    broker._configs[tid] = LEGACY_EFFORT_CONFIG
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (legacy-effort) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_effort_panel_legacy_snapshot_renders_plain(legacy_effort_url, page):
+    """Legacy snapshots (missing provenance keys) must render the resolved value
+    with no origin hint and no divergence arrow. Locks the `!= null` guard contract.
+    """
+    page.goto(legacy_effort_url)
+    page.locator(".tm-config-chip").first.wait_for(state="visible", timeout=15000)
+    page.locator(".tm-config-chips").first.click()
+    panel = page.locator(".tm-detail-panel")
+    panel.wait_for(state="visible", timeout=5000)
+    panel_text = panel.inner_text()
+    assert "high" in panel_text, f"Expected resolved effort 'high'; got: {panel_text[:400]}"
+    assert "pack default" not in panel_text.lower(), (
+        "Legacy snapshot must not render 'pack default' hint"
+    )
+    assert "requested override" not in panel_text.lower(), (
+        "Legacy snapshot must not render 'requested override' hint"
+    )
+    assert "→" not in panel_text, (
+        "Legacy snapshot must not render the divergence arrow"
+    )

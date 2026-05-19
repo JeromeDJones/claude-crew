@@ -1756,6 +1756,27 @@ class TestConfigSnapshot:
         assert cfg["effort_requested"] == "high"
         assert cfg["effort_pack_default"] is None
 
+    async def test_effort_provenance_kwarg_matches_pack_default(
+        self, broker: Broker
+    ) -> None:
+        """Effort provenance: operator override matches pack default (the
+        ``EffortValue`` fallback branch — nothing to flag, render plain).
+
+        All three provenance fields land on the same value.
+        """
+        agent_def = _make_agent_def(effort="medium")
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            effort="medium",
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["effort"] == "medium"
+        assert cfg["effort_requested"] == "medium"
+        assert cfg["effort_pack_default"] == "medium"
+
     # ---------- AT2 ----------
 
     async def test_system_prompt_round_trips_verbatim(self, broker: Broker) -> None:
