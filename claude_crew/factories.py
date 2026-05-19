@@ -316,19 +316,24 @@ def default_factory(
             # Pack frontmatter `model: opus` is otherwise only applied for subagent dispatch,
             # not when the role is spawned as a top-level claude-crew teammate.
             resolved_model = model
-            if resolved_model is None:
-                pack_def = merged_pack.get(role)
-                if pack_def is not None:
+            resolved_effort = effort
+            pack_def = merged_pack.get(role)
+            if pack_def is not None:
+                if resolved_model is None:
                     pack_model = getattr(pack_def, "model", None)
                     if pack_model:
                         resolved_model = _PACK_MODEL_ALIASES.get(pack_model, pack_model)
+                if resolved_effort is None:
+                    pack_effort = getattr(pack_def, "effort", None)
+                    if pack_effort:
+                        resolved_effort = pack_effort
 
             # Pre-approve MCP tool IDs so the subprocess doesn't block on permission prompts.
             # The lead has already authorized these tools by passing them as extra_tools.
             mcp_extra = [t for t in (extra_tools or []) if _mcp_server_name_from_tool_id(t)]
 
             return sdk_factory(
-                id, name, role, model=resolved_model, effort=effort, agents=effective_agents,
+                id, name, role, model=resolved_model, effort=resolved_effort, agents=effective_agents,
                 pack_bodies=merged_bodies,
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),

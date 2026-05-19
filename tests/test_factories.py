@@ -1045,3 +1045,80 @@ class TestMcpServerAutoWiring:
         assert "knowledge-graph" in mcp_servers
         assert "claude-crew" in mcp_servers
         assert len(mcp_servers) == 2
+
+
+class TestPackEffortPromotion:
+    """Pack frontmatter `effort:` must flow to SdkTeammate at top-level spawn,
+    mirroring the existing `model:` promotion path. Lead's spawn-time kwarg wins.
+    """
+
+    def _make_factory(self, monkeypatch, tmp_path, pack_def):
+        """Build a default_factory with a controlled merged pack, capturing sdk_factory kwargs."""
+        from claude_crew.factories import default_factory
+
+        (tmp_path / "home").mkdir(exist_ok=True)
+        (tmp_path / "cwd").mkdir(exist_ok=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        def mock_build_merged_pack():
+            return {"explorer": pack_def}, {"explorer": []}, {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        captured: list[dict] = []
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            captured.append(dict(kwargs))
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        return default_factory(), captured
+
+    def test_pack_effort_promoted_when_kwarg_absent(self, monkeypatch, tmp_path) -> None:
+        """Role-pack `effort: medium` reaches SdkTeammate when lead omits effort."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+            effort="medium",
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer")  # no effort kwarg
+
+        assert captured[0]["effort"] == "medium", (
+            f"expected pack effort 'medium' to be promoted; got {captured[0].get('effort')!r}"
+        )
+
+    def test_spawn_kwarg_effort_overrides_pack_effort(self, monkeypatch, tmp_path) -> None:
+        """Lead's explicit effort= wins over pack-declared effort."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+            effort="medium",
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer", effort="high")
+
+        assert captured[0]["effort"] == "high", (
+            f"expected kwarg 'high' to win; got {captured[0].get('effort')!r}"
+        )
+
+    def test_no_pack_effort_no_kwarg_passes_none(self, monkeypatch, tmp_path) -> None:
+        """When neither pack nor kwarg sets effort, None is passed (SDK default applies)."""
+        from claude_agent_sdk.types import AgentDefinition
+
+        pack_def = AgentDefinition(
+            description="explorer", prompt="explore", tools=["Read"],
+        )
+        f, captured = self._make_factory(monkeypatch, tmp_path, pack_def)
+        f("t-1", "n", "explorer")
+
+        assert captured[0]["effort"] is None, (
+            f"expected None for unset effort; got {captured[0].get('effort')!r}"
+        )
