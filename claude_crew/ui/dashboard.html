@@ -303,6 +303,126 @@
     }
     .startup-notices-toggle:hover { color: var(--fg-1); background: var(--bg-2); }
 
+    /* roster-spotlight: left-rail roster row.
+       Two-line layout, leading vertical accent bar (3px), click toggles
+       spotlight inclusion. Selected: brighter bg. Unselected: dim. */
+    .roster-section {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex; flex-direction: column;
+      background: var(--bg-0);
+    }
+    .roster-section-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      font-size: 11px; color: var(--fg-3);
+      letter-spacing: 0.05em; text-transform: uppercase;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--bg-1);
+      flex-shrink: 0;
+      position: sticky; top: 0; z-index: 1;
+    }
+    .roster-section-header-count {
+      color: var(--fg-2);
+    }
+    .roster-section-action {
+      margin-left: auto; background: none; border: 1px solid var(--line);
+      cursor: pointer; padding: 2px 8px; border-radius: 3px;
+      font-family: var(--font-sans); font-size: 10px; color: var(--fg-2);
+      text-transform: none; letter-spacing: 0;
+    }
+    .roster-section-action:hover { color: var(--fg-1); background: var(--bg-2); }
+    .roster-section-action:disabled { cursor: default; opacity: 0.4; }
+
+    .roster-empty {
+      padding: 16px 14px; font-size: 11px; color: var(--fg-3);
+      text-align: center;
+    }
+
+    .roster-row {
+      position: relative;
+      display: grid;
+      grid-template-columns: 22px 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 8px; row-gap: 2px;
+      padding: 7px 12px 7px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      cursor: pointer;
+      transition: background 0.12s ease, opacity 0.12s ease;
+      background: transparent;
+    }
+    .roster-row::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: transparent;
+      transition: background 0.2s ease, opacity 0.2s ease;
+    }
+    .roster-row.tool-active::before { background: var(--st-tool); opacity: 0.5; }
+    .roster-row.tool-stuck::before  { background: var(--st-tool); opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
+    .roster-row:hover { background: var(--bg-1); }
+    .roster-row.selected { background: var(--accent-soft); }
+    .roster-row.selected:hover { background: var(--accent-soft); filter: brightness(1.04); }
+    .roster-row.unselected { opacity: 0.55; }
+    .roster-row.unselected:hover { opacity: 0.85; }
+
+    .roster-row-avatar { grid-row: 1 / span 2; align-self: center; }
+    .roster-row-identity {
+      grid-column: 2; grid-row: 1;
+      display: flex; align-items: center; gap: 6px;
+      min-width: 0;
+    }
+    .roster-row-name {
+      font-size: 12.5px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .roster-row-role {
+      font-size: 10.5px; color: var(--fg-3); font-weight: 400;
+      flex-shrink: 0;
+    }
+    .roster-row-trailing-top {
+      grid-column: 3; grid-row: 1;
+      display: flex; align-items: center; gap: 6px;
+      flex-shrink: 0;
+    }
+    .roster-row-meta {
+      grid-column: 2 / span 2; grid-row: 2;
+      display: flex; align-items: center; gap: 6px;
+      min-width: 0;
+      font-size: 10.5px; color: var(--fg-2);
+    }
+    .roster-row-meta .ctx-window-bar { margin-left: 0; }
+    .roster-row-meta-spacer { flex: 1; min-width: 4px; }
+    .roster-row-tool-slot {
+      min-width: 0; overflow: hidden;
+      max-width: 50%;
+    }
+    .roster-row-ago {
+      flex-shrink: 0; font-family: var(--font-mono);
+      font-size: 10px; color: var(--fg-3);
+    }
+    .roster-row-cost {
+      flex-shrink: 0; font-family: var(--font-mono);
+      font-size: 10.5px; color: var(--fg-2);
+    }
+
+    /* roster-spotlight: pinned topology block at bottom of rail */
+    .rail-topology {
+      flex: 0 0 auto;
+      border-top: 1px solid var(--line);
+      background: var(--bg-1);
+    }
+
+    /* roster-spotlight: spotlight empty-state */
+    .spotlight-empty {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 32px; color: var(--fg-3); font-size: 12px; text-align: center;
+      background: var(--bg-0);
+    }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
@@ -982,23 +1102,9 @@
     }
 
     // --- AgentStreamColumn ---
-    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival, onOpenPanel }) {
-      const scrollRef = useRef(null);
-      const isPinnedRef = useRef(true);
-
-      const handleScroll = () => {
-        const el = scrollRef.current;
-        if (el) {
-          isPinnedRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-        }
-      };
-
-      useEffect(() => {
-        const el = scrollRef.current;
-        if (el && isPinnedRef.current) el.scrollTop = el.scrollHeight;
-      }, [msgs.length]);
-
-      // F22: elapsed counter, accent bar, tool chip, settle frame.
+    // F22: elapsed counter, accent bar, tool chip, settle frame.
+    // Shared between AgentStreamColumn (column header) and RosterRow (left rail).
+    function useToolChip(agent, serverNow, perfAtArrival) {
       useTick1s();  // 1Hz re-render so the elapsed counter advances between server polls
       const inFlight = agent.oldest_in_flight || null;
       const elapsed = computeElapsedSeconds(
@@ -1032,6 +1138,27 @@
           </span>
         );
       }
+
+      return { chipNode, accentClass, isStuck, elapsed, inFlight };
+    }
+
+    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival, onOpenPanel }) {
+      const scrollRef = useRef(null);
+      const isPinnedRef = useRef(true);
+
+      const handleScroll = () => {
+        const el = scrollRef.current;
+        if (el) {
+          isPinnedRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+        }
+      };
+
+      useEffect(() => {
+        const el = scrollRef.current;
+        if (el && isPinnedRef.current) el.scrollTop = el.scrollHeight;
+      }, [msgs.length]);
+
+      const { chipNode, accentClass } = useToolChip(agent, serverNow, perfAtArrival);
 
       return (
         <div style={{ display: "flex", flexDirection: "column", borderRight: "1px solid var(--line)", minWidth: 0, overflow: "hidden" }}>
@@ -1095,6 +1222,136 @@
             ) : msgs.map((m, i) => (
               <MiniMessage key={i} msg={m} agentMap={agentMap}/>
             ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- RosterRow / RosterRail (roster-spotlight layout) ---
+    //
+    // RosterRow surfaces the same scan signals as the column header
+    // (avatar, name, role, status, model, ctx-window, cost, tool-chip, ago,
+    // accent bar) in a compact two-line row. Clicking toggles whether the
+    // agent renders as a full detail column in the spotlight pane.
+    function RosterRow({ agent, selected, onToggle, serverNow, perfAtArrival }) {
+      const { chipNode, isStuck, inFlight } = useToolChip(agent, serverNow, perfAtArrival);
+
+      const accentMod = inFlight
+        ? (isStuck ? "tool-stuck" : "tool-active")
+        : "";
+      const selMod = selected ? "selected" : "unselected";
+
+      return (
+        <div
+          className={`roster-row ${selMod} ${accentMod}`.trim()}
+          onClick={() => onToggle && onToggle(agent.id)}
+          title={agent.id}
+        >
+          <div className="roster-row-avatar">
+            <AgentAvatar id={agent.id} role={agent.role} size={22}/>
+          </div>
+          <div className="roster-row-identity">
+            <span className="roster-row-name">{agent.name || agent.role}</span>
+            {agent.name && agent.name !== agent.role && (
+              <span className="roster-row-role">{agent.role}</span>
+            )}
+          </div>
+          <div className="roster-row-trailing-top">
+            <StatusDot status={agent.status}/>
+            <span className="roster-row-cost" title="session cost (cumulative)">
+              {fmtCost(agent.cost)}
+            </span>
+          </div>
+          <div className="roster-row-meta">
+            <ModelBadge model={agent.model} activeModel={agent.active_model}/>
+            <ContextWindowBar
+              lastTurn={agent.last_turn || { in: 0, out: 0 }}
+              totalIn={agent.tokens.in}
+              totalOut={agent.tokens.out}
+            />
+            <div className="roster-row-tool-slot">{chipNode}</div>
+            <div className="roster-row-meta-spacer"/>
+            <span className="roster-row-ago">{fmtAgo(agent.lastMsg)}</span>
+          </div>
+        </div>
+      );
+    }
+
+    function RosterRail({
+      liveAgents,
+      selectedIds,           // Set<string> | null   (null = default-all)
+      onToggle,
+      onSelectAll,
+      onClearAll,
+      serverNow,
+      perfAtArrival,
+      terminatedAgents,
+      terminatedOpen,
+      onToggleTerminated,
+      onTerminatedAgentClick,
+      startupDiagnostics,
+      topologyNode,
+    }) {
+      const isDefaultAll = selectedIds === null;
+      const selectedCount = isDefaultAll
+        ? liveAgents.length
+        : liveAgents.filter(a => selectedIds.has(a.id)).length;
+
+      return (
+        <div style={{
+          display: "flex", flexDirection: "column",
+          borderRight: "1px solid var(--line)",
+          minWidth: 0, minHeight: 0, overflow: "hidden",
+          background: "var(--bg-0)",
+        }}>
+          <div className="roster-section">
+            <div className="roster-section-header">
+              <span>Crew</span>
+              <span className="roster-section-header-count">
+                {liveAgents.length === 0
+                  ? "(0)"
+                  : `(${selectedCount}/${liveAgents.length})`}
+              </span>
+              <button
+                className="roster-section-action"
+                onClick={onClearAll}
+                disabled={liveAgents.length === 0 || selectedCount === 0}
+                title="Hide all from spotlight"
+              >Clear</button>
+              <button
+                className="roster-section-action"
+                onClick={onSelectAll}
+                disabled={liveAgents.length === 0 || selectedCount === liveAgents.length}
+                title="Spotlight all live agents"
+              >All</button>
+            </div>
+            {liveAgents.length === 0 ? (
+              <div className="roster-empty">No live agents.</div>
+            ) : (
+              liveAgents.map(a => (
+                <RosterRow
+                  key={a.id}
+                  agent={a}
+                  selected={isDefaultAll || selectedIds.has(a.id)}
+                  onToggle={onToggle}
+                  serverNow={serverNow}
+                  perfAtArrival={perfAtArrival}
+                />
+              ))
+            )}
+          </div>
+
+          <StartupNoticesSection diagnostics={startupDiagnostics}/>
+
+          <TerminatedSection
+            agents={terminatedAgents}
+            isOpen={terminatedOpen}
+            onToggle={onToggleTerminated}
+            onAgentClick={onTerminatedAgentClick}
+          />
+
+          <div className="rail-topology">
+            {topologyNode}
           </div>
         </div>
       );
@@ -1271,6 +1528,13 @@
       const [openPanel, setOpenPanel] = useState(null);
       const [terminatedOpen, setTerminatedOpen] = useState({});
 
+      // roster-spotlight: per-instance selection.
+      //   selectedByInstance[activeId] === undefined  → "default-all" mode
+      //     (every live agent is implicitly spotlighted; no Set materialized yet)
+      //   selectedByInstance[activeId] === Set<id>    → explicit selection
+      // New spawns auto-join Sets that have been materialized (see useEffect).
+      const [selectedByInstance, setSelectedByInstance] = useState({});
+
       const cli = instances.find(i => i.id === activeId) || instances[0];
       const agentMap = useMemo(
         () => Object.fromEntries(cli.agents.map(a => [a.id, a])),
@@ -1280,23 +1544,101 @@
       const liveAgents = (cli.agents || []).filter(a => a.dead !== true);
       const deadAgents = (cli.agents || []).filter(a => a.dead === true);
 
+      const rawSelected = selectedByInstance[activeId];
+      const selectedIds = rawSelected === undefined ? null : rawSelected;
+
+      // Per-instance memo of ids the layout has already observed. Used by
+      // the auto-include effect to distinguish "newly spawned" (add to
+      // selection) from "intentionally deselected" (leave alone).
+      const seenIdsByInstanceRef = useRef({});
+
+      // Auto-include new spawns into a materialized Set so the operator's
+      // "deselect-some" intent doesn't leak into "ignore-all-future-agents".
+      // Only ids that were NOT in the previously-seen set count as newcomers.
+      useEffect(() => {
+        const seenMap = seenIdsByInstanceRef.current;
+        const liveIds = liveAgents.map(a => a.id);
+        const prevSeen = seenMap[activeId] || new Set();
+        const newcomers = liveIds.filter(id => !prevSeen.has(id));
+
+        // Update seen set to reflect current live roster (forget dead ids
+        // so a re-spawned id with the same string would also count as new;
+        // in practice ids are uuids and never recur, so this is harmless).
+        seenMap[activeId] = new Set(liveIds);
+
+        if (newcomers.length === 0) return;
+        if (selectedIds === null) return;  // default-all → newcomers implicitly included
+
+        setSelectedByInstance(prev => {
+          const cur = prev[activeId];
+          if (!(cur instanceof Set)) return prev;
+          const next = new Set(cur);
+          newcomers.forEach(id => next.add(id));
+          return { ...prev, [activeId]: next };
+        });
+      }, [activeId, liveAgents.map(a => a.id).join("|")]);
+
+      const onToggleSelection = (id) => {
+        setSelectedByInstance(prev => {
+          const cur = prev[activeId];
+          // Materialize from current liveAgents on first toggle.
+          const base = cur instanceof Set
+            ? new Set(cur)
+            : new Set(liveAgents.map(a => a.id));
+          if (base.has(id)) base.delete(id);
+          else base.add(id);
+          return { ...prev, [activeId]: base };
+        });
+      };
+      const onSelectAll = () => {
+        // Revert to default-all (null) — equivalent to "all selected" but
+        // also re-enables implicit inclusion of any future spawn.
+        setSelectedByInstance(prev => {
+          const next = { ...prev };
+          delete next[activeId];
+          return next;
+        });
+      };
+      const onClearAll = () => {
+        setSelectedByInstance(prev => ({ ...prev, [activeId]: new Set() }));
+      };
+
+      const spotlightedAgents = selectedIds === null
+        ? liveAgents
+        : liveAgents.filter(a => selectedIds.has(a.id));
+
       return (
         <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-0)", overflow: "hidden" }}>
           <MCTopBar instances={instances} connected={connected}/>
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId}/>
-          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: 0 }}>
-            <MiniGraph cli={cli} agents={liveAgents}/>
+          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
+            <RosterRail
+              liveAgents={liveAgents}
+              selectedIds={selectedIds}
+              onToggle={onToggleSelection}
+              onSelectAll={onSelectAll}
+              onClearAll={onClearAll}
+              serverNow={cli.now_wallclock}
+              perfAtArrival={perfAtArrival}
+              terminatedAgents={deadAgents}
+              terminatedOpen={terminatedOpen[activeId] === true}
+              onToggleTerminated={() => setTerminatedOpen(o => ({...o, [activeId]: !(o[activeId] === true)}))}
+              onTerminatedAgentClick={setOpenPanel}
+              startupDiagnostics={cli.startup_diagnostics || []}
+              topologyNode={<MiniGraph cli={cli} agents={liveAgents}/>}
+            />
             <div style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
-              <StartupNoticesSection diagnostics={cli.startup_diagnostics || []}/>
-              <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
-                <StreamColumns cli={cli} agents={liveAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel}/>
-              </div>
-              <TerminatedSection
-                agents={deadAgents}
-                isOpen={terminatedOpen[activeId] === true}
-                onToggle={() => setTerminatedOpen(o => ({...o, [activeId]: !(o[activeId] === true)}))}
-                onAgentClick={setOpenPanel}
-              />
+              {liveAgents.length > 0 && spotlightedAgents.length === 0 ? (
+                <div className="spotlight-empty">
+                  No agents spotlighted.<br/>
+                  Click roster rows on the left to bring agents into focus,<br/>
+                  or press <strong>All</strong> to spotlight every live agent.
+                </div>
+              ) : (
+                <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
+                  <StreamColumns cli={cli} agents={spotlightedAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel}/>
+                </div>
+              )}
             </div>
           </div>
           {openPanel && openPanel.config && (
