@@ -1691,7 +1691,11 @@ class TestConfigSnapshot:
         assert cfg["permission_mode"] == "bypassPermissions"
 
     async def test_effort_kwarg_overrides_agent_def(self, broker: Broker) -> None:
-        """AT1 extension: spawn-time effort kwarg overrides AgentDefinition.effort."""
+        """AT1 extension: spawn-time effort kwarg overrides AgentDefinition.effort.
+
+        Also asserts effort provenance fields: dashboard surfaces both
+        ``what we asked for`` and ``what actually ran with``.
+        """
         agent_def = _make_agent_def(effort="low")
         resolver = lambda role: agent_def  # noqa: E731
 
@@ -1702,6 +1706,8 @@ class TestConfigSnapshot:
         )
         cfg = broker.get_teammate_status(tid)["config"]
         assert cfg["effort"] == "high"
+        assert cfg["effort_requested"] == "high"
+        assert cfg["effort_pack_default"] == "low"
 
     async def test_effort_falls_back_to_agent_def_when_no_kwarg(self, broker: Broker) -> None:
         """AT1 extension: AgentDefinition.effort used when no kwarg override supplied."""
@@ -1714,6 +1720,41 @@ class TestConfigSnapshot:
         )
         cfg = broker.get_teammate_status(tid)["config"]
         assert cfg["effort"] == "medium"
+        assert cfg["effort_requested"] is None
+        assert cfg["effort_pack_default"] == "medium"
+
+    async def test_effort_provenance_null_when_no_pack_default_and_no_kwarg(
+        self, broker: Broker
+    ) -> None:
+        """Effort provenance: both fields null when neither input present."""
+        agent_def = _make_agent_def()  # effort=None
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["effort"] is None
+        assert cfg["effort_requested"] is None
+        assert cfg["effort_pack_default"] is None
+
+    async def test_effort_provenance_kwarg_only_no_pack_default(
+        self, broker: Broker
+    ) -> None:
+        """Effort provenance: kwarg sole source — pack default null, requested == resolved."""
+        agent_def = _make_agent_def()  # effort=None
+        resolver = lambda role: agent_def  # noqa: E731
+
+        tid = await broker.spawn_teammate(
+            role="builder", name=None, factory=_factory,
+            effort="high",
+            agent_def_resolver=resolver,
+        )
+        cfg = broker.get_teammate_status(tid)["config"]
+        assert cfg["effort"] == "high"
+        assert cfg["effort_requested"] == "high"
+        assert cfg["effort_pack_default"] is None
 
     # ---------- AT2 ----------
 
@@ -1874,7 +1915,7 @@ class TestConfigSnapshot:
         assert result is None
 
     def test_snapshot_config_all_fields_present(self, broker: Broker) -> None:
-        """_snapshot_config builds a complete dict with all 8 keys."""
+        """_snapshot_config builds a complete dict with all expected keys."""
         agent_def = _make_agent_def(
             model="claude-sonnet-4-6",
             tools=["Bash"],
@@ -1892,6 +1933,7 @@ class TestConfigSnapshot:
         expected_keys = {
             "model", "tools", "disallowed_tools", "skills",
             "permission_mode", "mcp_servers", "system_prompt", "effort",
+            "effort_requested", "effort_pack_default",
             "extra_tools", "extra_skills",
         }
         assert set(cfg.keys()) == expected_keys
