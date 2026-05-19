@@ -733,7 +733,10 @@
           </div>
         );
       }
-      if (!hasOverride && hasPack && packDefault === resolved) {
+      // No override, pack default present. By construction in
+      // broker._snapshot_config, resolved == packDefault here — the equality
+      // is invariant, not a guard. (Sentinel L-2.)
+      if (!hasOverride && hasPack) {
         return (
           <div className="tm-detail-value">
             {resolved}
