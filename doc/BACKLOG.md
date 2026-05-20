@@ -18,6 +18,40 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-19] Feature: multi-scope-agent-memory
+
+> **Note (2026-05-19):** items 1, 3, and 4 below are slated for a follow-up RepoReactor slice. Item 2 (inline-import hoist) deferred as cosmetic / possibly load-bearing.
+
+### `Scope` type alias missing — signatures typed `str` instead of `Literal`
+
+- **What**: The spec's Data/API Contracts section declares `Scope = Literal["user", "project", "local"]` as a module-level type alias, but the implementation uses `scope: str = "user"` on all three public signatures (`memory_dir`, `memory_index_path`, `build_memory_section`). The `else: raise ValueError` in `memory_dir` provides a runtime safety net, but the typed API surface promised by the spec is absent. `sdk_teammate.py`'s `role_memory` variable is also untyped.
+- **Where**: `claude_crew/teammate_memory.py` (all three signature sites); `claude_crew/sdk_teammate.py` (`role_memory` variable).
+- **Why it matters**: Static type checkers won't flag invalid scope literals passed to these helpers; future callers have no IDE completion for valid values. Flagged `feature.spec.type-drift.scope-literal` in `multi-scope-agent-memory-feature-review-0.md`.
+- **Suggested action**: Add `Scope = Literal["user", "project", "local"]` at module top; re-type the three signatures. Simultaneously tighten `build_memory_section`'s else-branch to `raise ValueError` (mirror `memory_dir`) per the scope-fallthrough finding below. XS change.
+
+### Inline import in `sdk_teammate.__init__` unjustified
+
+- **What**: `sdk_teammate.py` imports `from claude_crew.teammate_memory import build_memory_section, ensure_write_tool` inside the `__init__` method body with no comment explaining a circular-import rationale. Per project CLAUDE.md, inline imports are a code smell (named for test functions; the same concern applies to method bodies in production code). The import is re-executed on every `SdkTeammate` construction (cached in `sys.modules` after the first hit, but still obscures the dependency graph).
+- **Where**: `claude_crew/sdk_teammate.py` — inline import inside `__init__`.
+- **Why it matters**: Obscures dependency graph; inconsistent with module-top import convention. Flagged `feature.cracks.inline-imports` in `multi-scope-agent-memory-feature-review-0.md`.
+- **Suggested action**: Hoist to module top after verifying no circular import (check whether `teammate_memory.py` → `teammate_prompt.py` → `sdk_teammate.py` forms a cycle). If a cycle exists, document it with a comment at the inline import site. XS change.
+
+### `build_memory_section` else-branch silently defaults to user scope on unknown scope
+
+- **What**: `memory_dir` raises `ValueError("Unknown scope: ...")` on unrecognized scope values; `build_memory_section` silently falls through to user-scope guidance. Currently dead — all callers go through `memory_dir` first (which would already raise). A future direct caller of `build_memory_section` would silently get user-scope behavior for a typo'd or future scope value.
+- **Where**: `claude_crew/teammate_memory.py::build_memory_section` — the `else` branch.
+- **Why it matters**: Inconsistency between `memory_dir` (fail-loud) and `build_memory_section` (silent default). Flagged `feature.cracks.scope-fallthrough` in `multi-scope-agent-memory-feature-review-0.md`.
+- **Suggested action**: Change the else-branch to `raise ValueError(f"Unknown scope: {scope!r}")`. Subsumes naturally into the `Scope` Literal tightening above. XS change; fold into the same follow-up slice as the type-alias fix.
+
+### `SdkTeammate.__init__` not tested with `cwd=None` for project/local scope
+
+- **What**: AT-10 and AT-11 both pass `cwd=str(tmp_path)`; no `SdkTeammate.__init__` integration test exercises the `Path.cwd()` fallback that fires when `cwd=None` is passed with a project/local scope. The fallback is exercised at the helper-function level but not at the construction integration layer. The spec documents DEBUG-log behavior for this path; no corresponding assertion exists.
+- **Where**: `tests/test_sdk_teammate.py` — missing AT variant.
+- **Why it matters**: A refactor of the `cwd` fallback in `sdk_teammate.__init__` could silently break the edge case. Helper-level tests would remain green while the integration path fails. Flagged `feature.test.coverage-gap.cwd-none-integration` in `multi-scope-agent-memory-feature-review-0.md`.
+- **Suggested action**: Add a parametrized test variant in `tests/test_sdk_teammate.py` that constructs `SdkTeammate` with `memory="project"` and `cwd=None`, then asserts the system prompt contains the project-scope guidance text and a path derived from `Path.cwd()`. XS change.
+
+---
+
 ## [2026-05-18] Feature candidate: click-to-view tool output in dashboard stream
 
 ### Operator wants to inspect tool output without leaving Mission Control

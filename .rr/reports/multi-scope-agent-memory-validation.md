@@ -1,9 +1,20 @@
+# Validation Report: multi-scope-agent-memory
+
+## Verdict
+
+PASS
+
+## Exit Code
+
+0
+
+## Output
+
+```
+running ## Validation command (cap=600s)
+ran in 4s, exit=0
 ============================= test session starts ==============================
 platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0
-rootdir: /home/jerome/dev/claude-crew/.rr-worktrees/multi-scope-agent-memory
-configfile: pyproject.toml
-plugins: playwright-0.7.2, anyio-4.13.0, asyncio-1.3.0, base-url-2.1.0
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
 collected 184 items
 
 tests/test_teammate_memory.py .......................................... [ 22%]
@@ -12,3 +23,6 @@ tests/test_sdk_teammate.py ............................................. [ 61%]
 ......................................................................   [100%]
 
 ============================= 184 passed in 3.61s ==============================
+```
+
+Command: `uv run pytest tests/test_teammate_memory.py tests/test_sdk_teammate.py`
