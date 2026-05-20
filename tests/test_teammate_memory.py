@@ -410,6 +410,33 @@ class TestIsLeadProjectMemoryPath:
         assert is_lead_project_memory_path("") is False
 
 
+class TestWriteGuardNoncollision:
+    """AT-12: project- and local-scope memory paths must NOT be flagged by
+    is_lead_project_memory_path — i.e., no false-positive collision with the
+    lead write guard. Uses memory_dir() so the test tracks real path convention.
+    """
+
+    def test_project_scope_memory_dir_not_flagged(self, tmp_path):
+        # AT-12: <root>/.claude/agent-memory/<role> returns False
+        path = memory_dir("builder", scope="project", project_root=tmp_path)
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_project_scope_memory_file_not_flagged(self, tmp_path):
+        # AT-12: file inside project-scope memory dir returns False
+        path = memory_dir("builder", scope="project", project_root=tmp_path) / "MEMORY.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_local_scope_memory_dir_not_flagged(self, tmp_path):
+        # AT-12: <root>/.claude/agent-memory.local/<role> returns False
+        path = memory_dir("builder", scope="local", project_root=tmp_path)
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_local_scope_memory_file_not_flagged(self, tmp_path):
+        # AT-12: file inside local-scope memory dir returns False
+        path = memory_dir("builder", scope="local", project_root=tmp_path) / "MEMORY.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+
 class TestWriteGuardDenyMessage:
     def test_message_names_role_target(self, fake_home):
         msg = write_guard_deny_message("sentinel", "/x/y/z.md")
