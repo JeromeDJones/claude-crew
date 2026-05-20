@@ -140,18 +140,38 @@ def write_guard_deny_message(role: str, attempted_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_memory_section(role: str, tools: tuple[str, ...] | None) -> str:
+def build_memory_section(
+    role: str,
+    tools: tuple[str, ...] | None,
+    scope: str = "user",
+    project_root: Path | None = None,
+) -> str:
     """Build the memory addendum for a teammate's system prompt.
 
     Mirrors the scaffolding the CLI provides to subagents with `memory: user`:
     location guidance, save/skip rules, save format, and the first 200 lines
     of the role's MEMORY.md index. Never raises — I/O errors surface in the
     injected text.
+
+    Picks scope-specific guidance text based on the `scope` kwarg.
     """
     has_write = "Write" in (tools or ())
-    directory = memory_dir(role)
-    index_path = memory_index_path(role)
+    directory = memory_dir(role, scope=scope, project_root=project_root)
+    index_path = memory_index_path(role, scope=scope, project_root=project_root)
     index_block = _read_index(index_path)
+
+    if scope == "project":
+        header = _INSTRUCTIONS_HEADER_PROJECT
+        what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_PROJECT
+        what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_PROJECT
+    elif scope == "local":
+        header = _INSTRUCTIONS_HEADER_LOCAL
+        what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_LOCAL
+        what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_LOCAL
+    else:
+        header = _INSTRUCTIONS_HEADER_USER
+        what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_USER
+        what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_USER
 
     persistence_note = "" if has_write else (
         "\n\n**Note:** The Write tool is not in your tool list — you cannot "
@@ -162,9 +182,9 @@ def build_memory_section(role: str, tools: tuple[str, ...] | None) -> str:
 
     return (
         f"{SENTINEL_MEMORY}\n\n"
-        f"{_INSTRUCTIONS_HEADER.format(role=role, directory=directory, index_path=index_path)}\n\n"
-        f"{_INSTRUCTIONS_WHAT_TO_SAVE}\n\n"
-        f"{_INSTRUCTIONS_WHAT_NOT_TO_SAVE}\n\n"
+        f"{header.format(role=role, directory=directory, index_path=index_path)}\n\n"
+        f"{what_to_save}\n\n"
+        f"{what_not_to_save}\n\n"
         f"{_INSTRUCTIONS_WHEN_NOT_TO_SAVE}\n\n"
         f"{_INSTRUCTIONS_HOW_TO_SAVE.format(directory=directory, index_path=index_path)}\n\n"
         f"### Your prior memories (from MEMORY.md)\n\n"
@@ -198,17 +218,21 @@ def _read_index(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-_INSTRUCTIONS_HEADER = """\
+# ---------------------------------------------------------------------------
+# User-scope guidance (cross-project, home-based memory)
+# ---------------------------------------------------------------------------
+
+_INSTRUCTIONS_HEADER_USER = """\
 You have a persistent, file-based memory system at `{directory}`.
 
-Build this memory over time so future invocations of this role can pick up where prior ones left off — but be selective. Memory is for things that wouldn't be obvious from reading the code, the git history, or project documentation. The same role may be invoked across many projects; favor entries with cross-project value.
+Build this memory over time so future invocations of this role can pick up where prior ones left off — but be selective. Memory is for things that wouldn't be obvious from reading the code, the git history, or project documentation. Entries here apply across projects — favor lessons with cross-project value that transfer from one codebase or engagement to another.
 
 The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant.
 
 **Boundaries.** Project memory at `~/.claude/projects/*/memory/` belongs to the lead session — it is suppressed from your context (via `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` at spawn), and a runtime write guard blocks any attempt to write into it. Your memory is exclusively at `{directory}`."""
 
 
-_INSTRUCTIONS_WHAT_TO_SAVE = """\
+_INSTRUCTIONS_WHAT_TO_SAVE_USER = """\
 ### What to save
 
 - **Principles and lessons** that apply across projects, not just this one
@@ -217,7 +241,7 @@ _INSTRUCTIONS_WHAT_TO_SAVE = """\
 - **Failure modes you've hit before** so you can flag them faster next time"""
 
 
-_INSTRUCTIONS_WHAT_NOT_TO_SAVE = """\
+_INSTRUCTIONS_WHAT_NOT_TO_SAVE_USER = """\
 ### What NOT to save
 
 - Code conventions, file paths, function locations, or project structure — the agent can grep or use the knowledge graph to find these
@@ -226,6 +250,73 @@ _INSTRUCTIONS_WHAT_NOT_TO_SAVE = """\
 - Anything already documented in CLAUDE.md or other authoritative docs
 - Per-session task state, plans, or ephemera
 - **Code-derivable references.** `type: reference` is for *external* pointers only (issue trackers, dashboards, channels, external API docs) — never for things visible in the code"""
+
+
+# ---------------------------------------------------------------------------
+# Project-scope guidance (project-shared, committed, team-visible)
+# ---------------------------------------------------------------------------
+
+_INSTRUCTIONS_HEADER_PROJECT = """\
+You have a persistent, file-based memory system at `{directory}`.
+
+This is **project-scoped memory** — it lives inside the project repository at `.claude/agent-memory/` and is committed alongside the code. Entries here are shared across the whole team and visible to every teammate that uses this role on this project. Write only findings that are project-specific, relevant to future contributors, and safe to commit.
+
+The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant.
+
+**Boundaries.** Project memory at `~/.claude/projects/*/memory/` belongs to the lead session — it is suppressed from your context (via `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` at spawn), and a runtime write guard blocks any attempt to write into it. Your memory is exclusively at `{directory}`."""
+
+
+_INSTRUCTIONS_WHAT_TO_SAVE_PROJECT = """\
+### What to save
+
+- **Project-specific constraints and conventions** — things that are true for this project but not derivable from the code or README
+- **Integration quirks** — how this project's external dependencies behave in practice (rate limits, undocumented edge cases, workarounds in use)
+- **Architectural decisions** and their rationale, when not already captured in ADRs or docs
+- **Patterns that apply to this codebase** — what tends to work here, what doesn't, and why"""
+
+
+_INSTRUCTIONS_WHAT_NOT_TO_SAVE_PROJECT = """\
+### What NOT to save
+
+- **Secrets, credentials, tokens, or API keys** — this memory is committed; never write anything that must stay private
+- **Machine-specific paths or environment details** — they will be wrong on other contributors' machines
+- Code structure, file paths, or function locations visible via `grep` or the knowledge graph
+- Per-session task state, plans, or ephemera
+- Anything that applies only to your local checkout or environment"""
+
+
+# ---------------------------------------------------------------------------
+# Local-scope guidance (machine-local, non-committed scratch memory)
+# ---------------------------------------------------------------------------
+
+_INSTRUCTIONS_HEADER_LOCAL = """\
+You have a persistent, file-based memory system at `{directory}`.
+
+This is **local-scoped memory** — it lives at `.claude/agent-memory.local/` inside the project directory and is **not committed to version control**. It is machine-local and not shared with other contributors. Use it for experimental notes, in-progress investigations, and scratch observations that are not yet ready to share — or that should never be shared (e.g., machine-specific paths, personal workflow tweaks).
+
+**Recommended `.gitignore` entry:** add `.claude/agent-memory.local/` to your project's `.gitignore` so this directory is never accidentally committed.
+
+The MEMORY.md index at `{index_path}` is your table of contents. The agent in a future session sees this index automatically (first 200 lines). Detail files do not auto-load — they are read on demand when an index entry looks relevant.
+
+**Boundaries.** Project memory at `~/.claude/projects/*/memory/` belongs to the lead session — it is suppressed from your context (via `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` at spawn), and a runtime write guard blocks any attempt to write into it. Your memory is exclusively at `{directory}`."""
+
+
+_INSTRUCTIONS_WHAT_TO_SAVE_LOCAL = """\
+### What to save
+
+- **Experimental notes** — hypotheses being tested, approaches under investigation, observations that haven't solidified into conclusions yet
+- **Machine-specific paths or environment quirks** that affect your local workflow but would not apply to others
+- **Work-in-progress findings** — notes you want to carry across sessions before deciding whether to promote to project memory
+- **Personal workflow shortcuts** specific to your local setup"""
+
+
+_INSTRUCTIONS_WHAT_NOT_TO_SAVE_LOCAL = """\
+### What NOT to save
+
+- Secrets or credentials — even in local memory, avoid writing anything sensitive
+- Anything you intend to share with the team — promote those findings to project memory instead (`.claude/agent-memory/`)
+- Final, stable conclusions that belong in project or user memory
+- Per-session task state or ephemera that won't be useful next session"""
 
 
 _INSTRUCTIONS_WHEN_NOT_TO_SAVE = """\

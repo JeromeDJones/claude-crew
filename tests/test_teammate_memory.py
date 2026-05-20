@@ -119,6 +119,78 @@ def fake_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+class TestGuidanceTextPerScope:
+    """Acceptance tests 5–7: scope-specific guidance text in build_memory_section."""
+
+    def test_user_scope_contains_cross_project_phrase(self, tmp_path, fake_home):
+        # AT-5: user scope rendered text contains "apply across projects"
+        result = build_memory_section("builder", ("Read", "Write"), scope="user")
+        assert "apply across projects" in result
+
+    def test_user_scope_no_project_specific_phrasing(self, tmp_path, fake_home):
+        # AT-5: user scope does NOT contain project-scoped or local-scoped phrases
+        result = build_memory_section("builder", ("Read", "Write"), scope="user")
+        assert "project-scoped memory" not in result
+        assert "local-scoped memory" not in result
+        assert ".gitignore" not in result
+
+    def test_project_scope_emphasizes_committed_shared_memory(self, tmp_path):
+        # AT-6: project scope text emphasizes project-specific committed/shared memory
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        assert "project-scoped memory" in result
+        assert "committed" in result
+        assert "shared" in result or "team" in result
+
+    def test_project_scope_warns_against_secrets(self, tmp_path):
+        # AT-6: project scope warns against secrets and machine-specific detail
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        assert "secrets" in result.lower() or "credentials" in result.lower()
+        assert "machine-specific" in result.lower()
+
+    def test_project_scope_names_project_path(self, tmp_path):
+        # AT-6: project scope names the project-scoped directory path
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        expected_dir = str(tmp_path / ".claude" / "agent-memory" / "builder")
+        assert expected_dir in result
+
+    def test_local_scope_describes_machine_local_memory(self, tmp_path):
+        # AT-7: local scope describes machine-local non-shared memory
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert "local-scoped memory" in result
+        assert "machine-local" in result or "not shared" in result or "not committed" in result
+
+    def test_local_scope_mentions_experimental_notes(self, tmp_path):
+        # AT-7: local scope mentions experimental notes
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert "experimental" in result.lower()
+
+    def test_local_scope_recommends_gitignore_entry(self, tmp_path):
+        # AT-7: local scope recommends the .gitignore entry .claude/agent-memory.local/
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert ".claude/agent-memory.local/" in result
+        assert ".gitignore" in result
+
+    def test_local_scope_names_local_path(self, tmp_path):
+        # AT-7: local scope names the local-scoped directory path
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        expected_dir = str(tmp_path / ".claude" / "agent-memory.local" / "builder")
+        assert expected_dir in result
+
+
 class TestBuildMemorySectionNoIndex:
     def test_contains_sentinel(self, fake_home):
         result = build_memory_section("sentinel", ("Read", "Write"))
