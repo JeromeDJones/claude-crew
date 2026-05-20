@@ -20,10 +20,15 @@ path hints and observing where it wrote — `~/.claude/agent-memory/sentinel/`.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import AgentDefinition
 
 
 _MAX_INDEX_LINES = 200  # mirror the CLI's MEMORY.md auto-load truncation
@@ -191,6 +196,25 @@ def build_memory_section(
         f"{index_block}"
         f"{persistence_note}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Write-tool helper
+# ---------------------------------------------------------------------------
+
+
+def ensure_write_tool(agent_def: "AgentDefinition") -> "AgentDefinition":
+    """Return agent_def unchanged if Write is in tools; else a dataclasses.replace
+    copy with Write appended. Never mutates the input.
+
+    Handles tools=None (pack omitted tools:) by treating it as empty and
+    returning a copy with Write as the sole tool.
+    """
+    tools = agent_def.tools
+    if tools is not None and "Write" in tools:
+        return agent_def
+    existing = list(tools) if tools is not None else []
+    return dataclasses.replace(agent_def, tools=existing + ["Write"])
 
 
 # ---------------------------------------------------------------------------

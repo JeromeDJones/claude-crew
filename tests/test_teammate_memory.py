@@ -12,6 +12,7 @@ import pytest
 from claude_crew.teammate_memory import (
     _sanitize_role,
     build_memory_section,
+    ensure_write_tool,
     is_lead_project_memory_path,
     memory_dir,
     memory_index_path,
@@ -423,3 +424,64 @@ class TestWriteGuardDenyMessage:
         msg = write_guard_deny_message("sentinel", "/x.md")
         assert "lead" in msg.lower()
         assert "blocked" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# ensure_write_tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def agent_def_factory():
+    """Return a factory that builds a minimal AgentDefinition for testing."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    def _make(tools=None, **kwargs):
+        # AgentDefinition.tools is list[str] | None in the SDK
+        return AgentDefinition(description="test", prompt="test", tools=tools, **kwargs)
+
+    return _make
+
+
+class TestEnsureWriteTool:
+    """Acceptance tests 8–9 + edge cases for ensure_write_tool."""
+
+    def test_write_tool_added_when_tools_empty(self, agent_def_factory):
+        # AT-8: tools=[] → result has "Write" in tools
+        original = agent_def_factory(tools=[])
+        result = ensure_write_tool(original)
+        assert "Write" in result.tools
+        assert result.tools == ["Write"]
+
+    def test_write_tool_input_unchanged_when_tools_empty(self, agent_def_factory):
+        # AT-8: input object is NOT mutated
+        original = agent_def_factory(tools=[])
+        _ = ensure_write_tool(original)
+        assert original.tools == []
+
+    def test_write_tool_result_is_not_input_when_tools_empty(self, agent_def_factory):
+        # AT-8: returned object is a different identity (dataclasses.replace copy)
+        original = agent_def_factory(tools=[])
+        result = ensure_write_tool(original)
+        assert result is not original
+
+    def test_write_tool_returns_input_unchanged_when_already_present(self, agent_def_factory):
+        # AT-9: tools already contains "Write" → exact same object returned
+        original = agent_def_factory(tools=["Write", "Read"])
+        result = ensure_write_tool(original)
+        assert result is original
+
+    def test_write_tool_handles_none_tools(self, agent_def_factory):
+        # Edge case from advisory: tools=None treated as empty → ["Write"]
+        original = agent_def_factory(tools=None)
+        result = ensure_write_tool(original)
+        assert result.tools == ["Write"]
+        assert result is not original
+
+    def test_write_tool_appends_not_replaces(self, agent_def_factory):
+        # Existing tools preserved when Write is absent
+        original = agent_def_factory(tools=["Read", "Bash"])
+        result = ensure_write_tool(original)
+        assert "Read" in result.tools
+        assert "Bash" in result.tools
+        assert "Write" in result.tools
