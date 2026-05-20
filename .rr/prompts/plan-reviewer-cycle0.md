@@ -1,12 +1,13 @@
 ## Task
 
-Review the spec at `/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/specs/fidelity-audit-followups.md` for clarity, completeness, scope discipline, and testability.
+Review the combined spec+breakout artifact at `/home/jerome/dev/claude-crew/.rr-worktrees/multi-scope-agent-memory/.rr/specs/multi-scope-agent-memory.md` for clarity, completeness, scope
+discipline, testability (spec sections), and decomposition quality (## Task Breakout section).
 Write a review report using the plan-review-report template (in the plugin install at
-`doc/templates/plan-review-report-template.md`).
+`doc/templates/plan-review-report-template.md`). One artifact, one gate, one verdict covering both halves.
 
 ## Spec Under Review
 
-`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups/.rr/specs/fidelity-audit-followups.md`
+`/home/jerome/dev/claude-crew/.rr-worktrees/multi-scope-agent-memory/.rr/specs/multi-scope-agent-memory.md`
 
 ## Cycle
 
@@ -27,16 +28,20 @@ describes, and call out any contradictions explicitly.
 
 ## Working Directory
 
-`/home/jerome/dev/claude-crew/.rr-worktrees/fidelity-audit-followups`
+`/home/jerome/dev/claude-crew/.rr-worktrees/multi-scope-agent-memory`
 
 Change to this directory before all file operations.
 
 ## Instructions
 
 - Verdict must be **PASS** or **REQUEST-CHANGES**.
-- PASS only if the spec is clear, complete, well-scoped, and has a testable `## Test Command`.
-- REQUEST-CHANGES if any required section is missing, ambiguous, or the test command is not
-  runnable as written.
+- PASS only if:
+  - The spec sections are clear, complete, well-scoped, and have a testable `## Test Command`.
+  - The `## Task Breakout` section covers every numbered acceptance test (exactly one task per AT),
+    has no spurious dependency edges, no mega-tasks, and task descriptions are concrete enough an
+    implementor can build without re-reading the full spec.
+- REQUEST-CHANGES if any required section is missing or ambiguous, the test command is not
+  runnable as written, any acceptance test is unclaimed or duplicated, or any task is a mega-task.
 - On cycle ≥ 1: compare findings against the prior report; note anything that recurred.
 - Final line of your response must be exactly:
   `RR-VERDICT: PASS|REQUEST-CHANGES <slug> <cycle> <plan-review-report-path>`
