@@ -1,0 +1,7 @@
+# Debrief: multi-scope-agent-memory — implementor (task: per-scope-guidance-text)
+
+Verdict: PASS
+
+## Transferable lesson
+
+When a spec decomposes a behavior-change into "add scope branching first, then add scope-specific text", the second task frequently arrives with its declared test command already passing zero tests — not because the prior task was incomplete, but because the tests themselves haven't been written yet. The signal is: slice test command filters on a keyword (`guidance`) that matches no existing test names. The right response is to recognize this immediately (run `--collect-only` before diving into source), then treat the task as "write the tests + implement to green" rather than "fix red tests". On this feature, the path-resolution slice landed cleanly and the guidance-text slice needed both new constants *and* new tests, which the slice test command's keyword filter (`-k "guidance or scope"`) correctly implied — the `scope` half was already covered by prior work, the `guidance` half was net-new. When you see a task that `dependsOn` prior work and whose test command uses a keyword that doesn't appear in the collected test IDs, assume test-authoring is in scope and design your constants to be assertion-friendly: concrete phrases (`"apply across projects"`, `".gitignore"`, `"machine-local"`) that tests can pin directly, rather than vague prose that forces the test to accept almost anything.

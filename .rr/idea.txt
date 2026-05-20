@@ -1,24 +1,49 @@
-Close two semantic gaps in the #27 fidelity-audit-suite that shipped 2026-05-16. Both are tracked in `doc/BACKLOG.md` under `[2026-05-16] Feature: fidelity-audit-suite (#27)`.
+Outcome: Make claude-crew's agent-memory feature unopinionated about WHERE memory
+lives. Today only `memory: user` works (writes to ~/.claude/agent-memory/<role>/);
+`memory: project` and `memory: local` already parse in the frontmatter enum but
+only emit a WARN and do nothing (sdk_teammate.py:501-506). Finish the deferred v1
+cut: make all three scopes functional.
 
-**Gap 1 — `cost-telemetry-zero`.** The autouse fixture in `tests/test_fidelity_audit.py:87-131` writes a per-test JSONL cost record to `tests/_artifacts/fidelity-audit-cost.jsonl`, but every live test stores `{input_tokens:0, output_tokens:0, cost_usd:0.0}`. AT11's field-presence check passes, but the artifact is semantically empty — defeating the cost-record's whole purpose for the fidelity moat. Wire `ResultMessage.usage.input_tokens`, `.usage.output_tokens`, and `.total_cost_usd` into `_test_cost_data` at each `ResultMessage` break-point in the 7 live test classes (`TestBundledPackDispatchFidelity`, `TestSkillDiscoveryFidelity`, both `TestHookFiringFidelity` classes, `TestPluginScopeFidelity`, `TestMcpResolutionFidelity`, `TestAgentFormatYamlPolymorphism`). Auth-failure class is excluded — no real SDK call. Validates under `CLAUDE_CREW_LIVE_TESTS=1` — real spend (~$0.35).
+Three required behaviors:
 
-**Gap 2 — `yaml-loader-bypass`.** `TestAgentFormatYamlPolymorphism` manually parses the `.yaml` agent file via `yaml.safe_load` and constructs `AgentDefinition` inline; `build_merged_pack` is called for the markdown side only because `discover_dir` globs `*.md`. A regression breaking YAML support in the loader would not flip the test. Fix path (a): extend `claude_crew/subagents/_loader.py::discover_dir` to glob `*.yaml`/`*.yml` and route AT8 through `build_merged_pack` end-to-end. This closes the moat gap rather than amending the claim.
+1. Multi-scope path resolution — teammate_memory.py:memory_dir() must branch on
+   scope:
+     - user    -> ~/.claude/agent-memory/<role>/            (unchanged)
+     - project -> <root>/.claude/agent-memory/<role>/       (committed, team-shared)
+     - local   -> <root>/.claude/agent-memory.local/<role>/ (gitignored, machine-local)
+   Project root resolves from the teammate's spawn-time self._cwd.
 
-**Pointers for the planner:**
-- `tests/test_fidelity_audit.py` (the 1091-LOC live-gated module shipped in #27)
-- `claude_crew/subagents/_loader.py` (the `discover_dir` function and its callers)
-- `claude_crew/sdk_teammate.py::_collect_response_text` (the canonical pattern for extracting `ResultMessage.usage` per the CLAUDE.md "SDK behavior" section)
-- `doc/features/FEATURE-fidelity-audit-suite.md` (the per-feature record; this slice's known-gaps section is the origin doc)
-- CLAUDE.md "Test conventions" — the four conventions landed in #27 (imports at top, `get_running_loop`, bounded async drains, `_preserve_sdk_auth`) apply here.
+2. Per-scope write guidance — the memory-writing instruction text (module-level
+   constants in teammate_memory.py, currently user-scope-specific: "keep learnings
+   general since they apply across all projects") must vary by scope. Project scope:
+   emphasize project-specific, committed/shared, no secrets or machine-specific
+   detail. Local scope: machine-local, not shared, fine for experimental/
+   checkout-specific notes. build_memory_section() takes a `scope` param.
 
-**Constraints:**
-- Live-gate stays — both gaps validate under `CLAUDE_CREW_LIVE_TESTS=1`. Default-CI runs must still skip cleanly.
-- Don't rewrite the autouse fixture's wire format unless the simpler `_test_cost_data` dict update path proves untenable. The task-0 debrief's "yield results" idea is a *better* shape but a bigger change.
-- YAML loader extension must keep markdown discovery working (no regression on the canonical `.md` path).
+3. Auto-attach Write tool — when `memory:` is set on an agent and `Write` is not
+   already in its `tools`, inject `Write` (via dataclasses.replace, never mutating
+   the shared pack) so the agent can actually persist. Respect the tools=()
+   safe-by-default invariant — this injection is justified because memory is an
+   explicit opt-in.
 
-**Out of scope:**
-- Adding new fidelity claims. This slice closes two gaps in existing claims, doesn't grow the surface.
-- Refactoring the fixture into per-test usage capture (a cleaner shape but breaks the "minimum diff" constraint).
-- Touching the xfail-strict frontmatter test (`test_fidelity_audit_frontmatter.py`) — it's the Windows-CRLF documented gap, untouched.
+Constraints:
+- Don't break the `user` scope path or existing tests.
+- The lead write-guard (is_lead_project_memory_path, guards
+  ~/.claude/projects/*/memory/) must not erroneously block the new project/local
+  paths — verify no collision.
+- Tests at two layers per validate-before-change: unit (path resolution per scope,
+  guidance text per scope, auto-Write injection) + integration (through
+  sdk_teammate.__init__ / build_teammate_prompt that the right scope guidance +
+  Write land in the spawned agent's config).
+- For `local` scope: document the recommended .gitignore entry in guidance text;
+  do NOT auto-edit .gitignore.
 
-Suggested validation: run `CLAUDE_CREW_LIVE_TESTS=1 uv run pytest tests/test_fidelity_audit.py tests/test_fidelity_audit_frontmatter.py -v` and assert (1) 10 pass + 1 xfail (matching #27 baseline) and (2) the resulting `tests/_artifacts/fidelity-audit-cost.jsonl` has at least 7 lines where `input_tokens > 0` AND `output_tokens > 0` AND `cost_usd > 0.0`. The YAML loader change is asserted by AT8 running end-to-end through `build_merged_pack` (no manual `yaml.safe_load` in the test body).
+Read for context: claude_crew/teammate_memory.py, claude_crew/_loader.py
+(frontmatter parsing + build_memory_section), claude_crew/sdk_teammate.py:~500-531
+(injection point), claude_crew/factories.py:267-308 (tool-merge seam),
+doc/features/FEATURE-teammate-memory-persistence.md (the spec that deferred this),
+tests/test_teammate_memory.py + memory tests in tests/test_sdk_teammate.py.
+
+Out of scope: Changing the `user` scope convention; auto-gitignore editing; the MCP
+tool surface; broker semantics; the write-guard's own path logic (only verify
+non-collision).

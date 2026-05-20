@@ -12,6 +12,7 @@ import pytest
 from claude_crew.teammate_memory import (
     _sanitize_role,
     build_memory_section,
+    ensure_write_tool,
     is_lead_project_memory_path,
     memory_dir,
     memory_index_path,
@@ -47,6 +48,43 @@ class TestMemoryDir:
             memory_dir("foo/bar")
 
 
+class TestMemoryDirScope:
+    """Acceptance tests 1–4: scope keyword arms and ValueError guard."""
+
+    def test_memory_dir_user_scope_matches_home(self):
+        # AT-1: user scope returns home-based path (same as one-arg call)
+        role = "sentinel"
+        expected = Path.home() / ".claude" / "agent-memory" / role
+        assert memory_dir(role, scope="user") == expected
+
+    def test_memory_dir_user_scope_default(self):
+        # AT-1: default scope is "user" — one-arg call still works
+        role = "sentinel"
+        assert memory_dir(role) == memory_dir(role, scope="user")
+
+    def test_memory_dir_project_scope(self, tmp_path):
+        # AT-2: project scope returns <root>/.claude/agent-memory/<role>
+        role = "builder"
+        result = memory_dir(role, scope="project", project_root=tmp_path)
+        assert result == tmp_path / ".claude" / "agent-memory" / role
+
+    def test_memory_dir_local_scope(self, tmp_path):
+        # AT-3: local scope returns <root>/.claude/agent-memory.local/<role>
+        role = "builder"
+        result = memory_dir(role, scope="local", project_root=tmp_path)
+        assert result == tmp_path / ".claude" / "agent-memory.local" / role
+
+    def test_memory_dir_raises_for_project_scope_without_root(self):
+        # AT-4: project scope without project_root raises ValueError
+        with pytest.raises(ValueError, match="project_root"):
+            memory_dir("builder", scope="project", project_root=None)
+
+    def test_memory_dir_raises_for_local_scope_without_root(self):
+        # AT-4: local scope without project_root raises ValueError
+        with pytest.raises(ValueError, match="project_root"):
+            memory_dir("builder", scope="local", project_root=None)
+
+
 class TestSanitizeRole:
     def test_accepts_kebab_case(self):
         assert _sanitize_role("rr-planner") == "rr-planner"
@@ -80,6 +118,78 @@ def fake_home(tmp_path, monkeypatch):
     """Redirect ~/.claude/agent-memory/ into tmp_path for isolation."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     return tmp_path
+
+
+class TestGuidanceTextPerScope:
+    """Acceptance tests 5–7: scope-specific guidance text in build_memory_section."""
+
+    def test_user_scope_contains_cross_project_phrase(self, tmp_path, fake_home):
+        # AT-5: user scope rendered text contains "apply across projects"
+        result = build_memory_section("builder", ("Read", "Write"), scope="user")
+        assert "apply across projects" in result
+
+    def test_user_scope_no_project_specific_phrasing(self, tmp_path, fake_home):
+        # AT-5: user scope does NOT contain project-scoped or local-scoped phrases
+        result = build_memory_section("builder", ("Read", "Write"), scope="user")
+        assert "project-scoped memory" not in result
+        assert "local-scoped memory" not in result
+        assert ".gitignore" not in result
+
+    def test_project_scope_emphasizes_committed_shared_memory(self, tmp_path):
+        # AT-6: project scope text emphasizes project-specific committed/shared memory
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        assert "project-scoped memory" in result
+        assert "committed" in result
+        assert "shared" in result or "team" in result
+
+    def test_project_scope_warns_against_secrets(self, tmp_path):
+        # AT-6: project scope warns against secrets and machine-specific detail
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        assert "secrets" in result.lower() or "credentials" in result.lower()
+        assert "machine-specific" in result.lower()
+
+    def test_project_scope_names_project_path(self, tmp_path):
+        # AT-6: project scope names the project-scoped directory path
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="project", project_root=tmp_path
+        )
+        expected_dir = str(tmp_path / ".claude" / "agent-memory" / "builder")
+        assert expected_dir in result
+
+    def test_local_scope_describes_machine_local_memory(self, tmp_path):
+        # AT-7: local scope describes machine-local non-shared memory
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert "local-scoped memory" in result
+        assert "machine-local" in result or "not shared" in result or "not committed" in result
+
+    def test_local_scope_mentions_experimental_notes(self, tmp_path):
+        # AT-7: local scope mentions experimental notes
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert "experimental" in result.lower()
+
+    def test_local_scope_recommends_gitignore_entry(self, tmp_path):
+        # AT-7: local scope recommends the .gitignore entry .claude/agent-memory.local/
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        assert ".claude/agent-memory.local/" in result
+        assert ".gitignore" in result
+
+    def test_local_scope_names_local_path(self, tmp_path):
+        # AT-7: local scope names the local-scoped directory path
+        result = build_memory_section(
+            "builder", ("Read", "Write"), scope="local", project_root=tmp_path
+        )
+        expected_dir = str(tmp_path / ".claude" / "agent-memory.local" / "builder")
+        assert expected_dir in result
 
 
 class TestBuildMemorySectionNoIndex:
@@ -300,6 +410,33 @@ class TestIsLeadProjectMemoryPath:
         assert is_lead_project_memory_path("") is False
 
 
+class TestWriteGuardNoncollision:
+    """AT-12: project- and local-scope memory paths must NOT be flagged by
+    is_lead_project_memory_path — i.e., no false-positive collision with the
+    lead write guard. Uses memory_dir() so the test tracks real path convention.
+    """
+
+    def test_project_scope_memory_dir_not_flagged(self, tmp_path):
+        # AT-12: <root>/.claude/agent-memory/<role> returns False
+        path = memory_dir("builder", scope="project", project_root=tmp_path)
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_project_scope_memory_file_not_flagged(self, tmp_path):
+        # AT-12: file inside project-scope memory dir returns False
+        path = memory_dir("builder", scope="project", project_root=tmp_path) / "MEMORY.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_local_scope_memory_dir_not_flagged(self, tmp_path):
+        # AT-12: <root>/.claude/agent-memory.local/<role> returns False
+        path = memory_dir("builder", scope="local", project_root=tmp_path)
+        assert is_lead_project_memory_path(str(path)) is False
+
+    def test_local_scope_memory_file_not_flagged(self, tmp_path):
+        # AT-12: file inside local-scope memory dir returns False
+        path = memory_dir("builder", scope="local", project_root=tmp_path) / "MEMORY.md"
+        assert is_lead_project_memory_path(str(path)) is False
+
+
 class TestWriteGuardDenyMessage:
     def test_message_names_role_target(self, fake_home):
         msg = write_guard_deny_message("sentinel", "/x/y/z.md")
@@ -314,3 +451,64 @@ class TestWriteGuardDenyMessage:
         msg = write_guard_deny_message("sentinel", "/x.md")
         assert "lead" in msg.lower()
         assert "blocked" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# ensure_write_tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def agent_def_factory():
+    """Return a factory that builds a minimal AgentDefinition for testing."""
+    from claude_agent_sdk.types import AgentDefinition
+
+    def _make(tools=None, **kwargs):
+        # AgentDefinition.tools is list[str] | None in the SDK
+        return AgentDefinition(description="test", prompt="test", tools=tools, **kwargs)
+
+    return _make
+
+
+class TestEnsureWriteTool:
+    """Acceptance tests 8–9 + edge cases for ensure_write_tool."""
+
+    def test_write_tool_added_when_tools_empty(self, agent_def_factory):
+        # AT-8: tools=[] → result has "Write" in tools
+        original = agent_def_factory(tools=[])
+        result = ensure_write_tool(original)
+        assert "Write" in result.tools
+        assert result.tools == ["Write"]
+
+    def test_write_tool_input_unchanged_when_tools_empty(self, agent_def_factory):
+        # AT-8: input object is NOT mutated
+        original = agent_def_factory(tools=[])
+        _ = ensure_write_tool(original)
+        assert original.tools == []
+
+    def test_write_tool_result_is_not_input_when_tools_empty(self, agent_def_factory):
+        # AT-8: returned object is a different identity (dataclasses.replace copy)
+        original = agent_def_factory(tools=[])
+        result = ensure_write_tool(original)
+        assert result is not original
+
+    def test_write_tool_returns_input_unchanged_when_already_present(self, agent_def_factory):
+        # AT-9: tools already contains "Write" → exact same object returned
+        original = agent_def_factory(tools=["Write", "Read"])
+        result = ensure_write_tool(original)
+        assert result is original
+
+    def test_write_tool_handles_none_tools(self, agent_def_factory):
+        # Edge case from advisory: tools=None treated as empty → ["Write"]
+        original = agent_def_factory(tools=None)
+        result = ensure_write_tool(original)
+        assert result.tools == ["Write"]
+        assert result is not original
+
+    def test_write_tool_appends_not_replaces(self, agent_def_factory):
+        # Existing tools preserved when Write is absent
+        original = agent_def_factory(tools=["Read", "Bash"])
+        result = ensure_write_tool(original)
+        assert "Read" in result.tools
+        assert "Bash" in result.tools
+        assert "Write" in result.tools

@@ -3107,11 +3107,12 @@ class TestSdkTeammateMcpServersWiring:
 
 
 class TestSdkTeammateMemoryWarn:
-    """SC-6: pack memory at teammate spawn → WARN, no options key."""
+    """Memory scope handling at teammate spawn — no ClaudeAgentOptions leak."""
 
-    async def test_memory_warns_and_no_options_key(
+    async def test_memory_project_no_options_key_no_unsupported_warn(
         self, broker, monkeypatch, caplog,
     ) -> None:
+        """memory=project is now supported — no 'unsupported' WARN, no opts leak."""
         from claude_agent_sdk.types import AgentDefinition
 
         fake = FakeSDKClient(scripted_responses=[text_response("ok")])
@@ -3140,12 +3141,11 @@ class TestSdkTeammateMemoryWarn:
         opts = captured["options"]
         assert not hasattr(opts, "memory") or getattr(opts, "memory", None) is None
 
-        # WARN fired naming role, teammate_id, value.
+        # project scope is now supported — "only 'user' is supported" WARN must NOT fire.
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert any(
-            "my-role" in m and "memory" in m and "project" in m
-            for m in warn_msgs
-        ), f"expected memory WARN naming role + value; got {warn_msgs}"
+        assert not any(
+            "only 'user' is supported" in m for m in warn_msgs
+        ), f"unsupported-scope WARN must not fire for 'project'; got {warn_msgs}"
 
     async def test_no_memory_no_warn(self, broker, monkeypatch, caplog) -> None:
         """No memory in pack → no WARN (negative path scoped per Sentinel guidance)."""
@@ -3295,6 +3295,86 @@ class TestSdkTeammateMemoryWarn:
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("unsafe characters" in m for m in warn_msgs), (
             f"Expected unsafe-character WARNING; got: {warn_msgs}"
+        )
+
+    def test_memory_project_injects_in_system_prompt(
+        self, tmp_path,
+    ) -> None:
+        """AT10: memory=project + cwd → project-scope guidance + path in _system_prompt,
+        and Write in self._agents[role].tools."""
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        role = "my-role"
+        agent_def = AgentDefinition(
+            description="test", prompt="be a project-memory agent",
+            model="claude-haiku-4-5-20251001", tools=[],
+            memory="project",
+        )
+
+        tm = SdkTeammate(
+            id="t-proj-mem", name="proj", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "be a project-memory agent"},
+            cwd=str(tmp_path),
+        )
+
+        # AT10-a: project-scope guidance present
+        assert "project-scoped memory" in tm._system_prompt, (
+            f"Expected 'project-scoped memory' in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # AT10-b: project-scoped directory path present
+        expected_dir = str((tmp_path / ".claude" / "agent-memory" / role).resolve())
+        assert expected_dir in tm._system_prompt, (
+            f"Expected project memory path {expected_dir!r} in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # AT10-c: SENTINEL_MEMORY present
+        assert SENTINEL_MEMORY in tm._system_prompt, (
+            "SENTINEL_MEMORY missing from project-scope system prompt"
+        )
+        # AT10-d: Write auto-attached to agents entry
+        tools = tm._agents[role].tools
+        assert tools is not None and "Write" in tools, (
+            f"Expected 'Write' in self._agents[{role!r}].tools; got {tools!r}"
+        )
+
+    def test_memory_local_injects_in_system_prompt(
+        self, tmp_path,
+    ) -> None:
+        """AT11: memory=local + cwd → local-scope guidance + path in _system_prompt."""
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        role = "my-role"
+        agent_def = AgentDefinition(
+            description="test", prompt="be a local-memory agent",
+            model="claude-haiku-4-5-20251001", tools=[],
+            memory="local",
+        )
+
+        tm = SdkTeammate(
+            id="t-local-mem", name="local", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "be a local-memory agent"},
+            cwd=str(tmp_path),
+        )
+
+        # AT11-a: local-scope guidance present
+        assert "local-scoped memory" in tm._system_prompt, (
+            f"Expected 'local-scoped memory' in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # AT11-b: local-scoped directory path present
+        expected_dir = str((tmp_path / ".claude" / "agent-memory.local" / role).resolve())
+        assert expected_dir in tm._system_prompt, (
+            f"Expected local memory path {expected_dir!r} in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # AT11-c: SENTINEL_MEMORY present
+        assert SENTINEL_MEMORY in tm._system_prompt, (
+            "SENTINEL_MEMORY missing from local-scope system prompt"
         )
 
 
