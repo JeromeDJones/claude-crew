@@ -497,13 +497,22 @@ class SdkTeammate(Teammate):
         role_def = self._agents.get(role)
         role_memory = getattr(role_def, "memory", None)
 
-        # Warn once for unsupported memory values; suppress for "user" (injection handles it).
-        if role_memory in ("project", "local"):
-            logger.warning(
-                "teammate=%s role=%s pack declares memory=%r; only 'user' is "
-                "supported in v1 — no injection performed",
-                self.id, role, role_memory,
-            )
+        # Memory scope injection for user / project / local scopes.
+        # ensure_write_tool fires regardless of pack_bodies availability so that
+        # self._agents[role].tools always reflects the Write capability needed for
+        # memory persistence. build_memory_section is deferred into the pack-body
+        # block below (no I/O when a system_prompt override is active).
+        _memory_project_root: Path | None = None
+        if role_memory in ("user", "project", "local"):
+            from claude_crew.teammate_memory import build_memory_section, ensure_write_tool
+            if role_memory in ("project", "local"):
+                _memory_project_root = (
+                    Path(cwd).resolve() if cwd else Path.cwd()
+                )
+            patched_def = ensure_write_tool(role_def)
+            if patched_def is not role_def:
+                self._agents = {**self._agents, role: patched_def}
+                role_def = patched_def
 
         if system_prompt is not None:
             self._system_prompt = system_prompt  # explicit override wins (edge case 2)
@@ -512,14 +521,17 @@ class SdkTeammate(Teammate):
             if _body is not None:
                 # Memory section computed inside else — skip I/O when override is active.
                 _memory_section = None
-                if role_memory == "user":
-                    from claude_crew.teammate_memory import build_memory_section
+                if role_memory in ("user", "project", "local"):
                     try:
                         _memory_section = build_memory_section(
-                            role, getattr(role_def, "tools", None)
+                            role,
+                            getattr(role_def, "tools", None),
+                            scope=role_memory,
+                            project_root=_memory_project_root,
                         )
                         logger.debug(
-                            "teammate=%s role=%s memory section injected", self.id, role
+                            "teammate=%s role=%s memory section injected (scope=%s)",
+                            self.id, role, role_memory,
                         )
                     except ValueError:
                         logger.warning(
