@@ -3377,6 +3377,52 @@ class TestSdkTeammateMemoryWarn:
             "SENTINEL_MEMORY missing from local-scope system prompt"
         )
 
+    def test_memory_project_cwd_none_falls_back_to_process_cwd(self) -> None:
+        """cwd=None + memory=project → project root falls back to Path.cwd().
+
+        Covers the integration-level fallback path in SdkTeammate.__init__
+        (`_memory_project_root = Path(cwd).resolve() if cwd else Path.cwd()`).
+        AT10/AT11 only exercise the cwd=<tmp_path> branch; this pins the None
+        branch so a refactor of the fallback cannot silently break it while the
+        helper-level tests stay green.
+        """
+        from pathlib import Path
+
+        from claude_agent_sdk.types import AgentDefinition
+        from claude_crew.teammate_prompt import SENTINEL_MEMORY
+
+        role = "my-role"
+        agent_def = AgentDefinition(
+            description="test", prompt="be a project-memory agent",
+            model="claude-haiku-4-5-20251001", tools=[],
+            memory="project",
+        )
+
+        tm = SdkTeammate(
+            id="t-proj-mem-nocwd", name="proj-nocwd", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "be a project-memory agent"},
+            cwd=None,
+        )
+
+        # project-scope guidance present
+        assert "project-scoped memory" in tm._system_prompt, (
+            f"Expected 'project-scoped memory' in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # path derived from Path.cwd() (the None-branch fallback)
+        expected_dir = str(Path.cwd() / ".claude" / "agent-memory" / role)
+        assert expected_dir in tm._system_prompt, (
+            f"Expected cwd-fallback memory path {expected_dir!r} in system prompt. "
+            f"Tail: {tm._system_prompt[-400:]!r}"
+        )
+        # SENTINEL_MEMORY present and Write auto-attached even on the fallback path
+        assert SENTINEL_MEMORY in tm._system_prompt
+        tools = tm._agents[role].tools
+        assert tools is not None and "Write" in tools, (
+            f"Expected 'Write' in self._agents[{role!r}].tools; got {tools!r}"
+        )
+
 
 class TestSdkTeammateMemoryWriteGuard:
     """SC-1, SC-2, SC-3, SC-4, SC-5, SC-6 from FEATURE-teammate-memory-write-guard.md.

@@ -84,6 +84,11 @@ class TestMemoryDirScope:
         with pytest.raises(ValueError, match="project_root"):
             memory_dir("builder", scope="local", project_root=None)
 
+    def test_memory_dir_raises_on_unknown_scope(self):
+        # Fail-loud on an unrecognized scope value (not one of user/project/local).
+        with pytest.raises(ValueError, match="Unknown scope"):
+            memory_dir("builder", scope="bogus")  # type: ignore[arg-type]
+
 
 class TestSanitizeRole:
     def test_accepts_kebab_case(self):
@@ -127,6 +132,12 @@ class TestGuidanceTextPerScope:
         # AT-5: user scope rendered text contains "apply across projects"
         result = build_memory_section("builder", ("Read", "Write"), scope="user")
         assert "apply across projects" in result
+
+    def test_build_memory_section_raises_on_unknown_scope(self, fake_home):
+        # build_memory_section fails loud on an unrecognized scope rather than
+        # silently defaulting to user guidance (mirrors memory_dir's guard).
+        with pytest.raises(ValueError, match="Unknown scope"):
+            build_memory_section("builder", ("Read", "Write"), scope="bogus")  # type: ignore[arg-type]
 
     def test_user_scope_no_project_specific_phrasing(self, tmp_path, fake_home):
         # AT-5: user scope does NOT contain project-scoped or local-scoped phrases
