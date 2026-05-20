@@ -47,6 +47,43 @@ class TestMemoryDir:
             memory_dir("foo/bar")
 
 
+class TestMemoryDirScope:
+    """Acceptance tests 1–4: scope keyword arms and ValueError guard."""
+
+    def test_memory_dir_user_scope_matches_home(self):
+        # AT-1: user scope returns home-based path (same as one-arg call)
+        role = "sentinel"
+        expected = Path.home() / ".claude" / "agent-memory" / role
+        assert memory_dir(role, scope="user") == expected
+
+    def test_memory_dir_user_scope_default(self):
+        # AT-1: default scope is "user" — one-arg call still works
+        role = "sentinel"
+        assert memory_dir(role) == memory_dir(role, scope="user")
+
+    def test_memory_dir_project_scope(self, tmp_path):
+        # AT-2: project scope returns <root>/.claude/agent-memory/<role>
+        role = "builder"
+        result = memory_dir(role, scope="project", project_root=tmp_path)
+        assert result == tmp_path / ".claude" / "agent-memory" / role
+
+    def test_memory_dir_local_scope(self, tmp_path):
+        # AT-3: local scope returns <root>/.claude/agent-memory.local/<role>
+        role = "builder"
+        result = memory_dir(role, scope="local", project_root=tmp_path)
+        assert result == tmp_path / ".claude" / "agent-memory.local" / role
+
+    def test_memory_dir_raises_for_project_scope_without_root(self):
+        # AT-4: project scope without project_root raises ValueError
+        with pytest.raises(ValueError, match="project_root"):
+            memory_dir("builder", scope="project", project_root=None)
+
+    def test_memory_dir_raises_for_local_scope_without_root(self):
+        # AT-4: local scope without project_root raises ValueError
+        with pytest.raises(ValueError, match="project_root"):
+            memory_dir("builder", scope="local", project_root=None)
+
+
 class TestSanitizeRole:
     def test_accepts_kebab_case(self):
         assert _sanitize_role("rr-planner") == "rr-planner"

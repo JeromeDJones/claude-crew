@@ -45,15 +45,45 @@ def _sanitize_role(role: str) -> str:
     return role
 
 
-def memory_dir(role: str) -> Path:
-    """Return the role's memory directory. Pure — no I/O."""
+def memory_dir(
+    role: str,
+    scope: str = "user",
+    project_root: Path | None = None,
+) -> Path:
+    """Return the role's memory directory for the given scope. Pure — no I/O.
+
+    user    -> Path.home() / ".claude" / "agent-memory" / <role>
+    project -> project_root / ".claude" / "agent-memory" / <role>
+    local   -> project_root / ".claude" / "agent-memory.local" / <role>
+
+    Raises ValueError if scope is "project" or "local" and project_root is None.
+    """
     safe = _sanitize_role(role)
-    return Path.home() / ".claude" / "agent-memory" / safe
+    if scope == "user":
+        return Path.home() / ".claude" / "agent-memory" / safe
+    elif scope == "project":
+        if project_root is None:
+            raise ValueError(
+                "project_root is required when scope is 'project'"
+            )
+        return Path(project_root) / ".claude" / "agent-memory" / safe
+    elif scope == "local":
+        if project_root is None:
+            raise ValueError(
+                "project_root is required when scope is 'local'"
+            )
+        return Path(project_root) / ".claude" / "agent-memory.local" / safe
+    else:
+        raise ValueError(f"Unknown scope: {scope!r}")
 
 
-def memory_index_path(role: str) -> Path:
+def memory_index_path(
+    role: str,
+    scope: str = "user",
+    project_root: Path | None = None,
+) -> Path:
     """Return the role's MEMORY.md path. Pure — no I/O."""
-    return memory_dir(role) / "MEMORY.md"
+    return memory_dir(role, scope=scope, project_root=project_root) / "MEMORY.md"
 
 
 # ---------------------------------------------------------------------------
