@@ -10,7 +10,7 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ### Symptom: Is SDK CLI subprocess dying independently after empty assistant turns?
 
-- **What**: The empty-turn fix (PR #???) adds bounded retry + keep-alive on empty assistant text. Initial diagnosis: the empty turn itself doesn't crash the teammate loop (loop returns and waits for next envelope). But the original symptom reported subprocess death (`exit_code=1`) on the *next* `send_to`. This backlog entry tracks whether the subprocess is dying on its own after an empty turn (before the next turn's query), or whether the failure only surfaces when the next query() is sent.
+- **What**: The empty-turn fix (PR #2, commits `0b9ef9b` + `f6e6b88`, merged `5339cf6` 2026-05-19) adds bounded retry + keep-alive on empty assistant text. Initial diagnosis: the empty turn itself doesn't crash the teammate loop (loop returns and waits for next envelope). But the original symptom reported subprocess death (`exit_code=1`) on the *next* `send_to`. This backlog entry tracks whether the subprocess is dying on its own after an empty turn (before the next turn's query), or whether the failure only surfaces when the next query() is sent.
 - **Where**: Investigation point: run the RepoReactor lead session that originally triggered the empty turn + death sequence with `CLAUDE_CREW_TRANSCRIPT_DIR` set to capture lifecycle logs. Check `sdk_teammate.py` liveness poll task (`_poll_task`, `_death_suspected` flag, `_begin_liveness_poll`) to see if any death signals fire during the empty-turn → retry → success sequence.
 - **Why it matters**: If the subprocess dies independently, the fix is incomplete — a keep-alive inside the loop doesn't help if the subprocess is already gone. The liveness poll would detect it, but there's a race: if the poll interval is 5s and the subprocess dies 0.1s after an empty turn, the operator's next send_to might race the detection. If the subprocess stays alive, the fix is sufficient; if it dies, we need either (a) aggressive polling (costly), (b) subprocess restart on empty-turn-with-side-effects detection (complex), or (c) accept the race as acceptable SLA (coordinator can re-spawn on next failure).
 - **Suggested action**: Operator should review the transcript from a real RepoReactor run that hit the empty-turn symptom, checking timestamps on poll messages and death signals. If no death is logged, the hypothesis is "subprocess dies only on next query" and the fix is sound. If death fires mid-interval, log a follow-up issue for subprocess-restart logic.
@@ -20,31 +20,35 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ## [2026-05-19] Feature: multi-scope-agent-memory
 
-> **Note (2026-05-19):** items 1, 3, and 4 below are slated for a follow-up RepoReactor slice. Item 2 (inline-import hoist) deferred as cosmetic / possibly load-bearing.
+> **Update (2026-05-20):** items 1, 3, and 4 below were **RESOLVED** in `fix/memory-scope-typing` (commit `a0f1f7b`, merged to master 2026-05-20). Item 2 (inline-import hoist) remains **OPEN** — deferred as cosmetic / possibly load-bearing.
 
-### `Scope` type alias missing — signatures typed `str` instead of `Literal`
+### ✅ RESOLVED `Scope` type alias missing — signatures typed `str` instead of `Literal`
 
+- **Status**: RESOLVED 2026-05-20 (`a0f1f7b`). Added `Scope = Literal["user","project","local"]` in `teammate_memory.py`; re-typed `memory_dir`, `memory_index_path`, `build_memory_section`, and `sdk_teammate.role_memory` (via a `TYPE_CHECKING`-only import to keep the runtime dependency inline — see item 2).
 - **What**: The spec's Data/API Contracts section declares `Scope = Literal["user", "project", "local"]` as a module-level type alias, but the implementation uses `scope: str = "user"` on all three public signatures (`memory_dir`, `memory_index_path`, `build_memory_section`). The `else: raise ValueError` in `memory_dir` provides a runtime safety net, but the typed API surface promised by the spec is absent. `sdk_teammate.py`'s `role_memory` variable is also untyped.
 - **Where**: `claude_crew/teammate_memory.py` (all three signature sites); `claude_crew/sdk_teammate.py` (`role_memory` variable).
 - **Why it matters**: Static type checkers won't flag invalid scope literals passed to these helpers; future callers have no IDE completion for valid values. Flagged `feature.spec.type-drift.scope-literal` in `multi-scope-agent-memory-feature-review-0.md`.
 - **Suggested action**: Add `Scope = Literal["user", "project", "local"]` at module top; re-type the three signatures. Simultaneously tighten `build_memory_section`'s else-branch to `raise ValueError` (mirror `memory_dir`) per the scope-fallthrough finding below. XS change.
 
-### Inline import in `sdk_teammate.__init__` unjustified
+### ⏳ OPEN Inline import in `sdk_teammate.__init__` unjustified
 
+- **Status**: OPEN (deferred 2026-05-20). Left inline intentionally — likely guards a circular import (`teammate_memory` → `teammate_prompt` → `sdk_teammate`); cosmetic. The follow-up slice added a `TYPE_CHECKING`-only import of `Scope` alongside it, confirming the runtime import must stay inline. Hoist only after proving no cycle.
 - **What**: `sdk_teammate.py` imports `from claude_crew.teammate_memory import build_memory_section, ensure_write_tool` inside the `__init__` method body with no comment explaining a circular-import rationale. Per project CLAUDE.md, inline imports are a code smell (named for test functions; the same concern applies to method bodies in production code). The import is re-executed on every `SdkTeammate` construction (cached in `sys.modules` after the first hit, but still obscures the dependency graph).
 - **Where**: `claude_crew/sdk_teammate.py` — inline import inside `__init__`.
 - **Why it matters**: Obscures dependency graph; inconsistent with module-top import convention. Flagged `feature.cracks.inline-imports` in `multi-scope-agent-memory-feature-review-0.md`.
 - **Suggested action**: Hoist to module top after verifying no circular import (check whether `teammate_memory.py` → `teammate_prompt.py` → `sdk_teammate.py` forms a cycle). If a cycle exists, document it with a comment at the inline import site. XS change.
 
-### `build_memory_section` else-branch silently defaults to user scope on unknown scope
+### ✅ RESOLVED `build_memory_section` else-branch silently defaults to user scope on unknown scope
 
+- **Status**: RESOLVED 2026-05-20 (`a0f1f7b`). Restructured to `if user / elif project / elif local / else: raise ValueError`; docstring corrected (no longer "never raises"). Added unknown-scope rejection unit tests for both `memory_dir` and `build_memory_section`.
 - **What**: `memory_dir` raises `ValueError("Unknown scope: ...")` on unrecognized scope values; `build_memory_section` silently falls through to user-scope guidance. Currently dead — all callers go through `memory_dir` first (which would already raise). A future direct caller of `build_memory_section` would silently get user-scope behavior for a typo'd or future scope value.
 - **Where**: `claude_crew/teammate_memory.py::build_memory_section` — the `else` branch.
 - **Why it matters**: Inconsistency between `memory_dir` (fail-loud) and `build_memory_section` (silent default). Flagged `feature.cracks.scope-fallthrough` in `multi-scope-agent-memory-feature-review-0.md`.
 - **Suggested action**: Change the else-branch to `raise ValueError(f"Unknown scope: {scope!r}")`. Subsumes naturally into the `Scope` Literal tightening above. XS change; fold into the same follow-up slice as the type-alias fix.
 
-### `SdkTeammate.__init__` not tested with `cwd=None` for project/local scope
+### ✅ RESOLVED `SdkTeammate.__init__` not tested with `cwd=None` for project/local scope
 
+- **Status**: RESOLVED 2026-05-20 (`a0f1f7b`). Added `test_memory_project_cwd_none_falls_back_to_process_cwd` in `tests/test_sdk_teammate.py` asserting the `Path.cwd()` fallback path injects project-scope guidance + the cwd-derived path and auto-attaches Write.
 - **What**: AT-10 and AT-11 both pass `cwd=str(tmp_path)`; no `SdkTeammate.__init__` integration test exercises the `Path.cwd()` fallback that fires when `cwd=None` is passed with a project/local scope. The fallback is exercised at the helper-function level but not at the construction integration layer. The spec documents DEBUG-log behavior for this path; no corresponding assertion exists.
 - **Where**: `tests/test_sdk_teammate.py` — missing AT variant.
 - **Why it matters**: A refactor of the `cwd` fallback in `sdk_teammate.__init__` could silently break the edge case. Helper-level tests would remain green while the integration path fails. Flagged `feature.test.coverage-gap.cwd-none-integration` in `multi-scope-agent-memory-feature-review-0.md`.
