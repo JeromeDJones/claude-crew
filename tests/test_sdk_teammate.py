@@ -496,6 +496,90 @@ class TestErrorPaths:
         # Verify only ONE query was sent (no retries on failed_task_notifs path).
         assert len(fake.queries_received) == 1
 
+    async def test_empty_text_retry_timeout_does_not_crash_teammate(
+        self, broker, monkeypatch,
+    ) -> None:
+        # B-1: TimeoutError during retry should not cause UnboundLocalError crash.
+        # First query returns empty, second query (retry) hangs so asyncio.wait_for
+        # times out inside the retry loop. The TimeoutError should be caught, and
+        # the teammate should emit a clean invalid_response (not crash).
+        empty_response = [
+            AssistantMessage(
+                content=[ToolUseBlock(id="tu-1", name="tool", input={})],
+                model="fake",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]
+        # Reduce backstop timeout globally so test completes quickly.
+        monkeypatch.setenv("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", "0.1")
+        fake = FakeSDKClient(
+            scripted_responses=[empty_response],
+            response_hangs=[False, True],  # 2nd query hangs (triggers timeout in retry)
+        )
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hi",
+        ))
+        await _wait_for_lead_messages(broker, 1, timeout=5.0)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        # TimeoutError on retry should not crash. Should emit invalid_response.
+        assert msgs[0].payload.get("error") == "invalid_response"
+        assert "no text content" in msgs[0].payload.get("message", "")
+
+    async def test_empty_text_retry_exhausted_then_followup_succeeds(
+        self, broker, monkeypatch,
+    ) -> None:
+        # H-3: After exhausted retries (3 empty responses), send a follow-up message
+        # and verify the teammate processes it successfully. This proves the teammate
+        # stays alive across the empty-turn recovery sequence.
+        empty_response = [
+            AssistantMessage(
+                content=[ToolUseBlock(id="tu-1", name="some_tool", input={})],
+                model="fake",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="default",
+            ),
+        ]
+        good_response = text_response("all fixed now")
+        fake = FakeSDKClient(scripted_responses=[
+            empty_response, empty_response, empty_response, good_response
+        ])
+        _patch_sdk(monkeypatch, fake)
+
+        tid = await broker.spawn_teammate(
+            role="r", name=None, factory=_factory_for(fake),
+        )
+        # Send first message → exhausts retries with 3 empty responses.
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="hello",
+        ))
+        await _wait_for_lead_messages(broker, 1)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[0].payload.get("error") == "invalid_response"
+        assert len(fake.queries_received) == 3  # original + 2 retries
+
+        # Send second message → should succeed with good_response (4th scripted response).
+        await broker.send(Envelope(
+            id=new_message_id(), seq=0,
+            sender=LEAD_ID, recipient=tid, timestamp=0.0, payload="again",
+        ))
+        await _wait_for_lead_messages(broker, 2)
+        msgs = broker.get_messages(recipient=LEAD_ID)
+        assert msgs[1].payload.get("error") is None
+        assert msgs[1].payload.get("text") == "all fixed now"
+        assert len(fake.queries_received) == 4  # new query for 2nd message
+
 
 # ---------- shutdown ----------
 

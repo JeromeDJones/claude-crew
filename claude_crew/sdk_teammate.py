@@ -1327,10 +1327,13 @@ class SdkTeammate(Teammate):
                     )
                     return
                 # Retry on empty text with nudge. Up to 2 retries (3 total attempts).
+                # H-1: compute shared deadline so total retry sequence respects per-turn backstop.
                 retry_count = 0
                 max_retries = 2
                 original_prompt = prompt
                 last_result = result
+                retry_succeeded = False
+                retry_deadline = time.time() + self._backstop_seconds
                 while retry_count < max_retries:
                     retry_count += 1
                     nudged_prompt = (
@@ -1339,9 +1342,10 @@ class SdkTeammate(Teammate):
                     )
                     try:
                         await client.query(nudged_prompt, session_id=session_id)
+                        remaining_timeout = max(0.0, retry_deadline - time.time())
                         result = await asyncio.wait_for(
                             _collect_response_text(client, self._stamp_activity, self._record_task_notif),
-                            timeout=self._backstop_seconds,
+                            timeout=remaining_timeout,
                         )
                         text = result.text
                         if text:
@@ -1358,12 +1362,12 @@ class SdkTeammate(Teammate):
                                 self._last_turn_peak_invocation_input_tokens = result.peak_invocation_input_tokens
                             if result.last_assistant_model is not None:
                                 self._last_assistant_model = result.last_assistant_model
+                            retry_succeeded = True
                             break
                         # Still empty, continue retry loop.
                         last_result = result
                     except asyncio.TimeoutError:
                         # Backstop fired on retry — treat as final failure.
-                        retry_count = max_retries
                         break
                     except RateLimitedError:
                         # Rate limit on retry — escalate immediately.
@@ -1392,8 +1396,11 @@ class SdkTeammate(Teammate):
                             message=str(retry_exc),
                         )
                         return
-                if not text:
+                # B-1: If retry_succeeded, text is set and we fall through to the success path.
+                # Otherwise, exhausted retries — log and emit invalid_response.
+                if not retry_succeeded:
                     # Exhausted retries — log structured entry and emit invalid_response.
+                    # M-2: read last_result's own tokens, not stale self._last_turn_input_tokens.
                     logger.warning(
                         "empty_turn_exhausted_retries: teammate=%s role=%s "
                         "stop_reason=%s content_block_types=%s "
@@ -1402,8 +1409,8 @@ class SdkTeammate(Teammate):
                         self.id, self.role,
                         last_result.stop_reason,
                         last_result.content_block_types,
-                        self._last_turn_input_tokens,
-                        self._last_assistant_model,
+                        last_result.turn_input_tokens,
+                        last_result.last_assistant_model,
                         retry_count,
                     )
                     await self._send_error_envelope(
