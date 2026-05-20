@@ -54,6 +54,9 @@ from claude_crew.teammate_prompt import build_teammate_prompt
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
+    # Type-only import — keeps the runtime dependency on teammate_memory inline
+    # (see __init__) to avoid the import cycle, while typing role_memory below.
+    from claude_crew.teammate_memory import Scope
 
 # Bounded wait for graceful shutdown of the worker task.
 SHUTDOWN_TIMEOUT_SECONDS: float = 5.0
@@ -495,7 +498,7 @@ class SdkTeammate(Teammate):
         # Assign _system_prompt AFTER _agents and _pack_bodies are populated so
         # build_teammate_prompt has access to the full agents dict (A-3).
         role_def = self._agents.get(role)
-        role_memory = getattr(role_def, "memory", None)
+        role_memory: Scope | None = getattr(role_def, "memory", None)
 
         # Memory scope injection for user / project / local scopes.
         # ensure_write_tool fires regardless of pack_bodies availability so that

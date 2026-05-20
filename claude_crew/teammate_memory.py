@@ -23,12 +23,17 @@ from __future__ import annotations
 import dataclasses
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from claude_crew.teammate_prompt import SENTINEL_MEMORY
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
+
+
+# The set of memory scopes a role pack may declare via `memory:`. Mirrors the
+# frontmatter enum validated in claude_crew/subagents/_loader.py.
+Scope = Literal["user", "project", "local"]
 
 
 _MAX_INDEX_LINES = 200  # mirror the CLI's MEMORY.md auto-load truncation
@@ -52,7 +57,7 @@ def _sanitize_role(role: str) -> str:
 
 def memory_dir(
     role: str,
-    scope: str = "user",
+    scope: Scope = "user",
     project_root: Path | None = None,
 ) -> Path:
     """Return the role's memory directory for the given scope. Pure — no I/O.
@@ -84,7 +89,7 @@ def memory_dir(
 
 def memory_index_path(
     role: str,
-    scope: str = "user",
+    scope: Scope = "user",
     project_root: Path | None = None,
 ) -> Path:
     """Return the role's MEMORY.md path. Pure — no I/O."""
@@ -148,15 +153,16 @@ def write_guard_deny_message(role: str, attempted_path: str) -> str:
 def build_memory_section(
     role: str,
     tools: tuple[str, ...] | None,
-    scope: str = "user",
+    scope: Scope = "user",
     project_root: Path | None = None,
 ) -> str:
     """Build the memory addendum for a teammate's system prompt.
 
     Mirrors the scaffolding the CLI provides to subagents with `memory: user`:
     location guidance, save/skip rules, save format, and the first 200 lines
-    of the role's MEMORY.md index. Never raises — I/O errors surface in the
-    injected text.
+    of the role's MEMORY.md index. I/O errors surface in the injected text
+    rather than raising; an unknown `scope` raises ValueError (via memory_dir
+    and the explicit guard below).
 
     Picks scope-specific guidance text based on the `scope` kwarg.
     """
@@ -165,7 +171,11 @@ def build_memory_section(
     index_path = memory_index_path(role, scope=scope, project_root=project_root)
     index_block = _read_index(index_path)
 
-    if scope == "project":
+    if scope == "user":
+        header = _INSTRUCTIONS_HEADER_USER
+        what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_USER
+        what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_USER
+    elif scope == "project":
         header = _INSTRUCTIONS_HEADER_PROJECT
         what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_PROJECT
         what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_PROJECT
@@ -174,9 +184,9 @@ def build_memory_section(
         what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_LOCAL
         what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_LOCAL
     else:
-        header = _INSTRUCTIONS_HEADER_USER
-        what_to_save = _INSTRUCTIONS_WHAT_TO_SAVE_USER
-        what_not_to_save = _INSTRUCTIONS_WHAT_NOT_TO_SAVE_USER
+        # Fail loud on unknown scope, mirroring memory_dir. Reachable only if a
+        # caller bypasses memory_dir's own validation (which runs first above).
+        raise ValueError(f"Unknown scope: {scope!r}")
 
     persistence_note = "" if has_write else (
         "\n\n**Note:** The Write tool is not in your tool list — you cannot "

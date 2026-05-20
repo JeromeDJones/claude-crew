@@ -193,12 +193,16 @@ class TestPackParityHappyPath:
             "atlassian": {"type": "http", "url": "https://example.com"},
             "local-x": {"type": "stdio", "command": "uv"},
         }
-        # Memory WARN fired (D-8).
+        # Memory scope `project` is now honored (multi-scope-agent-memory feature).
+        # The old D-8 "only 'user' is supported in v1" WARN was removed — assert it
+        # no longer fires. (System-prompt memory injection requires a pack body,
+        # which this parity fixture does not supply; the Write auto-attach and
+        # injection paths are covered in tests/test_sdk_teammate.py memory tests.)
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert any(
-            "test-role" in m and "memory" in m and "project" in m
+        assert not any(
+            "only 'user' is supported" in m or "no injection performed" in m
             for m in warn_msgs
-        ), f"expected memory WARN for test-role; got {warn_msgs}"
+        ), f"unexpected unsupported-memory WARN for test-role; got {warn_msgs}"
 
         # INFO breadcrumb fired for the inline-dict pass-through (D-13).
         info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
