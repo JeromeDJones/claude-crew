@@ -161,6 +161,10 @@ class Broker:
         self._startup_diagnostics: tuple[StartupDiagnostic, ...] = tuple(
             startup_diagnostics
         )
+        # Tombstoned teammates: keyed by teammate_id, holds the Teammate object
+        # after it's popped from _teammates so get_tool_output can still delegate
+        # to it for evicted-but-recently-dead lookups.
+        self._dead_teammates: dict[str, Teammate] = {}
         self._sink = TranscriptSink(crew_id=self.crew_id)
         self._sink.write_lifecycle("started", {})
 
@@ -472,7 +476,10 @@ class Broker:
             active_model_at_death=active_model_at_death,
         )
 
-        # 6. Pop from active set
+        # 6. Pop from active set; stash the object in _dead_teammates so
+        #    get_tool_output can still delegate to it after tombstoning.
+        if teammate is not None:
+            self._dead_teammates[teammate_id] = teammate
         self._teammates.pop(teammate_id, None)
 
         # 7. Bounce in-flight envelope (if any)
@@ -907,3 +914,19 @@ class Broker:
         if config is not None:
             alive_result["config"] = config
         return alive_result
+
+    def get_tool_output(self, teammate_id: str, tool_use_id: str) -> "str | None":
+        """Return the stored tool output for the given (teammate_id, tool_use_id) pair.
+
+        Walks both live and tombstoned teammates.  Returns None when:
+        - teammate_id is unknown, or
+        - tool_use_id was evicted from the rolling 50-entry buffer.
+        """
+        # Check live teammates first.
+        tm: Teammate | None = self._teammates.get(teammate_id)
+        if tm is None:
+            # Fall back to tombstoned teammates preserved for post-death lookups.
+            tm = self._dead_teammates.get(teammate_id)
+        if tm is None:
+            return None
+        return tm.get_tool_output(tool_use_id)
