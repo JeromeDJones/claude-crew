@@ -6,6 +6,16 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-20] Feature: click-to-view-tool-output — redaction follow-ups (sentinel)
+
+### Deferred items from the security pass on the tool-output feature (shipped via repo-react)
+
+- **Redaction v2 bump — uncovered credential formats.** The output redactor (`redact_output` in `redaction.py`) and the frozen `REDACTION_PATTERNS_V1` both still miss several real credential formats whose `_`/`.` chars defeat pattern 12's `\b` anchor: **HashiCorp Vault tokens** (`hvs.`/`hvb.`/`hvr.` + 95+ chars), **npm tokens** (`npm_...`), and the **args-side `ghr_`/`ghe_`/Stripe gap** (the click-to-view feature closed these for *output* via output-only patterns O-3/O-4, but V1 — used for tool *args* redaction on Bash/Task/WebFetch — still misses them). Proper fix: bump `REDACTION_VERSION` to `v2`, fold the output-only patterns into V1, and add Vault/npm. Out of scope for the click-to-view feature (which explicitly deferred the v2 bump). **Why it matters:** a Vault/npm token in a tool arg or output is served unredacted today.
+- **Tool-output `truncated` flag should be store-time, not inferred.** `ui_server.py` infers `truncated = len(body) >= _TOOL_OUTPUT_BYTE_CAP`, which false-positives a body that is naturally exactly the cap size. Current behavior over-reports (fail-safe), but the exact fix is to have `Teammate.store_tool_output`/`get_tool_output` carry a real truncated flag set at cap time. Low priority (cosmetic).
+- **`Broker._dead_teammates` grows unbounded.** Tombstoned teammates are retained forever (with their `_tool_outputs` ~200KB each) so the lazy-fetch endpoint can serve output for dead teammates. Matches the existing `_info`-tombstone pattern (not a new leak class), but a heavy-churn crew accumulates memory. Consider an eviction policy (TTL or max-dead-retained). Surfaced in the broker-lookup slice review.
+
+---
+
 ## [2026-05-20] Feature candidate: crew-artifact viewer (surface docs in the dashboard)
 
 ### Operator should be able to read the spec/reports/plans the crew is working from, rendered in Mission Control
