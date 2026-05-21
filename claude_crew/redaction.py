@@ -273,6 +273,23 @@ _OUTPUT_ONLY_PATTERNS: list[tuple[re.Pattern, str]] = [
         re.compile(r"aws_session_token\s*[=:]\s*[A-Za-z0-9+/]{40,}={0,2}", re.I),
         "aws_session_token=<redacted-key>",
     ),
+    # O-3. GitHub tokens — full gh*_ family. V1 pattern 8 only covers
+    #      gh[poasu]_; this catches ghr_ (refresh) and ghe_ (Enterprise) plus
+    #      any future gh<x>_ prefix. The underscore defeats V1 pattern 12's \b
+    #      anchor, so the length fallback does NOT rescue these — an explicit
+    #      pattern is required. (Output-only so V1's frozen contract is
+    #      untouched; the args-side V1 gap is tracked for a future v2 bump.)
+    (
+        re.compile(r"gh[a-z]_[A-Za-z0-9]{30,}"),
+        "<redacted-key>",
+    ),
+    # O-4. Stripe secret/restricted keys — sk_live_, sk_test_, rk_live_,
+    #      rk_test_. V1 pattern 7 only matches the hyphen form (sk-); Stripe
+    #      uses underscores, which again defeat pattern 12's \b anchor.
+    (
+        re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}"),
+        "<redacted-key>",
+    ),
 ]
 
 # Hard cap for stored tool output bodies (4 KiB)
@@ -291,6 +308,12 @@ def redact_output(text: str) -> str:
       - On any internal exception, re-raises so the caller can write the
         ``[REDACTION_FAILED: <ClassName>]`` sentinel.  Never silently stores
         raw text on failure.
+
+    Security note: pattern coverage is the ONLY redaction defense. The 4096-byte
+    cap is a memory bound, NOT a backup redactor — a secret in an unmatched
+    format (a novel token type) survives capping. Adding a credential format to
+    cover means adding a pattern here (or to REDACTION_PATTERNS_V1 via a v2
+    bump), never relying on truncation.
     """
     result = _apply_patterns(text)
     for pattern, replacement in _OUTPUT_ONLY_PATTERNS:

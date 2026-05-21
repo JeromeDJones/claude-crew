@@ -28,6 +28,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
+from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
 from claude_crew.teammate import ToolEvent
 
 _logger = logging.getLogger(__name__)
@@ -612,11 +613,17 @@ class UIServer:
             if body is None:
                 return JSONResponse({"error": "not_found"}, status_code=404)
 
-            truncated = len(body.encode("utf-8")) >= 4096
+            # `>=` (not `>`) is deliberate: the store caps over-limit bodies to
+            # exactly the cap (with a `…` marker), so a served body AT the cap
+            # is most likely truncated. Over-reporting truncation is the
+            # fail-safe direction (operator may re-check) vs. claiming a
+            # truncated body is complete. A store-time flag would be exact;
+            # tracked in BACKLOG as the proper fix.
+            truncated = len(body.encode("utf-8")) >= _TOOL_OUTPUT_BYTE_CAP
             return JSONResponse({
                 "body": body,
                 "truncated": truncated,
-                "redaction_version": "v1",
+                "redaction_version": REDACTION_VERSION,
             })
         except Exception:
             _logger.exception("tool-output handler error")

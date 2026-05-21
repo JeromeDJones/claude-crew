@@ -86,6 +86,42 @@ class TestRedactOutputSecretShapes:
         assert "BEFORE" in result
         assert "AFTER" in result
 
+    # --- sentinel security-pass gaps (output-only patterns O-3/O-4) ---
+    # V1 pattern 8 covers gh[poasu]_ only; the length fallback (pattern 12)
+    # cannot rescue gh*_ / sk_ tokens because the underscore defeats its \b
+    # anchor. These regression tests pin the output-only patterns that close
+    # the credential-leak gaps the sentinel found (2026-05-20).
+
+    def test_github_refresh_token_ghr(self) -> None:
+        key = "ghr_" + "a" * 36
+        result = redact_output(f"BEFORE {key} AFTER")
+        assert key not in result
+        assert "BEFORE" in result and "AFTER" in result
+
+    def test_github_enterprise_token_ghe(self) -> None:
+        key = "ghe_" + "b" * 36
+        result = redact_output(f"BEFORE {key} AFTER")
+        assert key not in result
+        assert "BEFORE" in result and "AFTER" in result
+
+    def test_stripe_live_secret_key(self) -> None:
+        key = "sk_live_" + "c" * 24
+        result = redact_output(f"BEFORE {key} AFTER")
+        assert key not in result
+        assert "BEFORE" in result and "AFTER" in result
+
+    def test_stripe_test_secret_key(self) -> None:
+        key = "sk_test_" + "d" * 24
+        result = redact_output(f"BEFORE {key} AFTER")
+        assert key not in result
+        assert "BEFORE" in result and "AFTER" in result
+
+    def test_stripe_restricted_key(self) -> None:
+        key = "rk_live_" + "e" * 24
+        result = redact_output(f"BEFORE {key} AFTER")
+        assert key not in result
+        assert "BEFORE" in result and "AFTER" in result
+
     def test_pem_rsa_private_key_block(self) -> None:
         pem = (
             "-----BEGIN RSA PRIVATE KEY-----\n"
