@@ -1,20 +1,33 @@
 """Tests for claude_crew.ui_server — UIServer, _build_state, helpers."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from starlette.testclient import TestClient
 
 import subprocess
 
-from claude_crew.broker import Broker
+from claude_crew.broker import LEAD_ID, Broker
+from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.ui_server import (
     UIServer,
     _BRANCH_TTL_SECONDS,
+    _WAIT_MESSAGES_MAX_INFLIGHT,
+    _WAIT_MESSAGES_MAX_TIMEOUT,
     _derive_status,
     _normalize_model,
     _ts,
     _unreachable_instance,
 )
+
+
+def _lead_envelope(payload: str = "hi", sender: str = "t-1") -> Envelope:
+    """A teammate→lead envelope for seeding the broker in wait-endpoint tests."""
+    return Envelope(
+        id=new_message_id(), seq=0, sender=sender,
+        recipient=LEAD_ID, timestamp=0.0, payload=payload,
+    )
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -1754,3 +1767,231 @@ class TestDeadTeammateWithConfigInWsPayload:
         assert entry["cost"] == 0.05
         assert entry["tokens"]["in"] == 1000
         assert entry["tokens"]["out"] == 500
+
+
+# ── non-blocking message wait (/wait-messages long-poll) ─────────────────────
+
+
+class TestWaitMessagesLogic:
+    """Async logic layer for the content-free message-wait long-poll.
+
+    _wait_messages composes broker.get_messages (the level check) with
+    broker.wait_for_lead_message (the block), returning only a content-free
+    signal: {waiting, count, next_seq}. No message payloads cross this boundary.
+    """
+
+    async def test_returns_immediately_when_mail_already_waiting(self):
+        """Happy: a message is already in the log → return without blocking."""
+        broker = Broker()
+        await broker.send(_lead_envelope("hi"))
+        ui = UIServer(broker, port=0)
+        result = await asyncio.wait_for(
+            ui._wait_messages(since_seq=0, timeout=300), timeout=1.0
+        )
+        assert result == {"waiting": True, "count": 1, "next_seq": 1}
+
+    async def test_level_triggered_sees_message_past_since_seq(self):
+        """Lost-wakeup guard: two messages already logged, lead consumed seq=1.
+
+        A waiter starting with since_seq=1 must immediately see seq=2 even though
+        the Condition fired *before* the wait began — the leading get_messages
+        level-check is what makes this race-free.
+        """
+        broker = Broker()
+        await broker.send(_lead_envelope("first"))
+        await broker.send(_lead_envelope("second"))
+        ui = UIServer(broker, port=0)
+        result = await asyncio.wait_for(
+            ui._wait_messages(since_seq=1, timeout=300), timeout=1.0
+        )
+        assert result == {"waiting": True, "count": 1, "next_seq": 2}
+
+    async def test_blocks_then_wakes_on_arrival(self):
+        """Happy long-poll: parked on the Condition, wakes when a message lands."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        wait_task = asyncio.create_task(ui._wait_messages(since_seq=0, timeout=30))
+        await asyncio.sleep(0.05)  # let the waiter park on the Condition
+        assert not wait_task.done()
+        await broker.send(_lead_envelope("late"))
+        result = await asyncio.wait_for(wait_task, timeout=1.0)
+        assert result == {"waiting": True, "count": 1, "next_seq": 1}
+
+    async def test_timeout_returns_not_waiting(self):
+        """Sad: empty broker, short timeout → content-free no-mail signal."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        result = await asyncio.wait_for(
+            ui._wait_messages(since_seq=0, timeout=0.1), timeout=2.0
+        )
+        assert result == {"waiting": False, "count": 0, "next_seq": 0}
+
+    async def test_timeout_preserves_since_seq_in_next_seq(self):
+        """Sad: no new mail past since_seq → next_seq echoes the caller's cursor."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        result = await asyncio.wait_for(
+            ui._wait_messages(since_seq=5, timeout=0.1), timeout=2.0
+        )
+        assert result == {"waiting": False, "count": 0, "next_seq": 5}
+
+    async def test_caps_timeout_at_max(self, monkeypatch):
+        """An unbounded caller timeout is capped before reaching the broker."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        captured: dict[str, float] = {}
+
+        async def fake_wait(timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        monkeypatch.setattr(broker, "wait_for_lead_message", fake_wait)
+        await ui._wait_messages(since_seq=0, timeout=99999.0)
+        assert captured["timeout"] == _WAIT_MESSAGES_MAX_TIMEOUT
+
+
+class TestWaitMessagesHttp:
+    """HTTP layer for /wait-messages — param parsing, defaults, status codes.
+
+    Behavioral guarantees (block/wake/race) are covered at the logic layer
+    above; these tests assert the route wires params through and shapes the
+    JSON response correctly. All use short/timeout paths so no test blocks.
+    """
+
+    @pytest.fixture
+    def client(self):
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        with TestClient(ui._make_app()) as c:
+            yield c
+
+    def test_route_returns_json_shape_on_timeout(self, client):
+        resp = client.get("/wait-messages?since_seq=0&timeout=0.1")
+        assert resp.status_code == 200
+        assert "application/json" in resp.headers["content-type"]
+        assert resp.json() == {"waiting": False, "count": 0, "next_seq": 0}
+
+    def test_route_parses_since_seq(self, client):
+        resp = client.get("/wait-messages?since_seq=7&timeout=0.1")
+        assert resp.status_code == 200
+        assert resp.json()["next_seq"] == 7
+
+    def test_route_defaults_since_seq_to_zero(self, client):
+        resp = client.get("/wait-messages?timeout=0.1")
+        assert resp.status_code == 200
+        assert resp.json()["next_seq"] == 0
+
+    def test_route_bad_since_seq_returns_400(self, client):
+        resp = client.get("/wait-messages?since_seq=abc&timeout=0.1")
+        assert resp.status_code == 400
+
+    def test_route_bad_timeout_returns_400(self, client):
+        resp = client.get("/wait-messages?since_seq=0&timeout=xyz")
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "Infinity", "NaN"])
+    def test_route_nonfinite_timeout_returns_400(self, client, bad):
+        """float() parses nan/inf successfully; they must be rejected before the
+        clamp (nan poisons min(), inf/nan detonate inside asyncio.timeout())."""
+        resp = client.get(f"/wait-messages?since_seq=0&timeout={bad}")
+        assert resp.status_code == 400
+
+    def test_route_negative_timeout_returns_400(self, client):
+        resp = client.get("/wait-messages?since_seq=0&timeout=-5")
+        assert resp.status_code == 400
+
+    def test_route_negative_since_seq_returns_400(self, client):
+        """A negative cursor would make get_messages return the whole log."""
+        resp = client.get("/wait-messages?since_seq=-1&timeout=0.1")
+        assert resp.status_code == 400
+
+    def test_route_zero_timeout_is_nonblocking_peek(self, client):
+        """timeout=0 is allowed — a pure level-check that returns immediately."""
+        resp = client.get("/wait-messages?since_seq=0&timeout=0")
+        assert resp.status_code == 200
+        assert resp.json() == {"waiting": False, "count": 0, "next_seq": 0}
+
+    def test_route_defaults_timeout_to_300(self, monkeypatch):
+        """Omitting timeout applies the 300s default (asserted without blocking
+        by capturing the value _wait_messages receives)."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        captured: dict[str, float] = {}
+
+        async def fake_wait(since_seq: int, timeout: float) -> dict:
+            captured["timeout"] = timeout
+            return {"waiting": False, "count": 0, "next_seq": since_seq}
+
+        monkeypatch.setattr(ui, "_wait_messages", fake_wait)
+        with TestClient(ui._make_app()) as c:
+            resp = c.get("/wait-messages?since_seq=0")
+            assert resp.status_code == 200
+        assert captured["timeout"] == 300.0
+
+    def test_route_rejects_when_too_many_waiters(self):
+        """At the in-flight ceiling the endpoint sheds load with 429 rather than
+        parking another waiter."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        ui._wait_inflight = _WAIT_MESSAGES_MAX_INFLIGHT  # saturate
+        with TestClient(ui._make_app()) as c:
+            resp = c.get("/wait-messages?since_seq=0&timeout=0.1")
+            assert resp.status_code == 429
+            assert resp.json()["error"] == "too_many_waiters"
+
+    def test_route_releases_inflight_counter_after_request(self):
+        """The try/finally returns a slot to the pool after a normal request."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        with TestClient(ui._make_app()) as c:
+            c.get("/wait-messages?since_seq=0&timeout=0.1")
+            c.get("/wait-messages?since_seq=0&timeout=0.1")
+        assert ui._wait_inflight == 0
+
+    def test_route_releases_inflight_counter_when_wait_raises(self):
+        """The inner finally releases the slot even when _wait_messages raises;
+        the outer except still returns a structured 500."""
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+
+        async def boom(since_seq: int, timeout: float) -> dict:
+            raise RuntimeError("broker exploded")
+
+        ui._wait_messages = boom  # type: ignore[method-assign]
+        with TestClient(ui._make_app()) as c:
+            resp = c.get("/wait-messages?since_seq=0&timeout=0.1")
+            assert resp.status_code == 500
+            assert resp.json()["error"] == "internal_error"
+        assert ui._wait_inflight == 0
+
+    def test_route_blocks_then_wakes_e2e(self):
+        """End-to-end through the full HTTP stack: GET blocks, a real send wakes it.
+
+        Self-contained (not the shared fixture) so the test holds the broker
+        reference and can drive a send on the app's own event loop via the
+        TestClient portal — keeping all broker ops on a single loop.
+        """
+        import threading
+        import time as _time
+
+        broker = Broker()
+        ui = UIServer(broker, port=0)
+        with TestClient(ui._make_app()) as client:
+            result: dict[str, object] = {}
+
+            def do_get() -> None:
+                result["resp"] = client.get("/wait-messages?since_seq=0&timeout=10")
+
+            t = threading.Thread(target=do_get)
+            t.start()
+            try:
+                _time.sleep(0.2)  # let the request park on the long-poll
+                # Send on the app's own event loop via the test portal so the
+                # Condition notify and the waiter share one loop.
+                client.portal.call(broker.send, _lead_envelope("wake-e2e"))
+                t.join(timeout=5)
+                assert not t.is_alive(), "long-poll GET never returned after send"
+                body = result["resp"].json()  # type: ignore[union-attr]
+                assert body["waiting"] is True
+                assert body["count"] == 1
+            finally:
+                t.join(timeout=1)

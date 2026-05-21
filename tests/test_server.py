@@ -177,6 +177,38 @@ class TestGetMessagesTool:
             assert len(filtered["messages"]) == 2
 
 
+# ---------- get_wait_endpoint ----------
+
+class TestGetWaitEndpointTool:
+    """get_wait_endpoint reports the localhost URL the lead curls to long-poll
+    for message arrival out-of-process (backgrounded Bash), then drains via the
+    existing get_messages MCP tool. Content-free: the URL only signals arrival.
+    """
+
+    async def test_returns_url_when_ui_enabled(self) -> None:
+        server = make_server(ui_port=12345)
+        async with create_connected_server_and_client_session(server) as s:
+            await s.initialize()
+            body = _content_json(await s.call_tool("get_wait_endpoint", {}))
+            assert body["enabled"] is True
+            assert body["url"] == "http://127.0.0.1:12345/wait-messages"
+
+    async def test_reports_disabled_when_ui_port_absent(self) -> None:
+        async with _client() as s:
+            await s.initialize()
+            body = _content_json(await s.call_tool("get_wait_endpoint", {}))
+            assert body["enabled"] is False
+            assert body["url"] is None
+
+    async def test_reports_disabled_when_ui_port_zero(self) -> None:
+        server = make_server(ui_port=0)
+        async with create_connected_server_and_client_session(server) as s:
+            await s.initialize()
+            body = _content_json(await s.call_tool("get_wait_endpoint", {}))
+            assert body["enabled"] is False
+            assert body["url"] is None
+
+
 # ---------- list_crew ----------
 
 class TestListCrewTool:

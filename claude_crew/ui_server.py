@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -24,7 +25,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from claude_crew.broker import Broker, BrokerSnapshot
+from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
 from claude_crew.teammate import ToolEvent
 
@@ -34,6 +35,23 @@ _DASHBOARD_PATH = Path(__file__).parent / "ui" / "dashboard.html"
 _POLL_INTERVAL = 1.5
 _BRANCH_TTL_SECONDS = 30
 _BRANCH_DETECT_TIMEOUT = 2.0
+# Server-side cap on the /wait-messages long-poll, mirroring the MCP
+# get_messages tool's MAX_WAIT_SECONDS. A caller-supplied timeout above this
+# is clamped before it reaches the broker.
+_WAIT_MESSAGES_MAX_TIMEOUT = 600.0
+# Ceiling on concurrent in-flight /wait-messages long-polls per UIServer.
+# The realistic caller is a single lead backgrounding one curl at a time;
+# this is a backstop so a buggy/looping caller can't pile up parked tasks.
+# Above the ceiling the endpoint returns 429 rather than parking another waiter.
+_WAIT_MESSAGES_MAX_INFLIGHT = 32
+
+# Threat-model note for /wait-messages (v1): the endpoint is bound to localhost
+# only (see serve()) and is content-free — it returns {waiting, count, next_seq},
+# never message payloads. No auth token is required on the rationale that a
+# single-user dev machine's localhost is trusted. `count`/`next_seq` do disclose
+# message *volume/arrival cadence* (not content) to any local process; on a
+# shared/CI host that metadata leak would warrant an auth token. Revisit the
+# no-auth decision if this is ever deployed beyond a single-user workstation.
 
 
 def _normalize_model(model_id: str | None) -> str:
@@ -132,6 +150,10 @@ class UIServer:
         self._sock = sock  # pre-bound socket; closed in serve() finally block
         self._cwd = cwd if cwd is not None else os.getcwd()
         self._branch_cache: tuple[str, float] = ("main", 0.0)
+        # Count of concurrently parked /wait-messages long-polls (M-2 backstop).
+        # Safe as a plain int: asyncio is single-threaded and the check→increment
+        # in _handle_wait_messages has no await between them.
+        self._wait_inflight: int = 0
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
@@ -459,10 +481,106 @@ class UIServer:
         except Exception:
             _logger.exception("UI WebSocket error; connection closed")
 
+    async def _wait_messages(self, since_seq: int, timeout: float) -> dict[str, Any]:
+        """Content-free long-poll: block until the lead has mail past since_seq.
+
+        Composes the broker's existing primitives — get_messages (the level
+        check) and wait_for_lead_message (the block) — and returns ONLY a signal:
+        ``{waiting, count, next_seq}``. No message payloads cross this boundary;
+        the lead drains actual content via the get_messages MCP tool.
+
+        Level-triggered by construction (D1): the leading get_messages check
+        returns immediately when mail already sits past since_seq, closing the
+        lost-wakeup race where a message lands after the lead drains but before
+        the next waiter parks on the Condition. The post-wait re-check mirrors
+        the MCP get_messages tool exactly.
+
+        The caller's timeout is clamped to _WAIT_MESSAGES_MAX_TIMEOUT so an
+        unbounded value cannot pin a connection open indefinitely.
+        """
+        msgs = self._broker.get_messages(recipient=LEAD_ID, since_seq=since_seq)
+        if not msgs:
+            capped = min(timeout, _WAIT_MESSAGES_MAX_TIMEOUT)
+            await self._broker.wait_for_lead_message(capped)
+            msgs = self._broker.get_messages(recipient=LEAD_ID, since_seq=since_seq)
+        next_seq = msgs[-1].seq if msgs else since_seq
+        return {"waiting": bool(msgs), "count": len(msgs), "next_seq": next_seq}
+
+    async def _handle_wait_messages(self, request: Request) -> JSONResponse:
+        """HTTP boundary for the message-wait long-poll.
+
+        Parses ``since_seq`` (default 0) and ``timeout`` (default 300s) query
+        params, returning 400 on malformed/out-of-range values, then delegates
+        to _wait_messages. Localhost-only by binding (see serve()); the response
+        is content-free so no auth token is required in v1 (see threat-model
+        note at module top).
+
+        Validation hardening:
+        - since_seq must parse as int and be >= 0 (a negative cursor would make
+          get_messages return the entire log).
+        - timeout must parse as a finite number >= 0. ``float("nan")`` and
+          ``float("inf")`` parse successfully but would poison the clamp /
+          detonate inside asyncio.timeout(); reject them up front. timeout == 0
+          is allowed and means a non-blocking peek (pure level-check).
+        - Above _WAIT_MESSAGES_MAX_INFLIGHT concurrent waiters → 429.
+        - Any unexpected error → structured 500 (mirrors _handle_state) so a
+          backgrounded curl always gets parseable JSON, never a bare stack page.
+        """
+        try:
+            raw_since = request.query_params.get("since_seq", "0")
+            try:
+                since_seq = int(raw_since)
+            except ValueError:
+                return JSONResponse(
+                    {"error": f"since_seq must be an integer, got {raw_since!r}"},
+                    status_code=400,
+                )
+            if since_seq < 0:
+                return JSONResponse(
+                    {"error": f"since_seq must be >= 0, got {since_seq}"},
+                    status_code=400,
+                )
+
+            raw_timeout = request.query_params.get("timeout", "300")
+            try:
+                timeout = float(raw_timeout)
+            except ValueError:
+                return JSONResponse(
+                    {"error": f"timeout must be a number, got {raw_timeout!r}"},
+                    status_code=400,
+                )
+            if not math.isfinite(timeout) or timeout < 0:
+                return JSONResponse(
+                    {"error": f"timeout must be a finite number >= 0, got {raw_timeout!r}"},
+                    status_code=400,
+                )
+
+            if self._wait_inflight >= _WAIT_MESSAGES_MAX_INFLIGHT:
+                return JSONResponse(
+                    {
+                        "error": "too_many_waiters",
+                        "message": (
+                            f"at most {_WAIT_MESSAGES_MAX_INFLIGHT} concurrent "
+                            "/wait-messages long-polls are allowed"
+                        ),
+                    },
+                    status_code=429,
+                )
+
+            self._wait_inflight += 1
+            try:
+                return JSONResponse(await self._wait_messages(since_seq, timeout))
+            finally:
+                self._wait_inflight -= 1
+        except Exception:
+            _logger.exception("wait-messages handler error")
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
     def _make_app(self) -> Starlette:
         return Starlette(routes=[
             Route("/", self._handle_root),
             Route("/api/state", self._handle_state),
+            Route("/wait-messages", self._handle_wait_messages),
             WebSocketRoute("/ws", self._handle_ws),
         ])
 
@@ -471,6 +589,12 @@ class UIServer:
             self._registry.register()
         try:
             if self._sock is not None:
+                # The fd= path inherits whatever address the pre-bound socket
+                # holds. _bind_ui_socket (server.py) binds 127.0.0.1, so the
+                # effective host stays localhost — load-bearing for the
+                # /wait-messages localhost-only guarantee. If that bind ever
+                # changes to 0.0.0.0, this path would silently follow; add an
+                # explicit guard there before doing so.
                 config = uvicorn.Config(
                     self._make_app(),
                     fd=self._sock.fileno(),
