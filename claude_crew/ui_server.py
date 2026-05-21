@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -39,6 +40,8 @@ _BRANCH_DETECT_TIMEOUT = 2.0
 # get_messages tool's MAX_WAIT_SECONDS. A caller-supplied timeout above this
 # is clamped before it reaches the broker.
 _WAIT_MESSAGES_MAX_TIMEOUT = 600.0
+# Path-param allowlist for /tool-output route — rejects traversal chars, spaces, etc.
+_PATH_PARAM_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 # Ceiling on concurrent in-flight /wait-messages long-polls per UIServer.
 # The realistic caller is a single lead backgrounding one curl at a time;
 # this is a backstop so a buggy/looping caller can't pile up parked tasks.
@@ -353,6 +356,7 @@ class UIServer:
                 "to": None,
                 "kind": "tool",
                 "body": _format_tool_event_body(ev),
+                "tool_use_id": ev.tool_use_id,
             }))
 
         merged.sort(key=lambda pair: pair[0])  # stable, raw-float ordering
@@ -576,11 +580,54 @@ class UIServer:
             _logger.exception("wait-messages handler error")
             return JSONResponse({"error": "internal_error"}, status_code=500)
 
+    async def _handle_tool_output(self, request: Request) -> JSONResponse:
+        """HTTP endpoint for lazy-fetching stored tool output bodies.
+
+        Mirrors the /wait-messages security posture: localhost-only bind,
+        structured-500 try/except, no auth token in v1.
+
+        Path params are validated against ^[A-Za-z0-9_\\-]+$ to block traversal.
+        Returns:
+            200  {body, truncated, redaction_version}   — hit
+            400  {error: "invalid_param"}               — bad path param
+            404  {error: "not_found"}                   — miss (unknown or evicted)
+            500  {error: "internal_error"}              — unexpected exception
+        """
+        try:
+            teammate_id = request.path_params["teammate_id"]
+            tool_use_id = request.path_params["tool_use_id"]
+
+            if not _PATH_PARAM_RE.match(teammate_id):
+                return JSONResponse(
+                    {"error": "invalid_param", "param": "teammate_id"},
+                    status_code=400,
+                )
+            if not _PATH_PARAM_RE.match(tool_use_id):
+                return JSONResponse(
+                    {"error": "invalid_param", "param": "tool_use_id"},
+                    status_code=400,
+                )
+
+            body = self._broker.get_tool_output(teammate_id, tool_use_id)
+            if body is None:
+                return JSONResponse({"error": "not_found"}, status_code=404)
+
+            truncated = len(body.encode("utf-8")) >= 4096
+            return JSONResponse({
+                "body": body,
+                "truncated": truncated,
+                "redaction_version": "v1",
+            })
+        except Exception:
+            _logger.exception("tool-output handler error")
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
     def _make_app(self) -> Starlette:
         return Starlette(routes=[
             Route("/", self._handle_root),
             Route("/api/state", self._handle_state),
             Route("/wait-messages", self._handle_wait_messages),
+            Route("/tool-output/{teammate_id}/{tool_use_id}", self._handle_tool_output),
             WebSocketRoute("/ws", self._handle_ws),
         ])
 
