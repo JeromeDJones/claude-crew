@@ -158,9 +158,20 @@ class UIServer:
         # Safe as a plain int: asyncio is single-threaded and the check→increment
         # in _handle_wait_messages has no await between them.
         self._wait_inflight: int = 0
+        # Cached local crew_id for /tool-output routing. Derived from a snapshot
+        # so this module never reads the crew id off the broker directly (SC-2
+        # decoupling), and cached because crew_id is immutable per broker.
+        self._cached_crew_id: str | None = None
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
+
+    def _own_crew_id(self) -> str:
+        """Local broker's crew_id, sourced from a snapshot (not a direct attr
+        read — SC-2) and cached (crew_id never changes for a broker)."""
+        if self._cached_crew_id is None:
+            self._cached_crew_id = self._broker.snapshot(log_limit=0).crew_id
+        return self._cached_crew_id
 
     def _get_html(self) -> str:
         try:
@@ -358,6 +369,11 @@ class UIServer:
                 "kind": "tool",
                 "body": _format_tool_event_body(ev),
                 "tool_use_id": ev.tool_use_id,
+                # Owning crew so the dashboard can route the /tool-output fetch to
+                # the right instance. For remote instances this record is built by
+                # the follower's own _build_local_instance, so it carries the
+                # follower's crew_id; the leader proxies the fetch there.
+                "crew_id": snapshot.crew_id,
             }))
 
         merged.sort(key=lambda pair: pair[0])  # stable, raw-float ordering
@@ -584,57 +600,120 @@ class UIServer:
     async def _handle_tool_output(self, request: Request) -> JSONResponse:
         """HTTP endpoint for lazy-fetching stored tool output bodies.
 
-        Mirrors the /wait-messages security posture: localhost-only bind,
-        structured-500 try/except, no auth token in v1.
+        Multi-instance aware. The dashboard is a leader that AGGREGATES remote
+        follower instances (see _fetch_remote_state / InstanceRegistry), and the
+        modal fetches this endpoint same-origin against the leader. Tool output,
+        however, lives in the OWNING instance's broker — so the path carries the
+        row's ``crew_id`` and this handler routes:
+          - crew_id == our own broker → serve locally;
+          - otherwise → look the crew up in the registry and proxy the request
+            to that instance's port (mirrors how /api/state is aggregated).
+        Without this, a click on any remote instance's row hits the leader's
+        broker, which never has that teammate → 404 for every remote row.
 
-        Path params are validated against ^[A-Za-z0-9_\\-]+$ to block traversal.
+        Mirrors the /wait-messages security posture: localhost-only bind,
+        structured-500 try/except, no auth token in v1. Path params are
+        validated against ^[A-Za-z0-9_\\-]+$ to block traversal.
+
         Returns:
             200  {body, truncated, redaction_version}   — hit
             400  {error: "invalid_param"}               — bad path param
-            404  {error: "not_found"}                   — miss (unknown or evicted)
+            404  {error: "not_found"}                   — miss / unknown crew
             500  {error: "internal_error"}              — unexpected exception
+            502  {error: "bad_gateway"}                 — proxy to owner failed
         """
         try:
+            crew_id = request.path_params["crew_id"]
             teammate_id = request.path_params["teammate_id"]
             tool_use_id = request.path_params["tool_use_id"]
 
-            if not _PATH_PARAM_RE.match(teammate_id):
-                return JSONResponse(
-                    {"error": "invalid_param", "param": "teammate_id"},
-                    status_code=400,
-                )
-            if not _PATH_PARAM_RE.match(tool_use_id):
-                return JSONResponse(
-                    {"error": "invalid_param", "param": "tool_use_id"},
-                    status_code=400,
-                )
+            for name, value in (
+                ("crew_id", crew_id),
+                ("teammate_id", teammate_id),
+                ("tool_use_id", tool_use_id),
+            ):
+                if not _PATH_PARAM_RE.match(value):
+                    return JSONResponse(
+                        {"error": "invalid_param", "param": name},
+                        status_code=400,
+                    )
 
-            body = self._broker.get_tool_output(teammate_id, tool_use_id)
-            if body is None:
-                return JSONResponse({"error": "not_found"}, status_code=404)
+            # Own crew → serve from the local broker.
+            if crew_id == self._own_crew_id():
+                return self._local_tool_output_response(teammate_id, tool_use_id)
 
-            # `>=` (not `>`) is deliberate: the store caps over-limit bodies to
-            # exactly the cap (with a `…` marker), so a served body AT the cap
-            # is most likely truncated. Over-reporting truncation is the
-            # fail-safe direction (operator may re-check) vs. claiming a
-            # truncated body is complete. A store-time flag would be exact;
-            # tracked in BACKLOG as the proper fix.
-            truncated = len(body.encode("utf-8")) >= _TOOL_OUTPUT_BYTE_CAP
-            return JSONResponse({
-                "body": body,
-                "truncated": truncated,
-                "redaction_version": REDACTION_VERSION,
-            })
+            # Remote crew → proxy to the owning instance via the registry.
+            return await self._proxy_tool_output(crew_id, teammate_id, tool_use_id)
         except Exception:
             _logger.exception("tool-output handler error")
             return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    def _local_tool_output_response(
+        self, teammate_id: str, tool_use_id: str
+    ) -> JSONResponse:
+        """Serve a tool output body from THIS instance's broker."""
+        body = self._broker.get_tool_output(teammate_id, tool_use_id)
+        if body is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        # `>=` (not `>`) is deliberate: the store caps over-limit bodies to
+        # exactly the cap (with a `…` marker), so a served body AT the cap is
+        # most likely truncated. Over-reporting truncation is the fail-safe
+        # direction (operator may re-check) vs. claiming a truncated body is
+        # complete. A store-time flag would be exact; tracked in BACKLOG.
+        truncated = len(body.encode("utf-8")) >= _TOOL_OUTPUT_BYTE_CAP
+        return JSONResponse({
+            "body": body,
+            "truncated": truncated,
+            "redaction_version": REDACTION_VERSION,
+        })
+
+    async def _proxy_tool_output(
+        self, crew_id: str, teammate_id: str, tool_use_id: str
+    ) -> JSONResponse:
+        """Proxy a tool-output fetch to the instance that owns ``crew_id``.
+
+        The follower receives crew_id == its own broker's crew, so it serves
+        locally (no re-proxy loop). 404 when the crew is unknown / not in the
+        registry; 502 when the owner is registered but unreachable / malformed.
+        """
+        if self._registry is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        target = next(
+            (e for e in self._registry.read_all() if e.get("crew_id") == crew_id),
+            None,
+        )
+        if target is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        # Validate the port as a real TCP port before interpolating it into the
+        # URL. The registry is a plain JSON file (`_read_entry` does a bare
+        # json.loads); a corrupt/hand-edited entry could carry a non-int or
+        # out-of-range "port". `bool` is an int subclass, so exclude it.
+        port = target.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        url = (
+            f"http://127.0.0.1:{port}/tool-output/"
+            f"{crew_id}/{teammate_id}/{tool_use_id}"
+        )
+        try:
+            resp = await self._http_client.get(url)
+        except Exception:
+            _logger.warning(
+                "tool-output proxy to crew %s (port %s) failed",
+                crew_id, port, exc_info=True,
+            )
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+        try:
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception:
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
 
     def _make_app(self) -> Starlette:
         return Starlette(routes=[
             Route("/", self._handle_root),
             Route("/api/state", self._handle_state),
             Route("/wait-messages", self._handle_wait_messages),
-            Route("/tool-output/{teammate_id}/{tool_use_id}", self._handle_tool_output),
+            Route("/tool-output/{crew_id}/{teammate_id}/{tool_use_id}", self._handle_tool_output),
             WebSocketRoute("/ws", self._handle_ws),
         ])
 

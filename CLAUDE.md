@@ -77,3 +77,11 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 **Shell hook env vars not injected in SDK mode.** `CLAUDE_TOOL_NAME`, `CLAUDE_HOOK_EVENT`, etc. are always empty inside teammate sessions. Use `matcher` in hook config instead of env-var checks.
 
 **Windows `\r\n` line endings rejected in pack frontmatter.** `_split_frontmatter` hard-codes `"---\n"`; Windows-authored agent files raise `PackLoadError`. Pre-existing limitation. Tracked in `doc/BACKLOG.md`.
+
+### Dashboard is a multi-instance LEADER — any new lazy-fetch endpoint MUST be crew-aware
+
+The Mission Control dashboard (`ui_server.py`) is **not** single-instance. One instance binds the leader port (`7821`); others become followers on ephemeral ports and register in `InstanceRegistry`. The leader **aggregates** every instance: `_build_state` calls `_fetch_remote_state` to pull each follower's `/api/state` and merges their agents + transcripts into one view keyed by `crew_id`. The operator almost always views the **leader**, which is showing rows that belong to **other instances' brokers**.
+
+**The trap:** a dashboard modal/feature that lazy-fetches per-row data with a *same-origin relative* URL (e.g. `GET /tool-output/<teammate>/<id>`) hits the **leader's** broker — which does **not** contain remote instances' teammates. Every click on a remote row → 404. This is invisible to single-instance stub tests and to per-data-path tracing; it only surfaces with ≥2 live instances. (It bit the click-to-view-tool-output feature: shipped green, broke on first real multi-instance use. Fixed in `fix/tool-output-multi-instance-proxy`.)
+
+**The rule:** any new dashboard endpoint that serves per-instance data must (1) carry the row's `crew_id` (inject it onto the record in `_build_local_instance`, like `tool_use_id`/`crew_id` on `kind:"tool"` records), and (2) route in the handler — serve locally when `crew_id == self._broker.crew_id`, else look the crew up in `InstanceRegistry` and **proxy** to that instance's port (mirror `_fetch_remote_state`; see `_proxy_tool_output`). Add a **multi-instance** test (`test_e2e_multi_instance.py` / leader→follower proxy), not just a single-instance one — a single-instance test will pass while the feature is broken for the actual deployment.

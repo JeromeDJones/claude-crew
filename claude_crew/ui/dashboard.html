@@ -1121,7 +1121,7 @@
     }
 
     // --- ToolOutputModal ---
-    function ToolOutputModal({ fromId, toolUseId, onClose }) {
+    function ToolOutputModal({ crewId, fromId, toolUseId, onClose }) {
       const [fetchStatus, setFetchStatus] = useState("loading"); // "loading"|"ok"|"not_found"|"error"
       const [body, setBody] = useState("");
       const [copied, setCopied] = useState(false);
@@ -1135,7 +1135,7 @@
       useEffect(() => {
         setFetchStatus("loading");
         setBody("");
-        fetch(`/tool-output/${encodeURIComponent(fromId)}/${encodeURIComponent(toolUseId)}`)
+        fetch(`/tool-output/${encodeURIComponent(crewId)}/${encodeURIComponent(fromId)}/${encodeURIComponent(toolUseId)}`)
           .then(r => {
             if (r.status === 404) { setFetchStatus("not_found"); return null; }
             if (!r.ok) { setFetchStatus("error"); return null; }
@@ -1147,7 +1147,7 @@
             setFetchStatus("ok");
           })
           .catch(() => setFetchStatus("error"));
-      }, [fromId, toolUseId]);
+      }, [crewId, fromId, toolUseId]);
 
       const handleCopy = () => {
         const doFallback = () => {
@@ -1226,7 +1226,7 @@
       const isFromLead = msg.from === "lead";
       const recipient = msg.to && !msg.to.startsWith("broker:") ? agentMap[msg.to] : null;
       const sender = msg.from && msg.from !== "lead" ? agentMap[msg.from] : null;
-      const isClickableTool = isTool && !!msg.tool_use_id && !!onOpenToolModal;
+      const isClickableTool = isTool && !!msg.tool_use_id && !!msg.crew_id && !!onOpenToolModal;
       return (
         <div style={{
           padding: "7px 0", borderBottom: "1px solid var(--line-soft)",
@@ -1255,7 +1255,7 @@
                 cursor: isClickableTool ? "pointer" : "default",
               }}
               title={isClickableTool ? "Click to view tool output" : undefined}
-              onClick={isClickableTool ? () => onOpenToolModal(msg.from, msg.tool_use_id) : undefined}
+              onClick={isClickableTool ? () => onOpenToolModal(msg.crew_id, msg.from, msg.tool_use_id) : undefined}
             >
               <span style={{ color: "var(--st-tool)" }}>▸</span>
               <span style={{ color: "var(--fg-0)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{msg.body}</span>
@@ -1695,7 +1695,7 @@
       const { instances, transcripts } = data;
       const [activeId, setActiveId] = useState(instances[0].id);
       const [openPanel, setOpenPanel] = useState(null);
-      const [openToolModal, setOpenToolModal] = useState(null); // {fromId, toolUseId} | null
+      const [openToolModal, setOpenToolModal] = useState(null); // {crewId, fromId, toolUseId} | null
       const [terminatedOpen, setTerminatedOpen] = useState({});
 
       // roster-spotlight: per-instance selection.
@@ -1806,7 +1806,7 @@
                 </div>
               ) : (
                 <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
-                  <StreamColumns cli={cli} agents={spotlightedAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel} onOpenToolModal={(fromId, toolUseId) => setOpenToolModal({ fromId, toolUseId })}/>
+                  <StreamColumns cli={cli} agents={spotlightedAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel} onOpenToolModal={(crewId, fromId, toolUseId) => setOpenToolModal({ crewId, fromId, toolUseId })}/>
                 </div>
               )}
             </div>
@@ -1822,6 +1822,7 @@
           )}
           {openToolModal && (
             <ToolOutputModal
+              crewId={openToolModal.crewId}
               fromId={openToolModal.fromId}
               toolUseId={openToolModal.toolUseId}
               onClose={() => setOpenToolModal(null)}
