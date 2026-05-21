@@ -8,6 +8,8 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ## [2026-05-20] Feature candidate: non-blocking message wait (addressable broker)
 
+> **SHIPPED 2026-05-20** (PR #3, merged `24ac07e`) — deliverable 2, simplified to a **content-free signal endpoint**: `GET /wait-messages` on the existing UI server returns `{waiting, count, next_seq}` only (no payloads); the lead backgrounds a `curl` against it via Bash and drains actual content through the existing `get_messages` MCP tool. New `get_wait_endpoint` MCP tool surfaces the localhost URL. Level-triggered (reuses `wait_for_lead_message`), localhost-only, no auth in v1 (single-user-dev threat model). Sentinel-reviewed twice (clean). Deliverable 1 (short-poll hint) also folded in via the `get_messages` docstring. Remaining idea if ever wanted: a polished `claude-crew-wait` CLI binary (auto port discovery, clean exit codes) — not needed, curl suffices.
+
 ### Lead should keep working while waiting for a teammate message, instead of blocking on the long-poll
 
 - **What**: Today `get_messages` long-polls (blocks the lead's turn up to `wait_seconds`). While it waits, the lead can do nothing else — the orchestrator freezes. Goal: let the lead stay productive during the wait and be *notified when a message arrives*, rather than babysitting a blocking call. Two distinct deliverables surfaced, one cheap and one structural:
