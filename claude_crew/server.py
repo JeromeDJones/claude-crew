@@ -59,11 +59,15 @@ def make_server(
     factory: TeammateFactory | None = None,
     home_dir: Path | None = None,
     project_root: Path | None = None,
+    ui_port: int | None = None,
 ) -> FastMCP:
     # Capture project_root once at server creation time so list_available_tools
     # returns a stable value for the process lifetime.
     _project_root: Path = project_root if project_root is not None else Path.cwd()
     _home_dir: Path | None = home_dir  # None → discovery functions use Path.home()
+    # Resolved UI port for the non-blocking message-wait endpoint. None or <= 0
+    # means the UI server is disabled, so get_wait_endpoint reports no URL.
+    _ui_port: int | None = ui_port
     if factory is None:
         # Lazy import to avoid circular: factories imports server's siblings.
         from claude_crew.factories import default_factory
@@ -106,7 +110,14 @@ def make_server(
             "In-session subagents already run in parallel.\n\n"
             "Pattern: claude-crew for *relationship* (persistence + dialog + "
             "memory) and *recursive delegation* (teammate spawning its own "
-            "helpers). In-session subagents for fire-and-forget specialist work."
+            "helpers). In-session subagents for fire-and-forget specialist "
+            "work.\n\n"
+            "Staying productive while waiting: get_messages long-polls and "
+            "blocks your turn. To keep working instead of waiting idle, call "
+            "get_wait_endpoint for a localhost URL, then background a "
+            "`curl` long-poll against it via the Bash tool "
+            "(run_in_background=true) — it returns the instant a teammate "
+            "replies, and you drain the content via get_messages."
         ),
     )
 
@@ -250,6 +261,18 @@ def make_server(
         that returns as soon as a teammate replies, instead of repeated
         immediate-return polls that waste lead-session turns and context.
 
+        Staying productive while waiting: this call blocks the lead's turn.
+        When you have other work to do instead of waiting idle, you have two
+        options. (1) Cheapest: pass a SMALL wait_seconds (e.g. 5) and the
+        next-poll cursor (next_seq) — drain what's queued, do a chunk of work,
+        poll again next turn. (2) True push-on-arrival without freezing: call
+        get_wait_endpoint to get a localhost URL, then run, via the Bash tool
+        with run_in_background=true, a blocking long-poll against it, e.g.
+        `curl -s "<url>?since_seq=<next_seq>&timeout=300"`. That curl returns
+        the instant a message lands; the harness notifies you, and you then
+        call this tool to drain. The endpoint is content-free (signals arrival
+        only); actual message content always comes back through THIS tool.
+
         Choosing wait_seconds:
         - Awaiting a reply to something you just sent: 300 (5 min) is
           a sensible default. Bump higher (up to 600, the server cap)
@@ -284,6 +307,56 @@ def make_server(
         return {
             "messages": [m.to_dict() for m in msgs],
             "next_seq": next_seq,
+        }
+
+    @mcp.tool()
+    async def get_wait_endpoint() -> dict[str, Any]:
+        """Return the localhost URL for the non-blocking message-wait long-poll.
+
+        Use this to stay productive instead of blocking on get_messages. The
+        returned URL is an HTTP long-poll that BLOCKS until the lead has a new
+        message, then returns a content-free arrival signal (no payloads).
+
+        Pattern:
+          1. Call this once; cache the URL.
+          2. Run, via the Bash tool with run_in_background=true:
+             `curl -s "<url>?since_seq=<next_seq>&timeout=300"`
+             (since_seq = the next_seq from your last get_messages call).
+          3. Keep working. When a teammate replies the curl returns and the
+             harness notifies you.
+          4. Call get_messages to drain the actual content, then relaunch the
+             curl with the new next_seq.
+
+        Query params on the URL: ``since_seq`` (cursor; default 0) and
+        ``timeout`` (seconds to block; default 300, capped at 600 server-side).
+        Response JSON: ``{waiting, count, next_seq}``.
+
+        Returns ``{enabled: false, url: null, ...}`` when the UI/HTTP server is
+        disabled (CLAUDE_CREW_UI_PORT=0) — fall back to a small-wait_seconds
+        get_messages poll in that case.
+        """
+        # Invariant: production threads in the *resolved* port (main() reads it
+        # via getsockname() before calling make_server), so a live UI is always
+        # > 0 here. _ui_port of None (tests / make_server default) or 0 (UI
+        # disabled via CLAUDE_CREW_UI_PORT=0) both mean "no endpoint".
+        if _ui_port is None or _ui_port <= 0:
+            return {
+                "enabled": False,
+                "url": None,
+                "reason": (
+                    "HTTP server disabled (CLAUDE_CREW_UI_PORT=0); use "
+                    "get_messages with a small wait_seconds to poll instead."
+                ),
+            }
+        return {
+            "enabled": True,
+            "url": f"http://127.0.0.1:{_ui_port}/wait-messages",
+            "usage": (
+                'background a Bash call: '
+                f'curl -s "http://127.0.0.1:{_ui_port}/wait-messages'
+                '?since_seq=<next_seq>&timeout=300" — it returns when a '
+                "message arrives; then call get_messages to drain."
+            ),
         }
 
     @mcp.tool()
@@ -504,7 +577,7 @@ def main() -> None:
             ui_port = 0
 
     broker = Broker()
-    server = make_server(broker=broker)
+    server = make_server(broker=broker, ui_port=ui_port)
 
     if ui_port <= 0:
         if ui_sock:
