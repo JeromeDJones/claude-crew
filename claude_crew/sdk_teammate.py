@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 from claude_crew.broker import LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.redaction import REDACTION_VERSION, redact_error, summarize_args
+from claude_crew.redaction import REDACTION_VERSION, redact_error, redact_output, summarize_args
 from pathlib import Path
 
 from claude_crew.subagents import load_default_pack
@@ -573,6 +573,9 @@ class SdkTeammate(Teammate):
             maxlen=_tool_events_maxlen()
         )
 
+        # Tool output store: keyed by tool_use_id (FIFO, 50 entries, 4096-byte cap).
+        self._tool_outputs: collections.OrderedDict[str, str] = collections.OrderedDict()
+
         # F14: token/cost accumulation. Overwritten (not accumulated) per-turn-drain
         # from ResultMessage (D-1, D-2). Initialized to zero; reset on respawn (D-11).
         self._total_input_tokens: int = 0
@@ -885,6 +888,32 @@ class SdkTeammate(Teammate):
                     redaction_version=REDACTION_VERSION,
                 )
             )
+            # Capture tool output body (lazy-fetch store, parallel to ToolEvent).
+            # Skip if tool_response is absent (clean 404 on modal fetch).
+            raw_response = inp.get("tool_response")
+            if raw_response is not None:
+                # Coerce non-string values before redaction.
+                if isinstance(raw_response, (dict, list)):
+                    body = json.dumps(raw_response, default=str)
+                elif isinstance(raw_response, bytes):
+                    body = raw_response.decode("utf-8", errors="replace")
+                elif not isinstance(raw_response, str):
+                    body = str(raw_response)
+                else:
+                    body = raw_response
+                try:
+                    redacted_body = redact_output(body)
+                    self.store_tool_output(tool_use_id, redacted_body)
+                except Exception as exc:
+                    sentinel = f"[REDACTION_FAILED: {type(exc).__name__}]"
+                    self.store_tool_output(tool_use_id, sentinel)
+                    logger.warning(
+                        "_on_post_common: redact_output failed for teammate=%s "
+                        "tool_use_id=%s: %s",
+                        self.id,
+                        tool_use_id,
+                        exc,
+                    )
             try:
                 broker = self._broker
                 if broker is not None:
