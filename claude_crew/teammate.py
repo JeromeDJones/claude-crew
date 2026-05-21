@@ -14,7 +14,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION
@@ -107,6 +107,11 @@ class Teammate(ABC):
     # F19: bounded deque of completed ToolEvents for the dashboard stream (D-2).
     # Populated by Post hooks and _close_open_tools (D-3); read by Broker.snapshot.
     _completed_tool_events: collections.deque[ToolEvent]
+    # Tool output store: keyed by tool_use_id, FIFO at 50 entries, 4096-byte cap.
+    _tool_outputs: collections.OrderedDict  # [str, str]
+
+    _TOOL_OUTPUT_MAX_ENTRIES: ClassVar[int] = 50
+    _TOOL_OUTPUT_BYTE_CAP: ClassVar[int] = 4096
 
     @abstractmethod
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
@@ -115,6 +120,26 @@ class Teammate(ABC):
     @abstractmethod
     async def shutdown(self) -> None:
         """Stop consuming and release resources. Must be idempotent."""
+
+    def store_tool_output(self, tool_use_id: str, body: str) -> None:
+        """Store a (redacted, capped) tool output body keyed by tool_use_id.
+
+        Enforces a 50-entry FIFO (oldest entry evicted on overflow) and a
+        4096-byte UTF-8 cap (belt-and-suspenders; callers should already cap
+        via redact_output).  Last-write-wins on duplicate tool_use_id.
+        """
+        # Belt-and-suspenders byte cap.
+        encoded = body.encode("utf-8")
+        if len(encoded) > self._TOOL_OUTPUT_BYTE_CAP:
+            body = encoded[: self._TOOL_OUTPUT_BYTE_CAP - 3].decode("utf-8", errors="ignore") + "…"
+        # FIFO eviction: pop oldest while at capacity.
+        while len(self._tool_outputs) >= self._TOOL_OUTPUT_MAX_ENTRIES:
+            self._tool_outputs.popitem(last=False)
+        self._tool_outputs[tool_use_id] = body
+
+    def get_tool_output(self, tool_use_id: str) -> "str | None":
+        """Return the stored body for tool_use_id, or None if absent/evicted."""
+        return self._tool_outputs.get(tool_use_id)
 
     def _stamp_activity(self) -> None:
         """Update activity timestamps to now."""
@@ -296,6 +321,8 @@ class StubTeammate(Teammate):
         self._completed_tool_events: collections.deque[ToolEvent] = collections.deque(
             maxlen=_tool_events_maxlen()
         )
+        # Tool output store: keyed by tool_use_id (FIFO, 50 entries, 4096-byte cap).
+        self._tool_outputs: collections.OrderedDict[str, str] = collections.OrderedDict()
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker

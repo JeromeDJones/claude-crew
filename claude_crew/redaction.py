@@ -251,6 +251,76 @@ def summarize_args(tool_name: str, tool_input: dict) -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Output-only redaction patterns
+# Applied AFTER REDACTION_PATTERNS_V1 inside redact_output.  Not added to the
+# shared V1 list (v1-is-frozen invariant; PEM blocks don't appear in CLI args).
+# ---------------------------------------------------------------------------
+
+_OUTPUT_ONLY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # O-1. PEM private-key blocks (multi-line; catches RSA/EC/ENCRYPTED/bare)
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        "<redacted-pem>",
+    ),
+    # O-2. AWS session token keyword pair (40+ char base64 after keyword).
+    #      Belt-and-suspenders complement to V1 pattern 12: catches tokens
+    #      whose mixed base64 chars (+, /) break pattern 12's \b anchors.
+    (
+        re.compile(r"aws_session_token\s*[=:]\s*[A-Za-z0-9+/]{40,}={0,2}", re.I),
+        "aws_session_token=<redacted-key>",
+    ),
+    # O-3. GitHub tokens — full gh*_ family. V1 pattern 8 only covers
+    #      gh[poasu]_; this catches ghr_ (refresh) and ghe_ (Enterprise) plus
+    #      any future gh<x>_ prefix. The underscore defeats V1 pattern 12's \b
+    #      anchor, so the length fallback does NOT rescue these — an explicit
+    #      pattern is required. (Output-only so V1's frozen contract is
+    #      untouched; the args-side V1 gap is tracked for a future v2 bump.)
+    (
+        re.compile(r"gh[a-z]_[A-Za-z0-9]{30,}"),
+        "<redacted-key>",
+    ),
+    # O-4. Stripe secret/restricted keys — sk_live_, sk_test_, rk_live_,
+    #      rk_test_. V1 pattern 7 only matches the hyphen form (sk-); Stripe
+    #      uses underscores, which again defeat pattern 12's \b anchor.
+    (
+        re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}"),
+        "<redacted-key>",
+    ),
+]
+
+# Hard cap for stored tool output bodies (4 KiB)
+_TOOL_OUTPUT_BYTE_CAP: int = 4096
+
+
+def redact_output(text: str) -> str:
+    """Redact tool output text before storage in the per-teammate output store.
+
+    Applies REDACTION_PATTERNS_V1 in order, then the output-only additions
+    (_OUTPUT_ONLY_PATTERNS: PEM private-key blocks and AWS session token
+    keyword pairs).  Caps the final result to 4096 bytes via _cap_utf8.
+
+    Contract:
+      - Returns a redacted, capped string.
+      - On any internal exception, re-raises so the caller can write the
+        ``[REDACTION_FAILED: <ClassName>]`` sentinel.  Never silently stores
+        raw text on failure.
+
+    Security note: pattern coverage is the ONLY redaction defense. The 4096-byte
+    cap is a memory bound, NOT a backup redactor — a secret in an unmatched
+    format (a novel token type) survives capping. Adding a credential format to
+    cover means adding a pattern here (or to REDACTION_PATTERNS_V1 via a v2
+    bump), never relying on truncation.
+    """
+    result = _apply_patterns(text)
+    for pattern, replacement in _OUTPUT_ONLY_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return _cap_utf8(result, _TOOL_OUTPUT_BYTE_CAP)
+
+
 def redact_error(error_text: str) -> str:
     """Redact and cap an error string for use as error_summary.
 

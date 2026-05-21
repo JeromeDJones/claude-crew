@@ -336,7 +336,9 @@ class TestSadPaths:
         assert len(tool_msgs) == 1
         # The tool entry shape is what _fetch_remote_state will pass through unchanged.
         m = tool_msgs[0]
-        assert set(m.keys()) == {"t", "from", "to", "kind", "body"}
+        # tool_use_id added by the click-to-view-tool-output feature (AT-9) so the
+        # dashboard can lazy-fetch /tool-output/<from>/<tool_use_id>.
+        assert set(m.keys()) == {"t", "from", "to", "kind", "body", "tool_use_id"}
         assert m["kind"] == "tool"
         assert m["from"] == tid
         assert m["to"] is None

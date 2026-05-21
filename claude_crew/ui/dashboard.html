@@ -1120,13 +1120,113 @@
       );
     }
 
+    // --- ToolOutputModal ---
+    function ToolOutputModal({ fromId, toolUseId, onClose }) {
+      const [fetchStatus, setFetchStatus] = useState("loading"); // "loading"|"ok"|"not_found"|"error"
+      const [body, setBody] = useState("");
+      const [copied, setCopied] = useState(false);
+
+      useEffect(() => {
+        const handler = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+      }, [onClose]);
+
+      useEffect(() => {
+        setFetchStatus("loading");
+        setBody("");
+        fetch(`/tool-output/${encodeURIComponent(fromId)}/${encodeURIComponent(toolUseId)}`)
+          .then(r => {
+            if (r.status === 404) { setFetchStatus("not_found"); return null; }
+            if (!r.ok) { setFetchStatus("error"); return null; }
+            return r.json();
+          })
+          .then(data => {
+            if (data === null) return;
+            setBody(data.body || "");
+            setFetchStatus("ok");
+          })
+          .catch(() => setFetchStatus("error"));
+      }, [fromId, toolUseId]);
+
+      const handleCopy = () => {
+        const doFallback = () => {
+          try {
+            const el = document.createElement("textarea");
+            el.value = body;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand("copy");
+            document.body.removeChild(el);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          } catch (_) {}
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(body).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }).catch(doFallback);
+        } else {
+          doFallback();
+        }
+      };
+
+      return ReactDOM.createPortal(
+        <div className="tm-detail-backdrop" onClick={onClose}>
+          <div className="tm-detail-panel" onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>Tool Output</span>
+              <button onClick={onClose} style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--fg-3)', fontSize: 16, lineHeight: 1,
+              }}>✕</button>
+            </div>
+            <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', marginBottom: 6 }}>
+              {fromId} · {toolUseId}
+            </div>
+            {fetchStatus === "loading" && (
+              <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>Loading…</div>
+            )}
+            {fetchStatus === "not_found" && (
+              <div style={{ color: 'var(--fg-3)', fontSize: 12, fontStyle: 'italic' }}>
+                Output no longer available (evicted from rolling buffer)
+              </div>
+            )}
+            {fetchStatus === "error" && (
+              <div style={{ color: 'var(--st-error)', fontSize: 12 }}>
+                Failed to load tool output.
+              </div>
+            )}
+            {fetchStatus === "ok" && (
+              <>
+                <pre className="tm-detail-prompt">{body}</pre>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                  <button onClick={handleCopy} style={{
+                    background: 'var(--bg-2)', border: '1px solid var(--line)',
+                    borderRadius: 4, padding: '4px 14px',
+                    cursor: 'pointer', fontSize: 12, color: 'var(--fg-1)',
+                    fontFamily: 'var(--font-sans)',
+                  }}>
+                    {copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>,
+        document.body,
+      );
+    }
+
     // --- MiniMessage ---
-    function MiniMessage({ msg, agentMap }) {
+    function MiniMessage({ msg, agentMap, onOpenToolModal }) {
       const isTool = msg.kind === "tool";
       const isThinking = msg.kind === "thinking";
       const isFromLead = msg.from === "lead";
       const recipient = msg.to && !msg.to.startsWith("broker:") ? agentMap[msg.to] : null;
       const sender = msg.from && msg.from !== "lead" ? agentMap[msg.from] : null;
+      const isClickableTool = isTool && !!msg.tool_use_id && !!onOpenToolModal;
       return (
         <div style={{
           padding: "7px 0", borderBottom: "1px solid var(--line-soft)",
@@ -1145,12 +1245,18 @@
             <span className="mono" style={{ marginLeft: "auto" }}>{fmtTime(msg.t)}</span>
           </div>
           {isTool ? (
-            <div style={{
-              fontFamily: "var(--font-mono)", fontSize: 11.5,
-              background: "var(--bg-2)", border: "1px solid var(--line)",
-              borderRadius: 4, padding: "5px 7px",
-              display: "flex", alignItems: "center", gap: 6,
-            }}>
+            <div
+              className={isClickableTool ? "tool-output-row" : undefined}
+              style={{
+                fontFamily: "var(--font-mono)", fontSize: 11.5,
+                background: "var(--bg-2)", border: "1px solid var(--line)",
+                borderRadius: 4, padding: "5px 7px",
+                display: "flex", alignItems: "center", gap: 6,
+                cursor: isClickableTool ? "pointer" : "default",
+              }}
+              title={isClickableTool ? "Click to view tool output" : undefined}
+              onClick={isClickableTool ? () => onOpenToolModal(msg.from, msg.tool_use_id) : undefined}
+            >
               <span style={{ color: "var(--st-tool)" }}>▸</span>
               <span style={{ color: "var(--fg-0)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{msg.body}</span>
             </div>
@@ -1204,7 +1310,7 @@
       return { chipNode, accentClass, isStuck, elapsed, inFlight };
     }
 
-    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival, onOpenPanel }) {
+    function AgentStreamColumn({ agent, msgs, agentMap, serverNow, perfAtArrival, onOpenPanel, onOpenToolModal }) {
       const scrollRef = useRef(null);
       const isPinnedRef = useRef(true);
 
@@ -1282,7 +1388,7 @@
                 No outbound messages.
               </div>
             ) : msgs.map((m, i) => (
-              <MiniMessage key={i} msg={m} agentMap={agentMap}/>
+              <MiniMessage key={i} msg={m} agentMap={agentMap} onOpenToolModal={onOpenToolModal}/>
             ))}
           </div>
         </div>
@@ -1525,7 +1631,7 @@
     }
 
     // --- StreamColumns ---
-    function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival, onOpenPanel }) {
+    function StreamColumns({ cli, agents, msgs, agentMap, perfAtArrival, onOpenPanel, onOpenToolModal }) {
       const byAgent = useMemo(() => {
         const out = {};
         agents.forEach(a => { out[a.id] = []; });
@@ -1576,6 +1682,7 @@
                 serverNow={cli.now_wallclock}
                 perfAtArrival={perfAtArrival}
                 onOpenPanel={onOpenPanel}
+                onOpenToolModal={onOpenToolModal}
               />
             ))}
           </div>
@@ -1588,6 +1695,7 @@
       const { instances, transcripts } = data;
       const [activeId, setActiveId] = useState(instances[0].id);
       const [openPanel, setOpenPanel] = useState(null);
+      const [openToolModal, setOpenToolModal] = useState(null); // {fromId, toolUseId} | null
       const [terminatedOpen, setTerminatedOpen] = useState({});
 
       // roster-spotlight: per-instance selection.
@@ -1698,7 +1806,7 @@
                 </div>
               ) : (
                 <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex" }}>
-                  <StreamColumns cli={cli} agents={spotlightedAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel}/>
+                  <StreamColumns cli={cli} agents={spotlightedAgents} msgs={msgs} agentMap={agentMap} perfAtArrival={perfAtArrival} onOpenPanel={setOpenPanel} onOpenToolModal={(fromId, toolUseId) => setOpenToolModal({ fromId, toolUseId })}/>
                 </div>
               )}
             </div>
@@ -1710,6 +1818,13 @@
               configuredModel={openPanel.model}
               activeModel={openPanel.active_model}
               onClose={() => setOpenPanel(null)}
+            />
+          )}
+          {openToolModal && (
+            <ToolOutputModal
+              fromId={openToolModal.fromId}
+              toolUseId={openToolModal.toolUseId}
+              onClose={() => setOpenToolModal(null)}
             />
           )}
         </div>
