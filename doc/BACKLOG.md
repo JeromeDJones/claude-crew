@@ -6,6 +6,25 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-20] Feature candidate: crew-artifact viewer (surface docs in the dashboard)
+
+### Operator should be able to read the spec/reports/plans the crew is working from, rendered in Mission Control
+
+- **What**: A dashboard surface that renders a crew artifact (markdown doc) nicely in the UI — spec, plan-review report, build report, plan doc, etc. Today the operator cannot see the artifacts the crew produces/consumes without leaving the dashboard and reading files on disk (e.g. a repo-react run buries everything in `.rr/specs/`, `.rr/reports/`). The coordinator-in-the-loop can see *that* agents are working but not *what they're working from*.
+- **Framing — "surface a crew artifact", NOT "show a document"**: The generic "render a doc by path" version is a path-traversal / arbitrary-local-file-read footgun (`GET /document?path=/etc/passwd`) — localhost does not save you (any local process or a malicious doc link can hit it). The browser must NEVER name a resource by path. Instead the **trusted lead/coordinator** registers an artifact and the broker stores it keyed by an **opaque id**; the dashboard fetches by id only.
+- **Preferred shape — the ACTIVE coordinator→operator channel** (more on-strategy than a passive file browser): an MCP tool e.g. `surface_document(path, title)` that the lead/coordinator calls to push a specific doc into the operator's attention ("operator, review this spec"). This makes the human-in-the-loop pattern literal and is squarely the product's moat — not scope drift toward a mini IDE. A passive "browse all `.rr/` files" surface is the lower-value variant; if built, still allowlist to known crew-artifact roots only.
+- **Where**: Lazy-fetch HTTP endpoint on `ui_server.py` — `GET /artifact/<crew_id>/<artifact_id>` (opaque id → broker-registered path; never a client-supplied path), mirroring the `/tool-output/<teammate_id>/<tool_use_id>` and `/wait-messages` localhost-only posture. New broker method to register + look up artifacts by id (similar to `Broker.get_tool_output`). New MCP tool `surface_document` in `server.py`. Dashboard render in `claude_crew/ui/dashboard.html`.
+- **Reuse, don't duplicate**: This should share the modal/render infrastructure with the **click-to-view-tool-output** feature (in flight 2026-05-20, `repo-react/click-to-view-tool-output`). Two modal systems would be a smell. Worth a beat to see whether the `/tool-output` endpoint generalizes into a single artifact-fetch surface (`/artifact/...`) that both features ride on.
+- **Security crux (design in from the start)**:
+  - Browser fetches by opaque id only — no client-named paths (kills path traversal).
+  - Markdown → HTML must go through a **sanitizing** renderer — a teammate can write arbitrary content into a report, so unsanitized render is an XSS vector even on localhost.
+  - Localhost-only bind, no auth token in v1 (matches `/tool-output` + `/wait-messages` posture; revisit for shared/CI hosts).
+- **Why it matters**: Strengthens coordinator-in-the-loop observability (the moat) — the operator can follow the spec → review → build-report flow live instead of reading my Read-tool relays. Especially valuable for repo-react, where the artifact chain IS the work product.
+- **Suggested size**: **M**. Cost drivers: the sanitizing markdown render path, the broker artifact registry + opaque-id scheme, and deciding the active (`surface_document` tool) vs passive (auto-list) split. Smaller if it rides on a generalized `/tool-output` → `/artifact` endpoint.
+- **Open decision before building**: active-only (`surface_document` push) vs. also-passive (auto-list all crew artifacts). Recommend active-first (smaller, higher-value, safer) and add passive listing later only if the operator wants browse.
+
+---
+
 ## [2026-05-20] Feature candidate: non-blocking message wait (addressable broker)
 
 > **SHIPPED 2026-05-20** (PR #3, merged `24ac07e`) — deliverable 2, simplified to a **content-free signal endpoint**: `GET /wait-messages` on the existing UI server returns `{waiting, count, next_seq}` only (no payloads); the lead backgrounds a `curl` against it via Bash and drains actual content through the existing `get_messages` MCP tool. New `get_wait_endpoint` MCP tool surfaces the localhost URL. Level-triggered (reuses `wait_for_lead_message`), localhost-only, no auth in v1 (single-user-dev threat model). Sentinel-reviewed twice (clean). Deliverable 1 (short-poll hint) also folded in via the `get_messages` docstring. Remaining idea if ever wanted: a polished `claude-crew-wait` CLI binary (auto port discovery, clean exit codes) — not needed, curl suffices.
