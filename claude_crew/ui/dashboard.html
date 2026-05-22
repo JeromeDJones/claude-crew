@@ -1131,7 +1131,10 @@
       if (parsed && typeof parsed === "object") {
         // Read: {type:"text", file:{filePath, content}}
         if (parsed.file && typeof parsed.file.content === "string") {
-          return { header: parsed.file.filePath || null, text: parsed.file.content };
+          // Type-guard filePath: it's attacker-influenced; a non-string would
+          // render as "[object Object]".
+          const fp = typeof parsed.file.filePath === "string" ? parsed.file.filePath : null;
+          return { header: fp, text: parsed.file.content };
         }
         // Bash/shell: {stdout, stderr, ...}
         if (typeof parsed.stdout === "string" || typeof parsed.stderr === "string") {
@@ -1226,6 +1229,10 @@
                 Failed to load tool output.
               </div>
             )}
+            {/* SECURITY: tool output is attacker-influenced (redaction masks
+                secrets, not markup). formatted.header/.text are rendered as JSX
+                children only (React auto-escapes) — never via dangerouslySetInnerHTML,
+                and never as an href/src derived from filePath. Keep it that way. */}
             {fetchStatus === "ok" && (
               <>
                 {formatted.header && (
