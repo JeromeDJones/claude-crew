@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from claude_crew.broker import Broker
+from claude_crew.redaction import _TOOL_OUTPUT_BYTE_CAP as CAP
 from claude_crew.teammate import StubTeammate, ToolEvent
 from claude_crew.ui_server import UIServer
 
@@ -122,8 +123,8 @@ class TestAT5ToolOutputHit:
         broker, ui = _make_ui_server()
         tm_id = await _spawn_stub(broker)
 
-        capped = "x" * 4093 + "…"  # 4093 + 3 = 4096 bytes
-        assert len(capped.encode("utf-8")) == 4096
+        capped = "x" * (CAP - 3) + "…"  # exactly CAP bytes (… is 3 UTF-8 bytes)
+        assert len(capped.encode("utf-8")) == CAP
         broker._teammates[tm_id].store_tool_output("toolu_big", capped)
 
         async with _client(ui) as client:

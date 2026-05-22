@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from claude_crew.redaction import redact_output
+from claude_crew.redaction import redact_output, _TOOL_OUTPUT_BYTE_CAP as CAP
 
 
 # ---------------------------------------------------------------------------
@@ -179,17 +179,17 @@ class TestRedactOutputSecretShapes:
 
 
 class TestRedactOutputCap:
-    def test_capped_at_4096_bytes(self) -> None:
-        long_text = "x" * 8192
+    def test_capped_at_byte_cap(self) -> None:
+        long_text = "x" * (CAP * 2)
         result = redact_output(long_text)
-        assert len(result.encode("utf-8")) <= 4096
+        assert len(result.encode("utf-8")) <= CAP
 
     def test_cap_preserves_valid_utf8(self) -> None:
         # Multi-byte characters: each '£' is 2 bytes in UTF-8.
-        # 3000 × '£' = 6000 bytes → must cap to ≤ 4096 bytes.
-        long_text = "£" * 3000
+        # CAP × '£' = 2·CAP bytes → must cap to ≤ CAP bytes.
+        long_text = "£" * CAP
         result = redact_output(long_text)
         encoded = result.encode("utf-8")
-        assert len(encoded) <= 4096
+        assert len(encoded) <= CAP
         # Confirm the truncated result decodes cleanly (no partial multi-byte)
         assert encoded.decode("utf-8") == result

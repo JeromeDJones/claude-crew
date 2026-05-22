@@ -10,6 +10,7 @@ Run prerequisite: uv run playwright install chromium
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -28,7 +29,11 @@ from claude_crew.ui_server import UIServer
 # ── constants ─────────────────────────────────────────────────────────────────
 
 TOOL_USE_ID = "toolu_test1234"
-TOOL_BODY = "file contents"
+# The stored body is the raw SDK Read envelope (JSON). The modal must render the
+# inner content (unescaped), with the filePath as a header — NOT the raw wrapper.
+FILE_PATH = "claude_crew/example.py"
+FILE_CONTENT = "def hello():\n    return 42\n"
+TOOL_BODY = json.dumps({"type": "text", "file": {"filePath": FILE_PATH, "content": FILE_CONTENT}})
 
 
 # ── fixture helpers ───────────────────────────────────────────────────────────
@@ -152,12 +157,21 @@ def test_at10_tool_row_click_opens_modal_with_body_and_copy(tool_output_server_u
     modal = page.locator(".tm-detail-panel")
     modal.wait_for(state="visible", timeout=3000)
 
-    # The body must be visible in the pre element (fetch completes)
+    # The body must be visible in the pre element (fetch completes), rendered
+    # NICELY: the inner file content (unescaped), not the raw JSON envelope.
     pre = page.locator(".tm-detail-prompt")
     pre.wait_for(state="visible", timeout=10000)
     pre_text = pre.inner_text()
-    assert TOOL_BODY in pre_text, (
-        f"Expected {TOOL_BODY!r} in modal pre; got: {pre_text[:300]}"
+    assert "def hello():" in pre_text and "return 42" in pre_text, (
+        f"Expected unescaped file content in modal pre; got: {pre_text[:300]}"
+    )
+    # The raw JSON envelope keys must NOT leak into the rendered view.
+    assert '"type"' not in pre_text and '"filePath"' not in pre_text, (
+        f"Raw JSON envelope leaked into modal pre: {pre_text[:300]}"
+    )
+    # The filePath is surfaced as a header somewhere in the modal.
+    assert FILE_PATH in modal.inner_text(), (
+        f"Expected filePath header {FILE_PATH!r} in modal"
     )
 
     # A button labeled "Copy" must be present

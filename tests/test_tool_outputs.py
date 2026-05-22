@@ -12,6 +12,7 @@ import time
 import pytest
 
 import claude_crew.sdk_teammate as sdk_mod
+from claude_crew.redaction import _TOOL_OUTPUT_BYTE_CAP as CAP
 from claude_crew.sdk_teammate import SdkTeammate
 from claude_crew.teammate import ToolEvent, _ToolUseEntry
 
@@ -126,33 +127,34 @@ class TestAT3FifoEviction:
 
 
 # ---------------------------------------------------------------------------
-# AT-4: 4096-byte UTF-8 cap
+# AT-4: UTF-8 byte cap (_TOOL_OUTPUT_BYTE_CAP — cap-agnostic via the constant)
 # ---------------------------------------------------------------------------
 
 
 class TestAT4ByteCap:
-    async def test_eight_kb_body_capped_at_four_kb(self) -> None:
-        """AT-4: 8192-byte tool_response → stored body ≤ 4096 UTF-8 bytes."""
+    async def test_over_cap_body_truncated_to_cap(self) -> None:
+        """AT-4: a tool_response larger than the cap → stored body ≤ cap bytes."""
         tm = _make_teammate()
         _inject_pre(tm, "toolu_big")
-        big_body = "x" * 8192
+        big_body = "x" * (CAP * 2)
         await _fire_post(tm, "toolu_big", tool_response=big_body)
 
         stored = tm.get_tool_output("toolu_big")
         assert stored is not None
-        assert len(stored.encode("utf-8")) <= 4096
+        assert len(stored.encode("utf-8")) <= CAP
 
     async def test_small_body_stored_intact(self) -> None:
-        """Bodies under 4096 bytes are stored without truncation."""
+        """Bodies under the cap are stored without truncation."""
         tm = _make_teammate()
         _inject_pre(tm, "toolu_small")
-        small_body = "y" * 100
+        # Spaces/punctuation so the body isn't mistaken for a base64-shaped
+        # secret (pattern 12 matches 32+ consecutive alphanumerics).
+        small_body = "small tool output, nothing secret here.\nsecond line."
         await _fire_post(tm, "toolu_small", tool_response=small_body)
 
         stored = tm.get_tool_output("toolu_small")
         assert stored is not None
-        # Small bodies come back unchanged (no ellipsis appended)
-        assert len(stored.encode("utf-8")) <= 4096
+        assert stored == small_body  # under cap, no secrets → unchanged, no ellipsis
 
 
 # ---------------------------------------------------------------------------

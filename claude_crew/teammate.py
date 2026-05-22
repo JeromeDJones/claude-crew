@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from claude_crew.envelope import Envelope, new_message_id
-from claude_crew.redaction import REDACTION_VERSION
+from claude_crew.redaction import (
+    REDACTION_VERSION,
+    _TOOL_OUTPUT_BYTE_CAP as _TOOL_OUTPUT_BYTE_CAP_DEFAULT,
+)
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
@@ -107,11 +110,13 @@ class Teammate(ABC):
     # F19: bounded deque of completed ToolEvents for the dashboard stream (D-2).
     # Populated by Post hooks and _close_open_tools (D-3); read by Broker.snapshot.
     _completed_tool_events: collections.deque[ToolEvent]
-    # Tool output store: keyed by tool_use_id, FIFO at 50 entries, 4096-byte cap.
+    # Tool output store: keyed by tool_use_id, FIFO at 50 entries. Byte cap is
+    # the single source of truth in redaction.py (shared with redact_output and
+    # the ui_server truncated flag) — imported here so the three stay in lockstep.
     _tool_outputs: collections.OrderedDict  # [str, str]
 
     _TOOL_OUTPUT_MAX_ENTRIES: ClassVar[int] = 50
-    _TOOL_OUTPUT_BYTE_CAP: ClassVar[int] = 4096
+    _TOOL_OUTPUT_BYTE_CAP: ClassVar[int] = _TOOL_OUTPUT_BYTE_CAP_DEFAULT
 
     @abstractmethod
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
@@ -124,9 +129,10 @@ class Teammate(ABC):
     def store_tool_output(self, tool_use_id: str, body: str) -> None:
         """Store a (redacted, capped) tool output body keyed by tool_use_id.
 
-        Enforces a 50-entry FIFO (oldest entry evicted on overflow) and a
-        4096-byte UTF-8 cap (belt-and-suspenders; callers should already cap
-        via redact_output).  Last-write-wins on duplicate tool_use_id.
+        Enforces a 50-entry FIFO (oldest entry evicted on overflow) and the
+        shared ``_TOOL_OUTPUT_BYTE_CAP`` UTF-8 cap (belt-and-suspenders; callers
+        should already cap via redact_output).  Last-write-wins on duplicate
+        tool_use_id.
         """
         # Belt-and-suspenders byte cap.
         encoded = body.encode("utf-8")

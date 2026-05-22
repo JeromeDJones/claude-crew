@@ -292,8 +292,12 @@ _OUTPUT_ONLY_PATTERNS: list[tuple[re.Pattern, str]] = [
     ),
 ]
 
-# Hard cap for stored tool output bodies (4 KiB)
-_TOOL_OUTPUT_BYTE_CAP: int = 4096
+# Hard cap for stored tool output bodies (32 KiB). Single source of truth:
+# imported by teammate.py (store cap) and ui_server.py (truncated flag) so all
+# three agree. Per-teammate memory budget = this × _TOOL_OUTPUT_MAX_ENTRIES(50)
+# ≈ 1.6 MB. Raising it further compounds the retained-dead-teammate memory
+# (see doc/BACKLOG.md _dead_teammates eviction); pair a larger cap with that.
+_TOOL_OUTPUT_BYTE_CAP: int = 32768
 
 
 def redact_output(text: str) -> str:
@@ -301,7 +305,8 @@ def redact_output(text: str) -> str:
 
     Applies REDACTION_PATTERNS_V1 in order, then the output-only additions
     (_OUTPUT_ONLY_PATTERNS: PEM private-key blocks and AWS session token
-    keyword pairs).  Caps the final result to 4096 bytes via _cap_utf8.
+    keyword pairs).  Caps the final result to _TOOL_OUTPUT_BYTE_CAP bytes via
+    _cap_utf8.
 
     Contract:
       - Returns a redacted, capped string.
@@ -309,7 +314,7 @@ def redact_output(text: str) -> str:
         ``[REDACTION_FAILED: <ClassName>]`` sentinel.  Never silently stores
         raw text on failure.
 
-    Security note: pattern coverage is the ONLY redaction defense. The 4096-byte
+    Security note: pattern coverage is the ONLY redaction defense. The byte
     cap is a memory bound, NOT a backup redactor — a secret in an unmatched
     format (a novel token type) survives capping. Adding a credential format to
     cover means adding a pattern here (or to REDACTION_PATTERNS_V1 via a v2
