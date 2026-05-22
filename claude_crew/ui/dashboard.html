@@ -1120,11 +1120,42 @@
       );
     }
 
+    // Render a stored tool-output body nicely. The body is the raw SDK tool
+    // response (often a JSON envelope). Parse it and surface the useful text;
+    // fall back to the raw string for non-JSON or truncated-unparseable bodies.
+    // Returns { header, text } — header is an optional label (e.g. file path).
+    function formatToolBody(raw) {
+      let parsed;
+      try { parsed = JSON.parse(raw); }
+      catch (_) { return { header: null, text: raw }; }  // non-JSON / truncated
+      if (parsed && typeof parsed === "object") {
+        // Read: {type:"text", file:{filePath, content}}
+        if (parsed.file && typeof parsed.file.content === "string") {
+          // Type-guard filePath: it's attacker-influenced; a non-string would
+          // render as "[object Object]".
+          const fp = typeof parsed.file.filePath === "string" ? parsed.file.filePath : null;
+          return { header: fp, text: parsed.file.content };
+        }
+        // Bash/shell: {stdout, stderr, ...}
+        if (typeof parsed.stdout === "string" || typeof parsed.stderr === "string") {
+          let t = parsed.stdout || "";
+          if (parsed.stderr) t += (t ? "\n" : "") + "[stderr]\n" + parsed.stderr;
+          return { header: null, text: t || "(no output)" };
+        }
+        // Any other JSON: pretty-print.
+        try { return { header: null, text: JSON.stringify(parsed, null, 2) }; }
+        catch (_) { return { header: null, text: raw }; }
+      }
+      // JSON primitive (string/number/bool/null) → show as-is.
+      return { header: null, text: String(parsed) };
+    }
+
     // --- ToolOutputModal ---
     function ToolOutputModal({ crewId, fromId, toolUseId, onClose }) {
       const [fetchStatus, setFetchStatus] = useState("loading"); // "loading"|"ok"|"not_found"|"error"
       const [body, setBody] = useState("");
       const [copied, setCopied] = useState(false);
+      const formatted = formatToolBody(body);
 
       useEffect(() => {
         const handler = (e) => { if (e.key === 'Escape') onClose(); };
@@ -1153,7 +1184,7 @@
         const doFallback = () => {
           try {
             const el = document.createElement("textarea");
-            el.value = body;
+            el.value = formatted.text;
             document.body.appendChild(el);
             el.select();
             document.execCommand("copy");
@@ -1163,7 +1194,7 @@
           } catch (_) {}
         };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(body).then(() => {
+          navigator.clipboard.writeText(formatted.text).then(() => {
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
           }).catch(doFallback);
@@ -1198,9 +1229,18 @@
                 Failed to load tool output.
               </div>
             )}
+            {/* SECURITY: tool output is attacker-influenced (redaction masks
+                secrets, not markup). formatted.header/.text are rendered as JSX
+                children only (React auto-escapes) — never via dangerouslySetInnerHTML,
+                and never as an href/src derived from filePath. Keep it that way. */}
             {fetchStatus === "ok" && (
               <>
-                <pre className="tm-detail-prompt">{body}</pre>
+                {formatted.header && (
+                  <div className="mono" style={{ fontSize: 11, color: 'var(--fg-2)', marginBottom: 4, wordBreak: 'break-all' }}>
+                    {formatted.header}
+                  </div>
+                )}
+                <pre className="tm-detail-prompt">{formatted.text}</pre>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
                   <button onClick={handleCopy} style={{
                     background: 'var(--bg-2)', border: '1px solid var(--line)',
