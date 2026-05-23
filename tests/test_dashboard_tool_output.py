@@ -149,13 +149,10 @@ def test_at10_tool_row_click_opens_modal_with_body_and_copy(tool_output_server_u
     # Click the tool row — triggers fetch + modal open
     tool_row.click()
 
-    # The modal backdrop must appear
-    backdrop = page.locator(".tm-detail-backdrop")
-    backdrop.wait_for(state="visible", timeout=5000)
-
-    # The panel must appear inside the backdrop
+    # The modal panel must appear (OverlayPanel renders the backdrop via inline
+    # styles; the inner content wrapper retains the tm-detail-panel class).
     modal = page.locator(".tm-detail-panel")
-    modal.wait_for(state="visible", timeout=3000)
+    modal.wait_for(state="visible", timeout=5000)
 
     # The body must be visible in the pre element (fetch completes), rendered
     # NICELY: the inner file content (unescaped), not the raw JSON envelope.

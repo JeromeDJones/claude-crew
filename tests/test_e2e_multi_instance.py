@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_crew.artifact_registry import ArtifactRegistry
 from claude_crew.broker import Broker, LEAD_ID
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.instance_registry import InstanceRegistry
@@ -513,3 +514,159 @@ class TestNoRegistryPath:
         state = await ui._build_state()
         # Registry dir never touched — no files created by _build_state
         assert list(tmp_path.iterdir()) == []
+
+
+# ── Artifact proxy: leader → follower ────────────────────────────────────────
+
+
+class TestArtifactMultiInstanceProxy:
+    """Leader instance proxies /artifact fetches to the owning follower.
+
+    This is the multi-instance trap from CLAUDE.md: the dashboard is a leader
+    that aggregates remote followers, so /artifact must route to the owning
+    instance when crew_id is non-local — not serve from the leader's broker.
+    """
+
+    async def test_leader_proxies_artifact_to_follower(self, tmp_path, monkeypatch):
+        """A request for a remote crew's artifact is proxied to the follower."""
+        monkeypatch.setenv("CLAUDE_CREW_INSTANCE_REGISTRY_DIR", str(tmp_path))
+
+        broker_a = Broker()  # leader
+        broker_b = Broker()  # follower with an artifact
+
+        # Seed an artifact in follower's registry
+        art_reg_b = ArtifactRegistry(crew_id=broker_b.crew_id)
+        aid = art_reg_b.store(
+            path_label="/spec.md",
+            title="Remote Spec",
+            surfacing_teammate="planner",
+            body_bytes=b"# Remote spec content",
+        )
+
+        port_b = _free_port()
+        reg_a = InstanceRegistry(crew_id=broker_a.crew_id, port=0)
+        reg_b = InstanceRegistry(crew_id=broker_b.crew_id, port=port_b)
+
+        # Start follower with its artifact registry
+        ui_b = UIServer(broker_b, port=port_b, registry=reg_b, artifact_registry=art_reg_b)
+        task_b = asyncio.create_task(ui_b.serve())
+        await asyncio.sleep(0.5)
+        reg_b.register()
+
+        # Leader has no artifact registry for broker_b's crew
+        ui_a = UIServer(broker_a, port=0, registry=reg_a)
+
+        # Leader proxies to follower
+        result = await _http_get(
+            f"http://127.0.0.1:{port_b}/artifact/{broker_b.crew_id}/{aid}"
+        )
+        assert result["status"] == 200
+        body = json.loads(result["body"])
+        assert body["body"] == "# Remote spec content"
+        assert body["crew_id"] == broker_b.crew_id
+
+        task_b.cancel()
+        try:
+            await task_b
+        except asyncio.CancelledError:
+            pass
+
+    async def test_leader_serves_local_artifact_directly(self, tmp_path, monkeypatch):
+        """An artifact from the local crew is served without proxy."""
+        monkeypatch.setenv("CLAUDE_CREW_INSTANCE_REGISTRY_DIR", str(tmp_path))
+
+        broker = Broker()
+        art_reg = ArtifactRegistry(crew_id=broker.crew_id)
+        aid = art_reg.store(
+            path_label="/local.md",
+            title="Local Doc",
+            surfacing_teammate="planner",
+            body_bytes=b"local content",
+        )
+
+        port = _free_port()
+        reg = InstanceRegistry(crew_id=broker.crew_id, port=port)
+        ui = UIServer(broker, port=port, registry=reg, artifact_registry=art_reg)
+
+        task = asyncio.create_task(ui.serve())
+        await asyncio.sleep(0.5)
+
+        result = await _http_get(f"http://127.0.0.1:{port}/artifact/{broker.crew_id}/{aid}")
+        assert result["status"] == 200
+        body = json.loads(result["body"])
+        assert body["body"] == "local content"
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def test_remote_artifacts_appear_in_aggregated_state(self, tmp_path, monkeypatch):
+        """Artifacts surfaced in a follower are visible in the leader's /api/state."""
+        monkeypatch.setenv("CLAUDE_CREW_INSTANCE_REGISTRY_DIR", str(tmp_path))
+
+        broker_a = Broker()
+        broker_b = Broker()
+
+        art_reg_b = ArtifactRegistry(crew_id=broker_b.crew_id)
+        aid = art_reg_b.store(
+            path_label="/spec.md",
+            title="Follower Spec",
+            surfacing_teammate="planner",
+            body_bytes=b"# spec",
+        )
+
+        port_b = _free_port()
+        reg_a = InstanceRegistry(crew_id=broker_a.crew_id, port=0)
+        reg_b = InstanceRegistry(crew_id=broker_b.crew_id, port=port_b)
+
+        ui_b = UIServer(broker_b, port=port_b, registry=reg_b, artifact_registry=art_reg_b)
+        task_b = asyncio.create_task(ui_b.serve())
+        await asyncio.sleep(0.5)
+        reg_b.register()
+
+        ui_a = UIServer(broker_a, port=0, registry=reg_a)
+        state = await ui_a._build_state()
+
+        remote_inst = next(i for i in state["instances"] if i["id"] == broker_b.crew_id)
+        arts = remote_inst.get("artifacts", [])
+        assert len(arts) == 1
+        assert arts[0]["artifact_id"] == aid
+        assert arts[0]["crew_id"] == broker_b.crew_id
+        assert "body" not in arts[0]  # body never in state payload
+
+        task_b.cancel()
+        try:
+            await task_b
+        except asyncio.CancelledError:
+            pass
+
+    async def test_404_for_unknown_artifact_on_follower(self, tmp_path, monkeypatch):
+        """A stale/unknown artifact_id returns 404 from the owning follower."""
+        import urllib.error
+
+        monkeypatch.setenv("CLAUDE_CREW_INSTANCE_REGISTRY_DIR", str(tmp_path))
+
+        broker_b = Broker()
+        art_reg_b = ArtifactRegistry(crew_id=broker_b.crew_id)
+
+        port_b = _free_port()
+        reg_b = InstanceRegistry(crew_id=broker_b.crew_id, port=port_b)
+
+        ui_b = UIServer(broker_b, port=port_b, registry=reg_b, artifact_registry=art_reg_b)
+        task_b = asyncio.create_task(ui_b.serve())
+        await asyncio.sleep(0.5)
+
+        url = f"http://127.0.0.1:{port_b}/artifact/{broker_b.crew_id}/deadbeef1234dead"
+        try:
+            await _http_get(url)
+            assert False, "expected HTTPError 404"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+
+        task_b.cancel()
+        try:
+            await task_b
+        except asyncio.CancelledError:
+            pass

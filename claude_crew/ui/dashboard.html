@@ -426,6 +426,28 @@
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
+
+    /* Artifact markdown render surface */
+    .artifact-md { font-size: 13px; line-height: 1.6; color: var(--fg-0); }
+    .artifact-md h1, .artifact-md h2, .artifact-md h3, .artifact-md h4 {
+      font-weight: 600; margin: 1.2em 0 0.4em; color: var(--fg-0);
+    }
+    .artifact-md h1 { font-size: 1.4em; }
+    .artifact-md h2 { font-size: 1.2em; }
+    .artifact-md h3, .artifact-md h4 { font-size: 1.05em; }
+    .artifact-md p { margin: 0.6em 0; }
+    .artifact-md ul, .artifact-md ol { padding-left: 1.4em; margin: 0.5em 0; }
+    .artifact-md li { margin: 0.2em 0; }
+    .artifact-md pre { background: var(--bg-2); border-radius: 4px; padding: 12px 14px; overflow-x: auto; margin: 0.8em 0; }
+    .artifact-md code { font-family: var(--font-mono); font-size: 12px; }
+    .artifact-md pre code { background: none; padding: 0; }
+    .artifact-md :not(pre) > code { background: var(--bg-2); border-radius: 3px; padding: 1px 5px; }
+    .artifact-md blockquote { border-left: 3px solid var(--line); margin: 0.6em 0; padding: 2px 0 2px 12px; color: var(--fg-2); }
+    .artifact-md a { color: var(--fg-1); text-decoration: underline; }
+    .artifact-md hr { border: none; border-top: 1px solid var(--line); margin: 1em 0; }
+    .artifact-md table { border-collapse: collapse; font-size: 12px; }
+    .artifact-md th, .artifact-md td { border: 1px solid var(--line); padding: 4px 8px; }
+    .artifact-md th { background: var(--bg-2); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -433,6 +455,17 @@
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <!-- marked (md->html) + DOMPurify (html sanitizer) for the artifact viewer.
+       SRI integrity hashes are sha384 of the exact pinned unpkg artifacts.
+       Recompute on version bump with, e.g.:
+         curl -sL https://unpkg.com/marked@4.3.0/marked.min.js \
+           | openssl dgst -sha384 -binary | openssl base64 -A
+       Correctness is also enforced at test time: if a hash is wrong the script
+       fails to load, DOMPurify is undefined, and the dashboard XSS Playwright
+       tests (tests/dashboard/test_dashboard_artifact_xss.py) fail. marked is
+       pinned to v4 deliberately — v5 changed the API; do not bump blindly. -->
+  <script src="https://unpkg.com/marked@4.3.0/marked.min.js" integrity="sha384-QsSpx6a0USazT7nK7w8qXDgpSAPhFsb2XtpoLFQ5+X2yFN6hvCKnwEzN8M5FWaJb" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/dompurify@3.0.11/dist/purify.min.js" integrity="sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs" crossorigin="anonymous"></script>
   <script type="text/babel" data-presets="env,react">
     const { useState, useEffect, useMemo, useRef } = React;
 
@@ -930,8 +963,276 @@
       );
     }
 
+    // --- Artifact markdown sanitizer ---
+    // SECURITY: This is the ONE place dangerouslySetInnerHTML is intentionally
+    // used. The pipeline is: marked.parse (Markdown → HTML) → DOMPurify.sanitize
+    // (HTML → safe HTML). DOMPurify with this config blocks scripts, inline
+    // event handlers, iframe/object/embed/form, style injection, and
+    // javascript: URIs. The config is a single constant — do not spread it
+    // across files or relax it without a security review.
+    //
+    // After sanitization a link-hardening pass runs:
+    //   - External http(s) links: target=_blank rel=noopener noreferrer
+    //   - Relative links: href stripped → inert text (never resolved server-side)
+    const _DOMCFG = {
+      USE_PROFILES: { html: true },  // html profile is the primary allowlist gate
+      FORCE_BODY: true,              // treat input as body fragment; prevents <html>/<head> injection
+      FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'script'],
+      FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick', 'onmouseover',
+                    'onfocus', 'onblur', 'onsubmit', 'action'],
+    };
+    function sanitizeArtifact(md) {
+      const rawHtml = marked.parse(md, { gfm: true, breaks: false });
+      const clean = DOMPurify.sanitize(rawHtml, _DOMCFG);
+      // Link-hardening: parse the sanitized HTML, mutate links, re-serialize.
+      // NOTE: `clean` is the ALREADY-SANITIZED DOMPurify output assigned to a
+      // detached scratch <div> solely to mutate <a> elements — NOT an
+      // unsanitized innerHTML assignment. The render site downstream re-runs
+      // sanitizeArtifact's return value through marked/DOMPurify-equivalent JSX,
+      // and re-parsing sanitized HTML cannot reintroduce script in a div context.
+      const tmp = document.createElement('div');
+      tmp.innerHTML = clean;
+      tmp.querySelectorAll('a').forEach(a => {
+        const href = a.getAttribute('href') || '';
+        if (/^https?:\/\//i.test(href)) {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener noreferrer');
+        } else {
+          // Relative or other scheme: strip href so link is inert text.
+          a.removeAttribute('href');
+          a.style.cursor = 'default';
+          a.style.textDecoration = 'none';
+        }
+      });
+      return tmp.innerHTML;
+    }
+
+    // --- OverlayPanel primitive ---
+    // Portal-based overlay. mode="modal" = centered panel; mode="drawer" = right-side
+    // slide-in. Handles Esc, backdrop click-outside, X button, and focus management.
+    function OverlayPanel({ mode, size, onClose, children }) {
+      const panelRef = useRef(null);
+
+      useEffect(() => {
+        const handler = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', handler);
+        // Trap focus: move focus into panel on open.
+        if (panelRef.current) panelRef.current.focus();
+        return () => document.removeEventListener('keydown', handler);
+      }, [onClose]);
+
+      const backdropStyle = {
+        position: 'fixed', inset: 0,
+        background: 'rgba(0,0,0,0.45)',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: mode === 'modal' ? 'center' : 'stretch',
+        justifyContent: mode === 'modal' ? 'center' : 'flex-end',
+      };
+
+      const panelStyle = mode === 'drawer' ? {
+        width: size || 'min(720px, 55vw)',
+        height: '100vh',
+        background: 'var(--bg-1)',
+        borderLeft: '1px solid var(--line)',
+        display: 'flex', flexDirection: 'column',
+        transform: 'translateX(0)',
+        transition: 'transform 180ms ease-out',
+        outline: 'none',
+        overflow: 'hidden',
+      } : {
+        width: size || 640,
+        maxHeight: '85vh',
+        background: 'var(--bg-1)',
+        borderRadius: 8,
+        border: '1px solid var(--line)',
+        display: 'flex', flexDirection: 'column',
+        outline: 'none',
+        overflow: 'hidden',
+      };
+
+      return ReactDOM.createPortal(
+        <div style={backdropStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+          <div ref={panelRef} tabIndex={-1} style={panelStyle} onClick={e => e.stopPropagation()}>
+            {children}
+          </div>
+        </div>,
+        document.body
+      );
+    }
+
+    // --- ArtifactTray (dropdown) ---
+    function ArtifactTray({ artifacts, onOpen, onMarkRead, onClose }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+      }, [onClose]);
+
+      return (
+        <div ref={ref} style={{
+          position: 'absolute', top: '100%', right: 0, marginTop: 6,
+          width: 380, background: 'var(--bg-1)',
+          border: '1px solid var(--line)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+          zIndex: 900, overflow: 'hidden',
+        }}>
+          {artifacts.length === 0 ? (
+            <div style={{ padding: '14px 16px', color: 'var(--fg-3)', fontSize: 12 }}>
+              No artifacts surfaced yet.
+            </div>
+          ) : (
+            <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+              {artifacts.map((a, idx) => {
+                const unread = !a._read;
+                const ts = a.timestamp_utc
+                  ? new Date(a.timestamp_utc * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : '';
+                return (
+                  <div key={a.artifact_id}
+                    className="artifact-tray-item"
+                    onClick={() => { onOpen(a.artifact_id); }}
+                    style={{
+                      padding: '10px 16px', cursor: 'pointer',
+                      borderBottom: idx < artifacts.length - 1 ? '1px solid var(--line)' : 'none',
+                      background: unread ? 'var(--bg-2)' : 'transparent',
+                      display: 'flex', alignItems: 'center', gap: 8,
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-2)'}
+                    onMouseLeave={e => e.currentTarget.style.background = unread ? 'var(--bg-2)' : 'transparent'}
+                  >
+                    {unread && <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)', flexShrink: 0 }}/>}
+                    {!unread && <span style={{ width: 6, flexShrink: 0 }}/>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: unread ? 600 : 400, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {a.title}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 2 }}>
+                        {a.surfacing_teammate} · {ts}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // --- ArtifactDrawer ---
+    function ArtifactDrawer({ crewId, artifactId, allArtifacts, onNavigate, onClose }) {
+      const [fetchStatus, setFetchStatus] = useState('loading'); // loading|ok|not_found|error
+      const [rec, setRec] = useState(null);
+      const [copied, setCopied] = useState(false);
+
+      const idx = allArtifacts.findIndex(a => a.artifact_id === artifactId);
+      const total = allArtifacts.length;
+      // Chronological order: allArtifacts is newest-first from state; reverse for prev/next
+      const chrono = [...allArtifacts].reverse();
+      const chronoIdx = chrono.findIndex(a => a.artifact_id === artifactId);
+
+      useEffect(() => {
+        setFetchStatus('loading');
+        setRec(null);
+        fetch(`/artifact/${encodeURIComponent(crewId)}/${encodeURIComponent(artifactId)}`)
+          .then(r => {
+            if (r.status === 404) { setFetchStatus('not_found'); return null; }
+            if (!r.ok) { setFetchStatus('error'); return null; }
+            return r.json();
+          })
+          .then(data => {
+            if (data === null) return;
+            setRec(data);
+            setFetchStatus('ok');
+          })
+          .catch(() => setFetchStatus('error'));
+      }, [crewId, artifactId]);
+
+      const handleCopy = () => {
+        const text = rec ? rec.body : '';
+        const doFallback = () => {
+          try {
+            const el = document.createElement('textarea');
+            el.value = text;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          } catch (_) {}
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }).catch(doFallback);
+        } else { doFallback(); }
+      };
+
+      const hasPrev = chronoIdx > 0;
+      const hasNext = chronoIdx < chrono.length - 1;
+      const goPrev = () => hasPrev && onNavigate(chrono[chronoIdx - 1].artifact_id);
+      const goNext = () => hasNext && onNavigate(chrono[chronoIdx + 1].artifact_id);
+
+      const ts = rec
+        ? new Date(rec.timestamp_utc * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+        : '';
+      const sizeKb = rec ? (new TextEncoder().encode(rec.body).length / 1024).toFixed(1) : '';
+
+      return (
+        <OverlayPanel mode="drawer" onClose={onClose}>
+          {/* sticky header */}
+          <div style={{ padding: '14px 18px 10px', borderBottom: '1px solid var(--line)', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button onClick={goPrev} disabled={!hasPrev} style={{ background: 'none', border: 'none', cursor: hasPrev ? 'pointer' : 'default', color: hasPrev ? 'var(--fg-1)' : 'var(--fg-3)', fontSize: 16, padding: '2px 4px' }}>‹</button>
+              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>{chronoIdx + 1} of {chrono.length}</span>
+              <button onClick={goNext} disabled={!hasNext} style={{ background: 'none', border: 'none', cursor: hasNext ? 'pointer' : 'default', color: hasNext ? 'var(--fg-1)' : 'var(--fg-3)', fontSize: 16, padding: '2px 4px' }}>›</button>
+              <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', fontSize: 18, lineHeight: 1, padding: '2px 4px' }}>✕</button>
+            </div>
+            {fetchStatus === 'ok' && rec && (
+              <>
+                <div style={{ fontWeight: 600, fontSize: 14, marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rec.title}</div>
+                <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', marginTop: 3 }}>
+                  {rec.surfacing_teammate} · {ts} · {sizeKb} KB
+                </div>
+                <div className="mono" style={{ fontSize: 10, color: 'var(--fg-3)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rec.path_label}</div>
+              </>
+            )}
+          </div>
+
+          {/* scrolling body */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '18px 22px' }}>
+            {fetchStatus === 'loading' && <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>Loading…</div>}
+            {fetchStatus === 'not_found' && <div style={{ color: 'var(--fg-3)', fontSize: 12, fontStyle: 'italic' }}>Artifact no longer available (evicted).</div>}
+            {fetchStatus === 'error' && <div style={{ color: 'var(--st-error)', fontSize: 12 }}>Failed to load artifact.</div>}
+            {/* SECURITY: artifact body is rendered via dangerouslySetInnerHTML ONLY because
+                it has been processed through the full sanitizeArtifact() pipeline:
+                  marked.parse (Markdown → HTML) → DOMPurify.sanitize (_DOMCFG) → link-hardening.
+                This is the single approved site for dangerouslySetInnerHTML in the dashboard.
+                Do not add additional dangerouslySetInnerHTML calls elsewhere. */}
+            {fetchStatus === 'ok' && rec && (
+              <div className="artifact-md" dangerouslySetInnerHTML={{ __html: sanitizeArtifact(rec.body) }}/>
+            )}
+          </div>
+
+          {/* sticky footer */}
+          <div style={{ padding: '10px 18px', borderTop: '1px solid var(--line)', flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+            <button onClick={handleCopy} style={{
+              background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 4,
+              color: 'var(--fg-1)', cursor: 'pointer', fontSize: 11, padding: '5px 12px',
+            }}>
+              {copied ? 'Copied!' : 'Copy raw'}
+            </button>
+          </div>
+        </OverlayPanel>
+      );
+    }
+
     // --- MCTopBar ---
-    function MCTopBar({ instances, connected }) {
+    function MCTopBar({ instances, connected, activeArtifacts, unreadCount, onOpenArtifactTray, artifactTrayContent }) {
       const totals = instances.reduce((acc, i) => {
         const live = i.agents.filter(a => a.dead !== true);
         acc.agents += live.length;
@@ -983,13 +1284,37 @@
             <StatusPill status="tool-use" count={totals.byStatus.tool}/>
             <StatusPill status="waiting" count={totals.byStatus.waiting}/>
             <StatusPill status="idle" count={totals.byStatus.idle}/>
+            {/* Artifacts pill — scoped to active instance */}
+            <div style={{ position: "relative" }}>
+              <button
+                data-testid="artifacts-pill"
+                onClick={onOpenArtifactTray}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  background: "var(--bg-2)", border: "1px solid var(--line)",
+                  borderRadius: 4, padding: "3px 9px", cursor: "pointer",
+                  color: "var(--fg-1)", fontSize: 11, fontFamily: "var(--font-sans)",
+                }}
+              >
+                <span>📄</span>
+                <span>Artifacts</span>
+                {unreadCount > 0 && (
+                  <span style={{
+                    background: "var(--accent)", color: "#fff",
+                    borderRadius: 10, padding: "0 5px", fontSize: 10, fontWeight: 700,
+                    minWidth: 16, textAlign: "center",
+                  }}>{unreadCount}</span>
+                )}
+              </button>
+              {artifactTrayContent}
+            </div>
           </div>
         </div>
       );
     }
 
     // --- InstanceStrip ---
-    function InstanceStrip({ instances, activeId, onSelect }) {
+    function InstanceStrip({ instances, activeId, onSelect, readState }) {
       return (
         <div style={{
           display: "flex", gap: 10, padding: "12px 22px",
@@ -1002,6 +1327,9 @@
             const liveAgentsLocal = cli.agents.filter(a => a.dead !== true);
             const statuses = liveAgentsLocal.map(a => a.status);
             const borderColor = unreachable ? "oklch(0.60 0.15 25 / 0.30)" : active ? "var(--accent-line)" : "var(--line)";
+            // Unread dot: show on inactive instances that have unread artifacts
+            const artifacts = cli.artifacts || [];
+            const hasUnread = !active && artifacts.some(a => !(readState && readState[a.artifact_id]));
             return (
               <div key={cli.id} onClick={() => onSelect(cli.id)} style={{
                 flex: "1 0 280px", minWidth: 280,
@@ -1023,6 +1351,10 @@
                       textTransform: "uppercase", color: "var(--accent)",
                       background: "var(--accent-soft)", border: "1px solid var(--accent-line)",
                     }}>local</span>
+                  )}
+                  {/* Unread artifact dot on inactive instances */}
+                  {hasUnread && (
+                    <span data-testid="instance-unread-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", display: "inline-block", flexShrink: 0 }}/>
                   )}
                   <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", marginLeft: "auto" }}>{cli.id}</span>
                 </div>
@@ -1158,12 +1490,6 @@
       const formatted = formatToolBody(body);
 
       useEffect(() => {
-        const handler = (e) => { if (e.key === 'Escape') onClose(); };
-        document.addEventListener('keydown', handler);
-        return () => document.removeEventListener('keydown', handler);
-      }, [onClose]);
-
-      useEffect(() => {
         setFetchStatus("loading");
         setBody("");
         fetch(`/tool-output/${encodeURIComponent(crewId)}/${encodeURIComponent(fromId)}/${encodeURIComponent(toolUseId)}`)
@@ -1203,9 +1529,9 @@
         }
       };
 
-      return ReactDOM.createPortal(
-        <div className="tm-detail-backdrop" onClick={onClose}>
-          <div className="tm-detail-panel" onClick={e => e.stopPropagation()}>
+      return (
+        <OverlayPanel mode="modal" onClose={onClose}>
+          <div className="tm-detail-panel">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
               <span style={{ fontWeight: 600, fontSize: 14 }}>Tool Output</span>
               <button onClick={onClose} style={{
@@ -1254,8 +1580,7 @@
               </>
             )}
           </div>
-        </div>,
-        document.body,
+        </OverlayPanel>
       );
     }
 
@@ -1736,6 +2061,9 @@
       const [activeId, setActiveId] = useState(instances[0].id);
       const [openPanel, setOpenPanel] = useState(null);
       const [openToolModal, setOpenToolModal] = useState(null); // {crewId, fromId, toolUseId} | null
+      const [openArtifact, setOpenArtifact] = useState(null);  // {crewId, artifactId} | null
+      const [artifactTrayOpen, setArtifactTrayOpen] = useState(false);
+      const [readState, setReadState] = useState({});           // {[artifactId]: true} — client memory only
       const [terminatedOpen, setTerminatedOpen] = useState({});
 
       // roster-spotlight: per-instance selection.
@@ -1746,6 +2074,18 @@
       const [selectedByInstance, setSelectedByInstance] = useState({});
 
       const cli = instances.find(i => i.id === activeId) || instances[0];
+
+      // Artifact state derived from active instance
+      const activeArtifacts = cli.artifacts || [];
+      const unreadCount = activeArtifacts.filter(a => !readState[a.artifact_id]).length;
+
+      const onOpenArtifact = (crewId, artifactId) => {
+        setReadState(prev => ({ ...prev, [artifactId]: true }));
+        setOpenArtifact({ crewId, artifactId });
+        setArtifactTrayOpen(false);
+      };
+      const onOpenArtifactTray = () => setArtifactTrayOpen(v => !v);
+
       const agentMap = useMemo(
         () => Object.fromEntries(cli.agents.map(a => [a.id, a])),
         [cli],
@@ -1819,8 +2159,22 @@
 
       return (
         <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-0)", overflow: "hidden" }}>
-          <MCTopBar instances={instances} connected={connected}/>
-          <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId}/>
+          <MCTopBar
+            instances={instances}
+            connected={connected}
+            activeArtifacts={activeArtifacts}
+            unreadCount={unreadCount}
+            onOpenArtifactTray={onOpenArtifactTray}
+            artifactTrayContent={artifactTrayOpen ? (
+              <ArtifactTray
+                artifacts={activeArtifacts}
+                onOpen={(artifactId) => onOpenArtifact(cli.id, artifactId)}
+                onMarkRead={(artifactId) => setReadState(prev => ({ ...prev, [artifactId]: true }))}
+                onClose={() => setArtifactTrayOpen(false)}
+              />
+            ) : null}
+          />
+          <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId} readState={readState}/>
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
             <RosterRail
               liveAgents={liveAgents}
@@ -1866,6 +2220,15 @@
               fromId={openToolModal.fromId}
               toolUseId={openToolModal.toolUseId}
               onClose={() => setOpenToolModal(null)}
+            />
+          )}
+          {openArtifact && (
+            <ArtifactDrawer
+              crewId={openArtifact.crewId}
+              artifactId={openArtifact.artifactId}
+              allArtifacts={activeArtifacts}
+              onNavigate={(artifactId) => onOpenArtifact(openArtifact.crewId, artifactId)}
+              onClose={() => setOpenArtifact(null)}
             />
           )}
         </div>

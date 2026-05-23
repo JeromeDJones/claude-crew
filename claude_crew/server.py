@@ -7,6 +7,7 @@ inject their own broker; production builds one fresh.
 from __future__ import annotations
 
 import asyncio
+import stat
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,16 @@ from claude_crew.broker import (
     TeammateFactory,
     UnknownTeammateError,
 )
+from claude_crew.artifact_registry import (
+    ArtifactNotText,
+    ArtifactRegistry,
+    ArtifactTooLarge,
+    MAX_BODY_BYTES,
+)
+
+# Upper bound on the surface_document `title` metadata field (display-only;
+# bounds the un-capped metadata surface independent of the body cap).
+_MAX_TITLE_LEN = 512
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.subagents._user_loader import (
     _discover_skill_names,
@@ -60,6 +71,7 @@ def make_server(
     home_dir: Path | None = None,
     project_root: Path | None = None,
     ui_port: int | None = None,
+    artifact_registry: ArtifactRegistry | None = None,
 ) -> FastMCP:
     # Capture project_root once at server creation time so list_available_tools
     # returns a stable value for the process lifetime.
@@ -516,6 +528,93 @@ def make_server(
             "project_root": str(_project_root),
         }
 
+    @mcp.tool()
+    async def surface_document(path: str, title: str) -> dict[str, Any]:
+        """Surface a markdown document to Mission Control for operator review.
+
+        Reads ``path`` ONCE at call time (snapshot semantics — the stored copy
+        is immutable; later edits to the file are not reflected). The original
+        path is stored as a display label only; the returned ``artifact_id`` is
+        the sole fetch key.
+
+        Path resolution: resolved to an absolute path against the server
+        process cwd. The lead is trusted — no traversal restriction is
+        imposed — but the path must point to an existing regular file.
+
+        Args:
+            path: Filesystem path to the markdown document to surface.
+            title: Human-readable title shown in the Artifacts tray.
+
+        Returns:
+            artifact_id: Opaque UUID4 hex id (never path-derived). Use to
+                reference the artifact in follow-up messages.
+            crew_id: The crew this artifact belongs to.
+        """
+        if artifact_registry is None:
+            raise ToolError(
+                "surface_document is not available: no artifact registry is configured"
+            )
+
+        if len(title) > _MAX_TITLE_LEN:
+            raise ToolError(
+                f"title is {len(title):,} chars; limit is {_MAX_TITLE_LEN}"
+            )
+
+        # Resolve to absolute against cwd (trusted lead; document the contract).
+        resolved = Path(path)
+        if not resolved.is_absolute():
+            resolved = Path.cwd() / resolved
+        resolved = resolved.resolve()
+
+        # File-access sad paths — each returns a clean error, never a traceback.
+        try:
+            file_stat = resolved.stat()
+        except FileNotFoundError:
+            raise ToolError(f"path not found: {path!r}")
+        except PermissionError:
+            raise ToolError(f"permission denied reading: {path!r}")
+        except OSError as exc:
+            raise ToolError(f"OS error accessing {path!r}: {exc}")
+
+        # Symlinks are followed by design (resolve() above dereferenced them);
+        # after resolution a non-regular target is a directory, device, FIFO, etc.
+        if not stat.S_ISREG(file_stat.st_mode):
+            kind = "directory" if resolved.is_dir() else "non-regular file"
+            raise ToolError(f"{path!r} is a {kind}, not a regular file")
+
+        # Reject oversize BEFORE reading the whole file into memory — st_size is
+        # already available from stat(). The post-read cap in store() still runs
+        # as the authoritative check (covers a file that grows between stat and read).
+        if file_stat.st_size > MAX_BODY_BYTES:
+            raise ToolError(
+                f"{path!r} is {file_stat.st_size:,} bytes; "
+                f"limit is {MAX_BODY_BYTES:,} bytes (1 MiB)"
+            )
+
+        try:
+            body_bytes = resolved.read_bytes()
+        except PermissionError:
+            raise ToolError(f"permission denied reading: {path!r}")
+        except OSError as exc:
+            raise ToolError(f"IO error reading {path!r}: {exc}")
+
+        try:
+            artifact_id = artifact_registry.store(
+                path_label=str(resolved),
+                title=title,
+                surfacing_teammate=LEAD_ID,
+                body_bytes=body_bytes,
+            )
+        except ArtifactTooLarge as exc:
+            raise ToolError(str(exc))
+        except ArtifactNotText as exc:
+            raise ToolError(str(exc))
+
+        return {
+            "artifact_id": artifact_id,
+            "crew_id": artifact_registry.crew_id,
+        }
+
     # Stash the broker on the server for tests / introspection.
     mcp._broker = broker  # type: ignore[attr-defined]
 
@@ -554,6 +653,37 @@ def _bind_ui_socket(preferred: int) -> "socket.socket | None":
     return None
 
 
+def build_runtime(ui_port: int, ui_sock: "socket.socket | None" = None):
+    """Construct the production runtime components with all wiring in place.
+
+    Factored out of ``main()`` so the production wiring — notably the artifact
+    registry threading through BOTH the MCP server and the UI server — is
+    covered by tests. ``main()`` itself is not unit-testable (it binds sockets,
+    runs servers, and installs signal handlers); this is the part that can be.
+
+    Returns ``(broker, artifact_registry, server, registry, ui)``. ``registry``
+    and ``ui`` are ``None`` when the UI is disabled (``ui_port <= 0``).
+    """
+    broker = Broker()
+    artifact_registry = ArtifactRegistry(crew_id=broker.crew_id)
+    server = make_server(
+        broker=broker, ui_port=ui_port, artifact_registry=artifact_registry
+    )
+
+    if ui_port <= 0:
+        return broker, artifact_registry, server, None, None
+
+    from claude_crew.instance_registry import InstanceRegistry
+    from claude_crew.ui_server import UIServer
+
+    registry = InstanceRegistry(crew_id=broker.crew_id, port=ui_port)
+    ui = UIServer(
+        broker, port=ui_port, registry=registry, sock=ui_sock,
+        artifact_registry=artifact_registry,
+    )
+    return broker, artifact_registry, server, registry, ui
+
+
 def main() -> None:
     """Console entrypoint: run the MCP server over stdio."""
     import os
@@ -576,8 +706,7 @@ def main() -> None:
             )
             ui_port = 0
 
-    broker = Broker()
-    server = make_server(broker=broker, ui_port=ui_port)
+    broker, artifact_registry, server, registry, ui = build_runtime(ui_port, ui_sock)
 
     if ui_port <= 0:
         if ui_sock:
@@ -585,14 +714,10 @@ def main() -> None:
         server.run()
         return
 
-    from claude_crew.instance_registry import InstanceRegistry
-    from claude_crew.ui_server import UIServer
+    from claude_crew.ui_server import UIServer  # for the promoted-leader construction below
 
     _LEADER_PORT = 7821
     is_leader = ui_port == _LEADER_PORT
-
-    registry = InstanceRegistry(crew_id=broker.crew_id, port=ui_port)
-    ui = UIServer(broker, port=ui_port, registry=registry, sock=ui_sock)
 
     if is_leader:
         sys.stderr.write(f"[claude-crew] ui -> http://127.0.0.1:{ui_port}\n")
@@ -622,7 +747,10 @@ def main() -> None:
                 if leader_sock is not None and leader_sock.getsockname()[1] == _LEADER_PORT:
                     try:
                         registry.update_port(_LEADER_PORT)
-                        promoted = UIServer(broker, port=_LEADER_PORT, registry=registry, sock=leader_sock)
+                        promoted = UIServer(
+                            broker, port=_LEADER_PORT, registry=registry,
+                            sock=leader_sock, artifact_registry=artifact_registry,
+                        )
                         sys.stderr.write(f"[claude-crew] promoted to leader: http://127.0.0.1:{_LEADER_PORT}\n")
                         await promoted.serve()
                     except Exception:
