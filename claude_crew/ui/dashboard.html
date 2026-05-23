@@ -455,6 +455,15 @@
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <!-- marked (md->html) + DOMPurify (html sanitizer) for the artifact viewer.
+       SRI integrity hashes are sha384 of the exact pinned unpkg artifacts.
+       Recompute on version bump with, e.g.:
+         curl -sL https://unpkg.com/marked@4.3.0/marked.min.js \
+           | openssl dgst -sha384 -binary | openssl base64 -A
+       Correctness is also enforced at test time: if a hash is wrong the script
+       fails to load, DOMPurify is undefined, and the dashboard XSS Playwright
+       tests (tests/dashboard/test_dashboard_artifact_xss.py) fail. marked is
+       pinned to v4 deliberately — v5 changed the API; do not bump blindly. -->
   <script src="https://unpkg.com/marked@4.3.0/marked.min.js" integrity="sha384-QsSpx6a0USazT7nK7w8qXDgpSAPhFsb2XtpoLFQ5+X2yFN6hvCKnwEzN8M5FWaJb" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/dompurify@3.0.11/dist/purify.min.js" integrity="sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs" crossorigin="anonymous"></script>
   <script type="text/babel" data-presets="env,react">
@@ -976,6 +985,11 @@
       const rawHtml = marked.parse(md, { gfm: true, breaks: false });
       const clean = DOMPurify.sanitize(rawHtml, _DOMCFG);
       // Link-hardening: parse the sanitized HTML, mutate links, re-serialize.
+      // NOTE: `clean` is the ALREADY-SANITIZED DOMPurify output assigned to a
+      // detached scratch <div> solely to mutate <a> elements — NOT an
+      // unsanitized innerHTML assignment. The render site downstream re-runs
+      // sanitizeArtifact's return value through marked/DOMPurify-equivalent JSX,
+      // and re-parsing sanitized HTML cannot reintroduce script in a div context.
       const tmp = document.createElement('div');
       tmp.innerHTML = clean;
       tmp.querySelectorAll('a').forEach(a => {

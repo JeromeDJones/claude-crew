@@ -15,9 +15,9 @@ from unittest.mock import patch
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from claude_crew.artifact_registry import ArtifactRegistry, _MAX_BODY_BYTES
+from claude_crew.artifact_registry import ArtifactRegistry, MAX_BODY_BYTES
 from claude_crew.broker import Broker
-from claude_crew.server import make_server
+from claude_crew.server import build_runtime, make_server
 
 
 def _content_text(result: Any) -> str:
@@ -166,7 +166,7 @@ class TestSurfaceDocumentFileAccessSadPaths:
 
     async def test_artifact_too_large(self, tmp_path: Path) -> None:
         doc = tmp_path / "big.md"
-        doc.write_bytes(b"x" * (_MAX_BODY_BYTES + 1))
+        doc.write_bytes(b"x" * (MAX_BODY_BYTES + 1))
         reg = ArtifactRegistry(crew_id="c1")
         result, text = await self._call(str(doc), reg)
         assert result.isError
@@ -191,3 +191,82 @@ class TestSurfaceDocumentFileAccessSadPaths:
             assert "permission" in text.lower()
         finally:
             doc.chmod(0o644)
+
+    async def test_oversize_rejected_by_stat_precheck(self, tmp_path: Path) -> None:
+        # HIGH-1: a file larger than the cap is rejected via the st_size
+        # pre-check, BEFORE the whole body is read into memory.
+        doc = tmp_path / "huge.md"
+        doc.write_bytes(b"x" * (MAX_BODY_BYTES + 4096))
+        reg = ArtifactRegistry(crew_id="c1")
+        result, text = await self._call(str(doc), reg)
+        assert result.isError
+        assert "limit" in text.lower()
+        # Nothing was stored.
+        assert reg.metadata_list() == []
+
+
+@pytest.mark.anyio
+class TestSurfaceDocumentTitleCap:
+    async def test_title_over_cap_rejected(self, tmp_path: Path) -> None:
+        # MED-4: the title metadata field is length-bounded independent of the
+        # body cap, and rejection happens before the file is even read.
+        doc = tmp_path / "spec.md"
+        doc.write_text("content")
+        reg = ArtifactRegistry(crew_id="c1")
+        async with _client(reg=reg) as s:
+            await s.initialize()
+            result = await s.call_tool(
+                "surface_document", {"path": str(doc), "title": "T" * 513}
+            )
+        assert result.isError
+        assert "title" in _content_text(result).lower()
+        assert reg.metadata_list() == []
+
+    async def test_title_at_cap_accepted(self, tmp_path: Path) -> None:
+        doc = tmp_path / "spec.md"
+        doc.write_text("content")
+        broker = Broker()
+        reg = ArtifactRegistry(crew_id=broker.crew_id)
+        async with _client(reg=reg, broker=broker) as s:
+            await s.initialize()
+            result = await s.call_tool(
+                "surface_document", {"path": str(doc), "title": "T" * 512}
+            )
+        assert not result.isError
+
+
+@pytest.mark.anyio
+class TestBuildRuntimeWiring:
+    """Regression guard for CRIT-1: the production wiring path (build_runtime,
+    used by main()) must thread the artifact registry into BOTH the MCP server
+    and the UI server. The original bug shipped a feature that was dead on
+    arrival — main() never passed artifact_registry, so it defaulted to None and
+    every surface_document / GET /artifact failed in production while all
+    fixture-based tests passed. These tests exercise the real wiring."""
+
+    async def test_ui_disabled_path_wires_working_registry_into_server(
+        self, tmp_path: Path
+    ) -> None:
+        broker, areg, server, registry, ui = build_runtime(ui_port=0)
+        assert areg is not None
+        assert registry is None and ui is None
+        # The server's surface_document must actually work (registry reached
+        # make_server) — not return the "not available" guard error.
+        doc = tmp_path / "spec.md"
+        doc.write_text("# hi")
+        async with create_connected_server_and_client_session(server) as s:
+            await s.initialize()
+            result = await s.call_tool(
+                "surface_document", {"path": str(doc), "title": "T"}
+            )
+        assert not result.isError
+        assert "not available" not in _content_text(result).lower()
+
+    def test_ui_enabled_path_wires_registry_into_ui_server(self) -> None:
+        broker, areg, server, registry, ui = build_runtime(ui_port=8999)
+        assert areg is not None
+        assert registry is not None
+        assert ui is not None
+        # The exact CRIT-1 invariant: the UI server holds the SAME registry
+        # object, not None.
+        assert ui._artifact_registry is areg

@@ -1,8 +1,8 @@
 """Tests for ArtifactRegistry — unit layer.
 
 Covers: store/retrieve happy path, size cap rejection, count cap eviction
-with tombstone, UTF-8 rejection, opaque id uniqueness, path label never
-used as fetch key.
+(evicted ids resolve to None), UTF-8 rejection, opaque id uniqueness, path
+label never used as fetch key.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from claude_crew.artifact_registry import (
     ArtifactRegistry,
     ArtifactTooLarge,
     _MAX_ARTIFACTS,
-    _MAX_BODY_BYTES,
+    MAX_BODY_BYTES,
 )
 
 
@@ -86,7 +86,7 @@ class TestOpaqueness:
 class TestSizeCap:
     def test_exact_limit_accepted(self):
         reg = _reg()
-        body = b"x" * _MAX_BODY_BYTES
+        body = b"x" * MAX_BODY_BYTES
         aid = reg.store(
             path_label="/p",
             title="T",
@@ -97,7 +97,7 @@ class TestSizeCap:
 
     def test_one_byte_over_rejected(self):
         reg = _reg()
-        body = b"x" * (_MAX_BODY_BYTES + 1)
+        body = b"x" * (MAX_BODY_BYTES + 1)
         with pytest.raises(ArtifactTooLarge, match="limit is"):
             reg.store(
                 path_label="/p",
@@ -114,7 +114,7 @@ class TestSizeCap:
                 path_label="/p",
                 title="Big",
                 surfacing_teammate="planner",
-                body_bytes=b"x" * (_MAX_BODY_BYTES + 1),
+                body_bytes=b"x" * (MAX_BODY_BYTES + 1),
             )
         assert len(reg._records) == 1
 
@@ -130,17 +130,19 @@ class TestCountCapEviction:
         assert len(reg._records) == _MAX_ARTIFACTS
         assert reg.get(first_id) is None
 
-    def test_evicted_id_is_tombstoned(self):
+    def test_evicted_id_returns_none(self):
+        # An evicted id is indistinguishable from one that never existed:
+        # get() returns None for both, which drives a clean 404 at the endpoint.
         reg = _reg()
         first_id = _store(reg, title="First", body="first")
         for i in range(_MAX_ARTIFACTS):
             _store(reg, body=f"body {i}")
-        assert reg.is_tombstoned(first_id)
+        assert reg.get(first_id) is None
 
-    def test_non_evicted_id_not_tombstoned(self):
+    def test_non_evicted_id_still_resolves(self):
         reg = _reg()
         aid = _store(reg)
-        assert not reg.is_tombstoned(aid)
+        assert reg.get(aid) is not None
 
     def test_registry_length_never_exceeds_cap(self):
         reg = _reg()

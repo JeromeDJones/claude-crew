@@ -174,14 +174,14 @@ class TestArtifactEndpointSadPaths:
         assert resp.status_code == 404
         assert resp.json()["error"] == "not_found"
 
-    async def test_404_evicted_tombstoned_id(self) -> None:
+    async def test_404_evicted_id(self) -> None:
         broker = Broker()
         reg = _reg(broker.crew_id)
         # Fill to cap + 1 to evict the first entry
         first_id = _store(reg, title="First")
         for i in range(_MAX_ARTIFACTS):
             _store(reg, body=f"body {i}")
-        assert reg.is_tombstoned(first_id)
+        assert reg.get(first_id) is None  # evicted → not found
 
         _, ui = _make_ui(broker=broker, artifact_registry=reg)
         async with _client(ui) as client:
