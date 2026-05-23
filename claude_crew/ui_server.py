@@ -26,6 +26,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from claude_crew.artifact_registry import ArtifactRegistry
 from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
 from claude_crew.instance_registry import InstanceRegistry
 from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
@@ -147,12 +148,14 @@ class UIServer:
         registry: InstanceRegistry | None = None,
         sock: "Any | None" = None,
         cwd: str | None = None,
+        artifact_registry: ArtifactRegistry | None = None,
     ) -> None:
         self._broker = broker
         self._port = port
         self._registry = registry
         self._sock = sock  # pre-bound socket; closed in serve() finally block
         self._cwd = cwd if cwd is not None else os.getcwd()
+        self._artifact_registry = artifact_registry
         self._branch_cache: tuple[str, float] = ("main", 0.0)
         # Count of concurrently parked /wait-messages long-polls (M-2 backstop).
         # Safe as a plain int: asyncio is single-threaded and the check→increment
@@ -415,6 +418,14 @@ class UIServer:
                 }
                 for diag in snapshot.startup_diagnostics
             ],
+            # Artifact metadata (no body). crew_id is load-bearing for the
+            # multi-instance proxy: the leader must route /artifact fetches to
+            # the owning follower when crew_id != self._own_crew_id().
+            "artifacts": (
+                self._artifact_registry.metadata_list()
+                if self._artifact_registry is not None
+                else []
+            ),
         }
         return instance, messages
 
@@ -708,12 +719,87 @@ class UIServer:
         except Exception:
             return JSONResponse({"error": "bad_gateway"}, status_code=502)
 
+    async def _handle_artifact(self, request: Request) -> JSONResponse:
+        """HTTP endpoint for lazy-fetching stored artifact bodies.
+
+        Multi-instance aware: mirrors _handle_tool_output. The dashboard leader
+        aggregates remote followers; artifact bodies live in the OWNING instance's
+        registry. The path carries crew_id so the leader can proxy to the right
+        follower when crew_id != the local broker's crew.
+
+          - crew_id == local broker → serve from local artifact registry;
+          - otherwise → proxy to the owning instance via InstanceRegistry.
+        """
+        try:
+            crew_id = request.path_params["crew_id"]
+            artifact_id = request.path_params["artifact_id"]
+
+            if not _PATH_PARAM_RE.match(crew_id) or not _PATH_PARAM_RE.match(artifact_id):
+                return JSONResponse({"error": "bad_request"}, status_code=400)
+
+            if crew_id == self._own_crew_id():
+                return self._local_artifact_response(artifact_id)
+
+            return await self._proxy_artifact(crew_id, artifact_id)
+        except Exception:
+            _logger.exception("artifact handler error")
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    def _local_artifact_response(self, artifact_id: str) -> JSONResponse:
+        if self._artifact_registry is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        rec = self._artifact_registry.get(artifact_id)
+        if rec is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        return JSONResponse({
+            "artifact_id": rec.artifact_id,
+            "crew_id": rec.crew_id,
+            "title": rec.title,
+            "path_label": rec.path_label,
+            "surfacing_teammate": rec.surfacing_teammate,
+            "timestamp_utc": rec.timestamp_utc,
+            "body": rec.body,
+        })
+
+    async def _proxy_artifact(self, crew_id: str, artifact_id: str) -> JSONResponse:
+        """Proxy an artifact fetch to the instance that owns crew_id.
+
+        Mirror of _proxy_tool_output. The follower receives crew_id == its own
+        broker's crew and serves locally (no re-proxy loop). 404 when unknown /
+        not in registry; 502 when registered but unreachable.
+        """
+        if self._registry is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        target = next(
+            (e for e in self._registry.read_all() if e.get("crew_id") == crew_id),
+            None,
+        )
+        if target is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        port = target.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        url = f"http://127.0.0.1:{port}/artifact/{crew_id}/{artifact_id}"
+        try:
+            resp = await self._http_client.get(url)
+        except Exception:
+            _logger.warning(
+                "artifact proxy to crew %s (port %s) failed",
+                crew_id, port, exc_info=True,
+            )
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+        try:
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception:
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+
     def _make_app(self) -> Starlette:
         return Starlette(routes=[
             Route("/", self._handle_root),
             Route("/api/state", self._handle_state),
             Route("/wait-messages", self._handle_wait_messages),
             Route("/tool-output/{crew_id}/{teammate_id}/{tool_use_id}", self._handle_tool_output),
+            Route("/artifact/{crew_id}/{artifact_id}", self._handle_artifact),
             WebSocketRoute("/ws", self._handle_ws),
         ])
 

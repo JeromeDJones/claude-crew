@@ -7,6 +7,7 @@ inject their own broker; production builds one fresh.
 from __future__ import annotations
 
 import asyncio
+import stat
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from claude_crew.broker import (
     TeammateFactory,
     UnknownTeammateError,
 )
+from claude_crew.artifact_registry import ArtifactNotText, ArtifactRegistry, ArtifactTooLarge
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.subagents._user_loader import (
     _discover_skill_names,
@@ -60,6 +62,7 @@ def make_server(
     home_dir: Path | None = None,
     project_root: Path | None = None,
     ui_port: int | None = None,
+    artifact_registry: ArtifactRegistry | None = None,
 ) -> FastMCP:
     # Capture project_root once at server creation time so list_available_tools
     # returns a stable value for the process lifetime.
@@ -514,6 +517,81 @@ def make_server(
             "skills": skills,
             "plugins": plugins_out,
             "project_root": str(_project_root),
+        }
+
+    @mcp.tool()
+    async def surface_document(path: str, title: str) -> dict[str, Any]:
+        """Surface a markdown document to Mission Control for operator review.
+
+        Reads ``path`` ONCE at call time (snapshot semantics — the stored copy
+        is immutable; later edits to the file are not reflected). The original
+        path is stored as a display label only; the returned ``artifact_id`` is
+        the sole fetch key.
+
+        Path resolution: resolved to an absolute path against the server
+        process cwd. The lead is trusted — no traversal restriction is
+        imposed — but the path must point to an existing regular file.
+
+        Args:
+            path: Filesystem path to the markdown document to surface.
+            title: Human-readable title shown in the Artifacts tray.
+
+        Returns:
+            artifact_id: Opaque UUID4 hex id (never path-derived). Use to
+                reference the artifact in follow-up messages.
+            crew_id: The crew this artifact belongs to.
+        """
+        if artifact_registry is None:
+            raise ToolError(
+                "surface_document is not available: no artifact registry is configured"
+            )
+
+        # Resolve to absolute against cwd (trusted lead; document the contract).
+        resolved = Path(path)
+        if not resolved.is_absolute():
+            resolved = Path.cwd() / resolved
+        resolved = resolved.resolve()
+
+        # File-access sad paths — each returns a clean error, never a traceback.
+        try:
+            file_stat = resolved.stat()
+        except FileNotFoundError:
+            raise ToolError(f"path not found: {path!r}")
+        except PermissionError:
+            raise ToolError(f"permission denied reading: {path!r}")
+        except OSError as exc:
+            raise ToolError(f"OS error accessing {path!r}: {exc}")
+
+        if not stat.S_ISREG(file_stat.st_mode):
+            kind = (
+                "directory" if resolved.is_dir()
+                else "symlink" if resolved.is_symlink()
+                else "non-regular file"
+            )
+            raise ToolError(f"{path!r} is a {kind}, not a regular file")
+
+        try:
+            body_bytes = resolved.read_bytes()
+        except PermissionError:
+            raise ToolError(f"permission denied reading: {path!r}")
+        except OSError as exc:
+            raise ToolError(f"IO error reading {path!r}: {exc}")
+
+        try:
+            artifact_id = artifact_registry.store(
+                path_label=str(resolved),
+                title=title,
+                surfacing_teammate=LEAD_ID,
+                body_bytes=body_bytes,
+            )
+        except ArtifactTooLarge as exc:
+            raise ToolError(str(exc))
+        except ArtifactNotText as exc:
+            raise ToolError(str(exc))
+
+        return {
+            "artifact_id": artifact_id,
+            "crew_id": artifact_registry.crew_id,
         }
 
     # Stash the broker on the server for tests / introspection.
