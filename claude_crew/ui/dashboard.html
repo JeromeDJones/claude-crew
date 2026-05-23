@@ -966,7 +966,8 @@
     //   - External http(s) links: target=_blank rel=noopener noreferrer
     //   - Relative links: href stripped → inert text (never resolved server-side)
     const _DOMCFG = {
-      USE_PROFILES: { html: true },
+      USE_PROFILES: { html: true },  // html profile is the primary allowlist gate
+      FORCE_BODY: true,              // treat input as body fragment; prevents <html>/<head> injection
       FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'script'],
       FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick', 'onmouseover',
                     'onfocus', 'onblur', 'onsubmit', 'action'],
