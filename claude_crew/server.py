@@ -540,7 +540,11 @@ def make_server(
         Returns a RefreshResult dict with:
           ok:       True if the rebuild succeeded; False if build_merged_pack raised.
           error:    Exception repr when ok=False; None otherwise.
-          counts:   Post-refresh pack counts per layer (default/plugin/user/project/total).
+          counts:   Post-refresh pack counts. `total` and `plugin` are populated;
+                    `default`/`user`/`project` are reserved and always 0 in v1
+                    (per-layer attribution can't be recovered from the merged pack
+                    without re-loading each layer). Use `total` for the overall size
+                    and `diff` for what actually changed.
           diff:     {added, removed, changed} role keys vs the prior pack.
           warnings: WARN/INFO records captured during this refresh pass.
           note:     Human-readable future-spawns-only reminder.

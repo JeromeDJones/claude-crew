@@ -46,6 +46,9 @@ def refresh_pack() -> RefreshResult: ...
   "ok": True,                        # False iff rebuild raised; pack unchanged
   "error": None | "<error str>",     # exception repr when ok=False
   "counts": {                        # post-refresh effective pack
+    # v1: `total` and `plugin` are populated; `default`/`user`/`project` are
+    # reserved and always 0 (per-layer attribution is not recoverable from the
+    # merged pack without re-loading each layer — deferred follow-up).
     "default": int, "plugin": int, "user": int, "project": int, "total": int
   },
   "diff": {
