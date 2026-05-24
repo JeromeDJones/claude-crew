@@ -373,3 +373,130 @@ class TestRefreshMalformedFileIsolated:
         assert f.agent_def_resolver("good-role") is not None, (
             "good-role must still be resolvable after refresh that isolated bad.md"
         )
+
+
+# ---------------------------------------------------------------------------
+# AT-5, AT-9, AT-10, AT-11: MCP tool integration
+# ---------------------------------------------------------------------------
+
+import json
+import asyncio
+from mcp.shared.memory import create_connected_server_and_client_session
+from claude_crew.server import make_server
+
+
+def _content_json(result) -> dict:
+    if hasattr(result, "structuredContent") and result.structuredContent is not None:
+        return result.structuredContent
+    return json.loads(result.content[0].text)
+
+
+class TestRefreshAgentsMcpTool:
+    """AT-5, AT-9, AT-10, AT-11: refresh_agents registered as an MCP tool."""
+
+    # AT-5: future-spawns-only in docstring and RefreshResult.note
+    def test_docstring_contains_future_spawns_only(self) -> None:
+        """AT-5a: The refresh_agents tool docstring contains 'future-spawns-only'."""
+        mcp = make_server()
+        # FastMCP stores tools; look up the registered tool function's docstring.
+        # The tool is exposed via mcp._tool_manager or the tools list.
+        tool_map = mcp._tool_manager._tools  # type: ignore[attr-defined]
+        assert "refresh_agents" in tool_map, "refresh_agents tool not registered"
+        tool = tool_map["refresh_agents"]
+        # The docstring lives on the fn attribute
+        doc = tool.fn.__doc__ or ""
+        assert "future-spawns-only" in doc, (
+            f"refresh_agents docstring must contain 'future-spawns-only'; got: {doc!r}"
+        )
+
+    async def test_refresh_result_note_contains_future_spawns_only(self) -> None:
+        """AT-5b: RefreshResult.note from stub-mode contains 'future-spawns-only'."""
+        mcp = make_server()
+        async with create_connected_server_and_client_session(mcp) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("refresh_agents", {}))
+        assert "future-spawns-only" in result.get("note", ""), (
+            f"note must contain 'future-spawns-only'; got: {result.get('note')!r}"
+        )
+
+    # AT-10: stub-mode no-op refresh
+    async def test_stub_mode_refresh_returns_ok_empty_diff(self) -> None:
+        """AT-10: stub-mode refresh_agents returns ok=True with empty diff."""
+        mcp = make_server()
+        async with create_connected_server_and_client_session(mcp) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("refresh_agents", {}))
+        assert result["ok"] is True
+        assert result["diff"] == {"added": [], "removed": [], "changed": []}
+        assert result["warnings"] == []
+        assert result["counts"]["total"] == 0
+
+    # AT-9: sdk-mode happy path through make_server
+    async def test_sdk_mode_refresh_returns_refresh_result_shape(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """AT-9: sdk-mode make_server refresh_agents returns valid RefreshResult shape."""
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        f = _make_sdk_factory(monkeypatch, home, project)
+        # Bypass auth check — tests don't have real Claude credentials.
+        monkeypatch.setattr("claude_crew.server.validate_auth_or_exit", lambda: None)
+        mcp = make_server(factory=f)
+
+        async with create_connected_server_and_client_session(mcp) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("refresh_agents", {}))
+
+        assert result["ok"] is True
+        assert "diff" in result
+        assert "added" in result["diff"]
+        assert "removed" in result["diff"]
+        assert "changed" in result["diff"]
+        assert "counts" in result
+        assert "total" in result["counts"]
+        assert "warnings" in result
+        assert "note" in result
+
+    # AT-11: sdk-mode sad path — malformed file, server does not crash
+    async def test_sdk_mode_malformed_file_ok_and_server_alive(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """AT-11: malformed project agent yields ok=True warning, server still responds."""
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        agents_dir = project / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+
+        # Write a malformed agent file
+        (agents_dir / "bad.md").write_text(
+            "---\ndescription: x\ntools: [Read\n---\nBroken."
+        )
+
+        f = _make_sdk_factory(monkeypatch, home, project)
+        # Bypass auth check — tests don't have real Claude credentials.
+        monkeypatch.setattr("claude_crew.server.validate_auth_or_exit", lambda: None)
+        mcp = make_server(factory=f)
+
+        async with create_connected_server_and_client_session(mcp) as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("refresh_agents", {}))
+
+            # ok=True: bad file is isolated, not a fatal error
+            assert result["ok"] is True, f"expected ok=True; got {result}"
+
+            # warnings references the bad file
+            warning_messages = [w["message"] for w in result.get("warnings", [])]
+            assert any("bad.md" in msg for msg in warning_messages), (
+                f"expected a warning referencing 'bad.md'; got: {warning_messages}"
+            )
+
+            # Server is still alive — list_crew still responds
+            crew_result = _content_json(await s.call_tool("list_crew", {}))
+            assert "teammates" in crew_result, (
+                f"list_crew must still respond after malformed refresh; got: {crew_result}"
+            )
