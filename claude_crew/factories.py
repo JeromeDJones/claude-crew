@@ -7,8 +7,10 @@ decide whether to invoke `validate_auth_or_exit()` at startup.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
+import threading
 from pathlib import Path
 
 from claude_crew.broker import TeammateFactory
@@ -106,6 +108,24 @@ _STARTUP_SOURCE_LOGGERS: tuple[str, ...] = (
     "claude_crew.subagents._user_loader",
     "claude_crew.factories",
 )
+
+
+@dataclasses.dataclass
+class _PackState:
+    """Mutable holder for the merged agent pack state.
+
+    All three mutable fields (pack, role_ss, bodies) are read live at every
+    call-site so that a future refresh() can swap them atomically without
+    re-wiring closures.  home_dir and project_root are frozen at startup and
+    used as the roots for any subsequent refresh.
+    """
+
+    pack: dict  # dict[str, AgentDefinition]
+    role_ss: dict  # dict[str, list[str] | None]
+    bodies: dict  # dict[str, str]
+    home_dir: Path | None  # frozen at startup; refresh reuses
+    project_root: Path | None  # frozen at startup; refresh reuses
+    _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
 
 def _propagates_to_root(logger_name: str) -> bool:
@@ -210,6 +230,17 @@ def default_factory(
                     src.setLevel(prev)
         startup_diagnostics = collector_handler.freeze()
 
+        # Mutable holder: every read-site reads fields LIVE off this object
+        # so a future refresh() can atomically swap the pack without re-wiring
+        # closures.  home_dir / project_root are frozen at startup.
+        holder = _PackState(
+            pack=merged_pack,
+            role_ss=role_ss,
+            bodies=merged_bodies,
+            home_dir=home_dir,
+            project_root=project_root,
+        )
+
         def _resolve_role(requested: str) -> str:
             """Promote a bare role name to a namespaced plugin key when the
             promotion is unambiguous.
@@ -218,7 +249,7 @@ def default_factory(
             surface form. A lead may still spawn by the bare role name (legacy
             usage, or matching a name they saw in another tool). We resolve:
 
-            - Exact match in merged_pack → use as-is.
+            - Exact match in holder.pack → use as-is.
             - No exact match, and exactly one ``*:requested`` exists → promote,
               log INFO so the operator sees the trail.
             - Multiple ``*:requested`` candidates → WARN listing them; fall
@@ -226,10 +257,11 @@ def default_factory(
               AgentDef path). The lead has to disambiguate.
             - Zero candidates → fall through; existing unknown-role behavior.
             """
-            if requested in merged_pack:
+            current_pack = holder.pack
+            if requested in current_pack:
                 return requested
             candidates = sorted(
-                k for k in merged_pack if k.endswith(f":{requested}")
+                k for k in current_pack if k.endswith(f":{requested}")
             )
             if len(candidates) == 1:
                 logger.info(
@@ -252,6 +284,11 @@ def default_factory(
             extra_tools: list[str] | None = None,
             extra_skills: list[str] | None = None,
         ) -> Teammate:
+            # Read holder fields live at call time (not captured at closure build).
+            current_pack = holder.pack
+            current_role_ss = holder.role_ss
+            current_bodies = holder.bodies
+
             role = _resolve_role(role)
             # Warn about unknown extra skills at spawn time.
             if extra_skills:
@@ -265,8 +302,8 @@ def default_factory(
                         )
 
             if extra_tools or extra_skills:
-                # Per-spawn patched agents dict — original merged_pack must not be mutated.
-                agent_def = merged_pack.get(role)
+                # Per-spawn patched agents dict — original pack must not be mutated.
+                agent_def = current_pack.get(role)
                 if agent_def is not None:
                     pack_tools = agent_def.tools or []
                     pack_skills = agent_def.skills or []
@@ -308,16 +345,16 @@ def default_factory(
                             )
 
                 # Fresh dict per spawn — no shared mutable reference
-                effective_agents = {**merged_pack, role: patched_def}
+                effective_agents = {**current_pack, role: patched_def}
             else:
-                effective_agents = merged_pack
+                effective_agents = current_pack
 
             # If no explicit model override, apply the pack's declared model (with alias resolution).
             # Pack frontmatter `model: opus` is otherwise only applied for subagent dispatch,
             # not when the role is spawned as a top-level claude-crew teammate.
             resolved_model = model
             resolved_effort = effort
-            pack_def = merged_pack.get(role)
+            pack_def = current_pack.get(role)
             if pack_def is not None:
                 if resolved_model is None:
                     pack_model = getattr(pack_def, "model", None)
@@ -334,9 +371,9 @@ def default_factory(
 
             return sdk_factory(
                 id, name, role, model=resolved_model, effort=resolved_effort, agents=effective_agents,
-                pack_bodies=merged_bodies,
+                pack_bodies=current_bodies,
                 cwd=cwd, permission_mode=permission_mode,
-                setting_sources=role_ss.get(role),
+                setting_sources=current_role_ss.get(role),
                 allowed_tools=mcp_extra or None,
             )
 
@@ -350,8 +387,9 @@ def default_factory(
             # finds the same AgentDefinition that the teammate is running on.
             # Without this, a lead spawning by bare name (auto-promoted at
             # factory()) gets a correct teammate but an empty dashboard chip.
+            # Reads holder.pack LIVE so post-refresh state is visible immediately.
             role = _resolve_role(role)
-            agent_def = merged_pack.get(role)
+            agent_def = holder.pack.get(role)
             if agent_def is None:
                 return None
             pack_model = getattr(agent_def, "model", None)
@@ -365,5 +403,7 @@ def default_factory(
         # Frozen startup diagnostics tuple; consumed by make_server() when it
         # constructs the default Broker (Broker(startup_diagnostics=...)).
         factory.startup_diagnostics = startup_diagnostics  # type: ignore[attr-defined]
+        # Expose the holder so tests (and future refresh() wiring) can reach it.
+        factory._holder = holder  # type: ignore[attr-defined]
         return factory
     return stub_factory
