@@ -29,7 +29,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### Core components
 
-**`server.py`** — FastMCP server. Exposes 8 tools to the lead: `spawn_teammate`, `send_to`, `broadcast`, `get_messages` (long-poll via `wait_seconds`), `list_crew`, `kill_teammate`, `get_teammate_status`, `get_transcript_path`. This is the only surface the lead touches.
+**`server.py`** — FastMCP server. Exposes 12 tools to the lead: `spawn_teammate`, `send_to`, `broadcast`, `get_messages` (long-poll via `wait_seconds`), `get_wait_endpoint` (non-blocking message-wait URL), `list_crew`, `kill_teammate`, `get_teammate_status`, `get_transcript_path`, `list_available_tools`, `refresh_agents` (reload agent definitions from disk into the in-memory pack; future-spawns-only), `surface_document` (push a markdown artifact to Mission Control). This is the only surface the lead touches.
 
 **`broker.py`** — Single source of truth for team state. Owns the teammate registry, append-only message log, per-inbox queues, monotonic sequence counter, and dedup set. Tombstones dead teammates (marks dead, preserves in registry for status queries). Writes lifecycle and envelope records to the transcript sink.
 
