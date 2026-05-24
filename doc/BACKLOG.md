@@ -6,6 +6,28 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-24] Bug: SDK teammate dies (exit 1 / "no text content") on reuse — and we can't see why
+
+### Surfaced during the `agent-pack-refresh` repo-react run: the `rr-slice-reviewer` teammate died 3 times; root cause undiagnosable because we discard the subprocess's stderr
+
+- **What**: During one repo-react feature run, the `rr-slice-reviewer` claude-crew teammate died **three separate times**, each on its **second turn** (i.e. on reuse — the persistent reviewer succeeded on turn 1, then died when sent the next task's review or the workflow-retro question). Every death surfaced to the lead as `{"error":"invalid_response","message":"model returned no text content"}`. The teammate's death record showed `exit_code: 1` in all three cases. The other three persistent roles (planner, plan-reviewer, feature-reviewer) reused across 3+ turns without a single death.
+- **Hard data** (from `get_teammate_status` post-mortem, three instances): cumulative input tokens 250k / 266k / 306k; peak single invocation 53k / 60k / 44k. **All far below Opus's 1M context cap** — so this is NOT context exhaustion (the initial hypothesis, and the prior `[2026-04-30]` 1.3M / 955k-token observations, are a *different* failure). `exit_code: 1` (not 137 SIGKILL/OOM, not 143 SIGTERM) points to an **application-level error inside the CLI subprocess**, not memory pressure.
+- **The blocking observability gap (highest-value fix)**: when a teammate subprocess dies, `claude_crew/sdk_teammate.py::_liveness_poll_loop` reads only `client._transport._process.returncode` and calls `broker._handle_teammate_death(exit_code=returncode)`. **The subprocess's stderr is never captured.** The Python traceback / MCP-hook crash / panic that the `claude` CLI prints on exit-1 is discarded, so the death record carries `exit_code` and timestamps but *no cause*. We literally cannot diagnose any teammate death past "exit 1".
+- **Where**:
+  - `claude_crew/sdk_teammate.py::_liveness_poll_loop` (~L1094-1129) — reads returncode, never stderr.
+  - `claude_crew/broker.py::_handle_teammate_death` + the death-record dataclass (~L49-82) — has slots for exit_code, tokens, last tool, subagents; **no `stderr_tail` field**.
+  - `maxTurns` plumbing gap (secondary finding, see below): `sdk_teammate.py::_run` (~L1139-1221) builds `ClaudeAgentOptions` from model/effort/permissionMode/skills/disallowedTools/mcpServers but **never sets `max_turns`** — so a role pack's `maxTurns:` (e.g. `rr-slice-reviewer.md` declares `maxTurns: 20`) is silently dropped for top-level teammates (honored only for subagent dispatch via `AgentDefinition.maxTurns`). Declared config that does nothing is its own bug.
+- **Suspect lead (not confirmed)**: one of the dead reviewers' last completed tool was `mcp__plugin_context-mode_context-mode__ctx_execute` running 94s — i.e. the **context-mode plugin (from the operator's `~/.claude.json`) is loaded inside teammate subprocesses** and was routing pytest through itself. A third-party plugin's aggressive PreToolUse hooks + MCP routing inside a long-running SDK subprocess is a plausible destabilizer for the exit-1 crash. Teammates inherit user-level MCP/plugin config with no isolation knob.
+- **Why it matters**: Teammate deaths are currently undebuggable in production. The lead recovers (respawn + re-send works — all three slice-reviews ultimately passed), but each death costs a respawn and the *cause stays invisible*. This will recur on any long-tool reviewer and we'll be blind again.
+- **Suggested action** (in priority order):
+  1. **Capture subprocess stderr on death.** In `_handle_teammate_death` (or the poll loop just before it), drain a bounded tail (e.g. last 4 KB) of the CLI subprocess's stderr and store it on the death record + transcript. Single highest-leverage change — turns "exit 1" into a stack trace. *Verify the SDK transport exposes the stderr stream; if the SDK swallows it, may need an SDK-side ask or a stderr pipe at spawn.*
+  2. **Reproduce with stderr in hand**: re-run a reviewer-style teammate for 2 turns each invoking a ~90s Bash/MCP tool; inspect the captured stderr to confirm whether it's the context-mode hook, an SDK session-resume error, or something else.
+  3. **Plumb `maxTurns`** from the role pack to `ClaudeAgentOptions(max_turns=...)` for top-level teammates — or, if intentionally unsupported, drop `maxTurns:` from the role packs so it doesn't read as enforced.
+  4. **Consider a teammate plugin/MCP isolation knob** (e.g. spawn teammates with a minimal MCP set, excluding operator-environment plugins like context-mode) so the operator's local tooling can't destabilize crew subprocesses.
+- **Operator mitigation used this run (works today)**: coordinator pre-runs the heavy suite itself and hands the result to a *lean* reviewer prompt (reviewer doesn't run pytest). Note: measured pytest output is only ~98 lines, so this is NOT primarily a context-size win — it reduces tool invocations / turn complexity, which empirically helped task-3's review pass. Real fix is #1–#2 above.
+
+---
+
 ## [2026-05-20] Feature: click-to-view-tool-output — redaction follow-ups (sentinel)
 
 ### Deferred items from the security pass on the tool-output feature (shipped via repo-react)
