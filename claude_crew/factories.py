@@ -61,6 +61,25 @@ def stub_factory(
 stub_factory.requires_auth = False  # type: ignore[attr-defined]
 
 
+def _stub_refresh_pack() -> dict:
+    """No-op refresh for stub mode.
+
+    Returns the empty-diff / zero-counts RefreshResult so make_server() can
+    register refresh_agents unconditionally without sdk-mode being required.
+    """
+    return {
+        "ok": True,
+        "error": None,
+        "counts": {"default": 0, "plugin": 0, "user": 0, "project": 0, "total": 0},
+        "diff": {"added": [], "removed": [], "changed": []},
+        "warnings": [],
+        "note": _REFRESH_NOTE,
+    }
+
+
+stub_factory.refresh_pack = _stub_refresh_pack  # type: ignore[attr-defined]
+
+
 def sdk_factory(
     id: str, name: str, role: str,
     *, model: str | None = None, effort: str | None = None,
@@ -110,6 +129,11 @@ _STARTUP_SOURCE_LOGGERS: tuple[str, ...] = (
 )
 
 
+_REFRESH_NOTE = (
+    "future-spawns-only: running teammates keep their original AgentDefinition snapshot."
+)
+
+
 @dataclasses.dataclass
 class _PackState:
     """Mutable holder for the merged agent pack state.
@@ -126,6 +150,108 @@ class _PackState:
     home_dir: Path | None  # frozen at startup; refresh reuses
     project_root: Path | None  # frozen at startup; refresh reuses
     _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+
+    def refresh(self) -> dict:
+        """Re-read agent definitions from disk and atomically swap the pack.
+
+        Re-invokes ``build_merged_pack`` against the same ``home_dir`` /
+        ``project_root`` captured at startup (never ``Path.cwd()``). On
+        success, atomically replaces ``pack``, ``role_ss``, and ``bodies``
+        under the holder's lock.  On failure the prior pack is left
+        untouched and ``ok=False`` is returned.
+
+        Returns a ``RefreshResult`` dict (JSON-serialisable).
+        """
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        # Snapshot current pack for diff comparison (outside the lock —
+        # grabbing a reference is atomic at the Python level).
+        old_pack: dict = self.pack
+
+        new_pack: dict | None = None
+        new_role_ss: dict | None = None
+        new_bodies: dict | None = None
+        error_str: str | None = None
+
+        # Run the rebuild inside a diagnostic capture window — mirrors the
+        # startup path in default_factory().
+        with collect_startup_diagnostics() as coll:
+            extra_attached, restore_pairs = _direct_attach_fallbacks(coll)
+            try:
+                new_pack, new_role_ss, new_bodies = build_merged_pack(
+                    home_dir=self.home_dir,
+                    project_root=self.project_root,
+                )
+            except Exception as exc:
+                error_str = repr(exc)
+            finally:
+                for src in extra_attached:
+                    src.removeHandler(coll)
+                for src, prev in restore_pairs:
+                    src.setLevel(prev)
+
+        diags = coll.freeze()  # idempotent; context exit already froze it
+
+        warnings = [
+            {"level": d.level, "logger": d.source, "message": d.message}
+            for d in diags
+        ]
+
+        if error_str is not None:
+            # Rebuild failed — leave state untouched.
+            return {
+                "ok": False,
+                "error": error_str,
+                "counts": {
+                    "default": 0, "plugin": 0, "user": 0, "project": 0, "total": 0,
+                },
+                "diff": {"added": [], "removed": [], "changed": []},
+                "warnings": warnings,
+                "note": _REFRESH_NOTE,
+            }
+
+        # Compute diff: added, removed, changed.
+        # Role keys exactly match merged_pack keys: bare for default/user/project,
+        # "<plugin>:<role>" for plugin agents (AT-7).
+        # Use dataclasses.asdict for deterministic field comparison (AT-2).
+        assert new_pack is not None  # error_str is None → new_pack was set
+        added = sorted(k for k in new_pack if k not in old_pack)
+        removed = sorted(k for k in old_pack if k not in new_pack)
+        changed = sorted(
+            k for k in new_pack
+            if k in old_pack
+            and dataclasses.asdict(new_pack[k]) != dataclasses.asdict(old_pack[k])
+        )
+
+        # Counts: plugin agents use "<plugin>:<role>" keys (namespaced).
+        # Per-layer breakdown for default/user/project is not recoverable from
+        # the merged result without re-loading each layer separately; plugin count
+        # is derivable from key shape.  total is authoritative.
+        plugin_count = sum(1 for k in new_pack if ":" in k)
+        counts = {
+            "default": 0,
+            "plugin": plugin_count,
+            "user": 0,
+            "project": 0,
+            "total": len(new_pack),
+        }
+
+        # Atomic swap — only executed on rebuild success (AT-4).
+        assert new_role_ss is not None
+        assert new_bodies is not None
+        with self._lock:
+            self.pack = new_pack
+            self.role_ss = new_role_ss
+            self.bodies = new_bodies
+
+        return {
+            "ok": True,
+            "error": None,
+            "counts": counts,
+            "diff": {"added": added, "removed": removed, "changed": changed},
+            "warnings": warnings,
+            "note": _REFRESH_NOTE,
+        }
 
 
 def _propagates_to_root(logger_name: str) -> bool:
@@ -378,6 +504,9 @@ def default_factory(
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]
+        # Callable returning RefreshResult dict; consumed by the refresh_agents
+        # MCP tool (task 3 — mcp-refresh-agents-tool).
+        factory.refresh_pack = holder.refresh  # type: ignore[attr-defined]
         # Expose the merged pack to the broker so it can snapshot each
         # teammate's resolved AgentDefinition at spawn time. Without this,
         # production teammates have no `config` block and dashboard chips
