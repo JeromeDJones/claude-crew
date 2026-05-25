@@ -2173,3 +2173,43 @@ class TestBrokerEnvPassthrough:
             f"factory must receive env=None (or no env kwarg) when env omitted; "
             f"got env={env_value!r}"
         )
+
+
+# ---------- snapshot is_local (local-backend detection) ----------
+
+class TestSnapshotIsLocal:
+    """LiveTeammateInfo.is_local is derived from the teammate's env carrying
+    ANTHROPIC_BASE_URL — the signal that it's routed to a local backend."""
+
+    @staticmethod
+    def _env_factory(env):
+        def factory(id, name, role, **_kwargs):
+            tm = _NoopTeammate(id=id, name=name, role=role)
+            tm._env = env
+            return tm
+        return factory
+
+    async def test_is_local_true_when_env_has_base_url(self, broker: Broker) -> None:
+        f = self._env_factory({"ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+                               "ANTHROPIC_API_KEY": "sk-x"})
+        await broker.spawn_teammate(role="r", name=None, factory=f)
+        snap = broker.snapshot()
+        assert snap.live[0].is_local is True
+
+    async def test_is_local_false_for_plain_teammate(self, broker: Broker) -> None:
+        # _NoopTeammate has no _env attribute at all.
+        await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        snap = broker.snapshot()
+        assert snap.live[0].is_local is False
+
+    async def test_is_local_false_when_env_lacks_base_url(self, broker: Broker) -> None:
+        f = self._env_factory({"SOME_OTHER_VAR": "value"})
+        await broker.spawn_teammate(role="r", name=None, factory=f)
+        snap = broker.snapshot()
+        assert snap.live[0].is_local is False
+
+    async def test_is_local_false_when_env_none(self, broker: Broker) -> None:
+        f = self._env_factory(None)
+        await broker.spawn_teammate(role="r", name=None, factory=f)
+        snap = broker.snapshot()
+        assert snap.live[0].is_local is False

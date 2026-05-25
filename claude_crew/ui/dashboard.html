@@ -572,32 +572,45 @@
     }
 
     // --- ContextWindowBar ---
-    // Renders the PEAK single-LLM-invocation input from the last turn as
-    // utilization vs. the model's context window. This is the actual cliff
-    // signal — each tool call inside a turn triggers a separate LLM invocation,
-    // and the API bills the SUM (which can be many times the window size for a
-    // tool-heavy turn). The peak-per-invocation is what tells you whether any
-    // one invocation is near the wall. Tooltip exposes both numbers so the
-    // distinction is visible.
-    function ContextWindowBar({ lastTurn, totalIn, totalOut }) {
-      const peak       = lastTurn && typeof lastTurn.peak_in === "number" ? lastTurn.peak_in : 0;
-      const turnSumIn  = lastTurn && typeof lastTurn.in      === "number" ? lastTurn.in      : 0;
-      const turnSumOut = lastTurn && typeof lastTurn.out     === "number" ? lastTurn.out     : 0;
-      const pct  = Math.min(1, peak / CONTEXT_WINDOW_LIMIT);
-      const cls  = ctxBarClass(pct);
-      const widthPct = (pct * 100).toFixed(1) + "%";
-      const tooltip =
-        `peak invocation: ${peak.toLocaleString()} in` +
-        ` (${(pct * 100).toFixed(0)}% of ${fmtTokens(CONTEXT_WINDOW_LIMIT)} window)\n` +
-        `last turn billed: ${turnSumIn.toLocaleString()} in · ${turnSumOut.toLocaleString()} out` +
-        ` (sum across all LLM calls in the turn)\n` +
-        `cumulative: ${totalIn.toLocaleString()} in · ${totalOut.toLocaleString()} out`;
+    // Context-window utilization, source-agnostic. The server's strategy
+    // resolver emits a canonical agent.ctx_window = {used, limit, pct, source,
+    // cache_hit_pct?}: for Anthropic teammates `used` is the peak single-LLM
+    // invocation input vs the 200k window (the cliff signal — the API bills the
+    // SUM across a turn's invocations, but peak-per-invocation is what nears the
+    // wall); for local teammates it's the live /slots context occupancy vs the
+    // model's real window, plus cache-hit. Falls back to the legacy
+    // lastTurn-derived Anthropic computation if ctx_window is absent.
+    function ContextWindowBar({ ctxWindow, lastTurn, totalIn, totalOut }) {
+      const cw         = ctxWindow || null;
+      const source     = cw && cw.source ? cw.source : "anthropic";
+      const isLocal    = source === "local";
+      const legacyPeak = lastTurn && typeof lastTurn.peak_in === "number" ? lastTurn.peak_in : 0;
+      const used       = cw && typeof cw.used  === "number" ? cw.used  : legacyPeak;
+      const limit      = cw && typeof cw.limit === "number" && cw.limit > 0 ? cw.limit : CONTEXT_WINDOW_LIMIT;
+      const pct        = cw && typeof cw.pct === "number"
+        ? cw.pct
+        : (limit > 0 ? (used / limit) * 100 : 0);
+      const frac       = Math.min(1, pct / 100);
+      const cls        = ctxBarClass(frac);
+      const widthPct   = pct.toFixed(1) + "%";
+      const turnSumIn  = lastTurn && typeof lastTurn.in  === "number" ? lastTurn.in  : 0;
+      const turnSumOut = lastTurn && typeof lastTurn.out === "number" ? lastTurn.out : 0;
+      const cacheHit   = cw && typeof cw.cache_hit_pct === "number" ? cw.cache_hit_pct : null;
+      const tooltip = isLocal
+        ? `local model context\n` +
+          `${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct.toFixed(1)}%)` +
+          (cacheHit !== null ? `\ncache hit: ${cacheHit.toFixed(1)}%` : "")
+        : `peak invocation: ${used.toLocaleString()} in` +
+          ` (${pct.toFixed(0)}% of ${fmtTokens(limit)} window)\n` +
+          `last turn billed: ${turnSumIn.toLocaleString()} in · ${turnSumOut.toLocaleString()} out` +
+          ` (sum across all LLM calls in the turn)\n` +
+          `cumulative: ${(totalIn || 0).toLocaleString()} in · ${(totalOut || 0).toLocaleString()} out`;
       return (
         <span className="ctx-window-bar" title={tooltip}>
           <span className="ctx-window-bar-track">
             <span className={`ctx-window-bar-fill ${cls}`} style={{ width: widthPct }}/>
           </span>
-          <span>{fmtTokens(peak)}/{fmtTokens(CONTEXT_WINDOW_LIMIT)}</span>
+          <span>{fmtTokens(used)}/{fmtTokens(limit)}</span>
         </span>
       );
     }
@@ -1713,6 +1726,7 @@
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
               <ModelBadge model={agent.model} activeModel={agent.active_model}/>
               <ContextWindowBar
+                ctxWindow={agent.ctx_window}
                 lastTurn={agent.last_turn || { in: 0, out: 0 }}
                 totalIn={agent.tokens.in}
                 totalOut={agent.tokens.out}
@@ -1798,6 +1812,7 @@
           <div className="roster-row-meta">
             <ModelBadge model={agent.model} activeModel={agent.active_model}/>
             <ContextWindowBar
+              ctxWindow={agent.ctx_window}
               lastTurn={agent.last_turn || { in: 0, out: 0 }}
               totalIn={agent.tokens.in}
               totalOut={agent.tokens.out}
