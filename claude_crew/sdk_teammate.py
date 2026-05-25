@@ -74,6 +74,15 @@ MAX_CONCURRENT_TOOLS: int = 64
 
 _SHUTDOWN_SENTINEL: object = object()
 
+# Crew-level env defaults injected into every SDK subprocess.
+# Both keys exist for sound reasons — see the docstring in _run() for details.
+# A caller may override individual keys via the `env` ctor kwarg; a WARN log
+# accompanies any such override (visibility, not a hard error).
+CREW_DEFAULTS: dict[str, str] = {
+    "CLAUDE_CREW_UI_PORT": "0",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
 
 # F7: Subagent-activity envelope dataclasses.
 @dataclasses.dataclass(frozen=True)
@@ -477,6 +486,7 @@ class SdkTeammate(Teammate):
         cwd: str | None = None,
         permission_mode: str | None = None,
         allowed_tools: "list[str] | None" = None,
+        env: "dict[str, str] | None" = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -554,6 +564,15 @@ class SdkTeammate(Teammate):
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._allowed_tools = allowed_tools
+        # Validate and store per-teammate env override.
+        if env is not None:
+            for k, v in env.items():
+                if not isinstance(v, str):
+                    raise TypeError(
+                        f"SdkTeammate env values must be str; got {type(v).__name__!r} "
+                        f"for key {k!r}"
+                    )
+        self._env: "dict[str, str] | None" = env
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
@@ -1128,6 +1147,22 @@ class SdkTeammate(Teammate):
                     )
                 return  # poll task exits after triggering death handler
 
+    def _build_merged_env(self) -> dict[str, str]:
+        """Return the merged env dict for ClaudeAgentOptions.
+
+        Caller-supplied keys win over CREW_DEFAULTS. A WARN log fires for each
+        key the caller overrides so the operator has visibility.
+        """
+        caller_env = self._env or {}
+        for key in CREW_DEFAULTS:
+            if key in caller_env:
+                logger.warning(
+                    "SdkTeammate %s: caller env overrides crew-default key %r "
+                    "with value %r — crew default was %r",
+                    self.id, key, caller_env[key], CREW_DEFAULTS[key],
+                )
+        return {**CREW_DEFAULTS, **caller_env}
+
     async def _run(self) -> None:
         # D6: Log env override for CLAUDE_CREW_TOOL_ARGS_FULL if set.
         if os.environ.get("CLAUDE_CREW_TOOL_ARGS_FULL") == "1":
@@ -1154,10 +1189,11 @@ class SdkTeammate(Teammate):
             # entries. The operator's interactive `claude` session is unaffected
             # (this env scoping applies only to subprocesses spawned via the SDK).
             # Spike: doc/research/auto-memory-disable-sdk-behavior.md.
-            "env": {
-                "CLAUDE_CREW_UI_PORT": "0",
-                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-            },
+            #
+            # Merge: crew defaults first, then caller-supplied env (caller wins).
+            # WARN if caller overrides a CREW_DEFAULTS key — both defaults are
+            # load-bearing; visibility is the right friction level.
+            "env": self._build_merged_env(),
         }
         if self._effort is not None:
             opts_kwargs["effort"] = self._effort

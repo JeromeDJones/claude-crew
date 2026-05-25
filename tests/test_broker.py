@@ -2125,3 +2125,51 @@ class TestExtraToolsAndSkills:
         cfg = broker.get_teammate_status(tid)["config"]
         assert cfg["tools"].count("Read") == 1, "duplicate in extra_tools must be deduped"
         assert cfg["extra_tools"].count("Read") == 1
+
+
+# ---------- broker env passthrough (AT 4, AT 5) ----------
+
+
+class TestBrokerEnvPassthrough:
+    """AT 4, AT 5: Broker.spawn_teammate threads env to the factory unchanged."""
+
+    async def test_broker_env_passthrough_forwards_env_to_factory(
+        self, broker: Broker
+    ) -> None:
+        """AT 4: factory receives env={"FOO": "bar"} when caller passes env={"FOO": "bar"}."""
+        received_kwargs: dict = {}
+
+        def spy_factory(id, name, role, **kwargs):
+            received_kwargs.update(kwargs)
+            return _factory(id, name, role, **kwargs)
+
+        await broker.spawn_teammate(
+            role="r", name=None, factory=spy_factory,
+            env={"FOO": "bar"},
+        )
+
+        assert received_kwargs.get("env") == {"FOO": "bar"}, (
+            f"factory must receive env={{'FOO': 'bar'}}, got env={received_kwargs.get('env')!r}"
+        )
+
+    async def test_broker_env_passthrough_none_when_omitted(
+        self, broker: Broker
+    ) -> None:
+        """AT 5: factory receives env=None (or no env kwarg) when caller omits env."""
+        received_kwargs: dict = {}
+
+        def spy_factory(id, name, role, **kwargs):
+            received_kwargs.update(kwargs)
+            return _factory(id, name, role, **kwargs)
+
+        await broker.spawn_teammate(
+            role="r", name=None, factory=spy_factory,
+            # env intentionally omitted
+        )
+
+        # Either env is absent from kwargs or it is explicitly None — no spurious empty dict.
+        env_value = received_kwargs.get("env", None)
+        assert env_value is None, (
+            f"factory must receive env=None (or no env kwarg) when env omitted; "
+            f"got env={env_value!r}"
+        )

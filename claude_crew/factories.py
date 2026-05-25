@@ -50,8 +50,9 @@ def stub_factory(
     setting_sources: list[str] | None = None,
     extra_tools: list[str] | None = None,
     extra_skills: list[str] | None = None,
+    env: "dict[str, str] | None" = None,
 ) -> Teammate:
-    # Stub ignores model/effort/cwd/permission_mode/setting_sources/extra_tools/extra_skills
+    # Stub ignores model/effort/cwd/permission_mode/setting_sources/extra_tools/extra_skills/env
     # — kept for signature uniformity with sdk_factory.
     return StubTeammate(id=id, name=name, role=role)
 
@@ -69,6 +70,7 @@ def sdk_factory(
     allowed_tools: list[str] | None = None,
     extra_tools: list[str] | None = None,
     extra_skills: list[str] | None = None,
+    env: "dict[str, str] | None" = None,
 ) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
@@ -90,6 +92,8 @@ def sdk_factory(
         kwargs["setting_sources"] = setting_sources
     if allowed_tools is not None:
         kwargs["allowed_tools"] = allowed_tools
+    if env is not None:
+        kwargs["env"] = env
     return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
@@ -251,6 +255,7 @@ def default_factory(
             cwd: str | None = None, permission_mode: str | None = None,
             extra_tools: list[str] | None = None,
             extra_skills: list[str] | None = None,
+            env: "dict[str, str] | None" = None,
         ) -> Teammate:
             role = _resolve_role(role)
             # Warn about unknown extra skills at spawn time.
@@ -338,6 +343,7 @@ def default_factory(
                 cwd=cwd, permission_mode=permission_mode,
                 setting_sources=role_ss.get(role),
                 allowed_tools=mcp_extra or None,
+                env=env,
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]

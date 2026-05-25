@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from claude_crew.auth import validate_auth_or_exit
+from claude_crew.local_backend import local_backend_env
 from claude_crew.subagents._loader import _VALID_PERMISSION_MODES
 from claude_crew.broker import (
     LEAD_ID,
@@ -143,6 +144,8 @@ def make_server(
         permission_mode: str | None = None,
         extra_tools: list[str] | None = None,
         extra_skills: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        local_backend: bool | dict | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
@@ -178,6 +181,15 @@ def make_server(
                 connection — no separate mcpServers configuration needed.
             extra_skills: Optional list of additional skill names to grant
                 beyond the pack's declared skills. Additive only.
+            env: Optional dict of environment variables to set for the
+                teammate subprocess. Keys and values must both be strings.
+                Empty keys are rejected. Caller keys win on conflict with
+                crew defaults; use with care.
+            local_backend: Optional preset for routing the teammate through a
+                local model backend (e.g. ccr / llama.cpp). Pass True to use
+                default settings (base_url=http://127.0.0.1:3456), or a dict
+                with optional "base_url" and/or "api_key" overrides. Explicit
+                env keys win over preset values.
         """
         if permission_mode is not None and permission_mode not in _VALID_PERMISSION_MODES:
             raise ToolError(
@@ -195,10 +207,40 @@ def make_server(
                 "teammates run as standalone processes outside Claude Code. "
                 "Use Agent instead to spawn subagents."
             )
+
+        # Validate env shape: reject non-string values and empty keys.
+        if env is not None:
+            for key, value in env.items():
+                if not isinstance(key, str) or key == "":
+                    raise ToolError(
+                        f"env key {key!r} is invalid: keys must be non-empty strings"
+                    )
+                if not isinstance(value, str):
+                    raise ToolError(
+                        f"env[{key!r}] has a non-string value ({type(value).__name__}); "
+                        "all env values must be strings"
+                    )
+
+        # Resolve local_backend preset → base env dict (empty if no preset).
+        resolved_env: dict[str, str] | None = None
+        if local_backend:
+            preset_kwargs: dict[str, str] = {}
+            if isinstance(local_backend, dict):
+                if "base_url" in local_backend:
+                    preset_kwargs["base_url"] = local_backend["base_url"]
+                if "api_key" in local_backend:
+                    preset_kwargs["api_key"] = local_backend["api_key"]
+            preset = local_backend_env(**preset_kwargs)
+            # Merge: preset as base, explicit env wins on conflict.
+            resolved_env = {**preset, **(env or {})}
+        elif env:
+            resolved_env = env
+
         tid = await broker.spawn_teammate(
             role=role, name=name, factory=factory,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
             extra_tools=extra_tools, extra_skills=extra_skills,
+            env=resolved_env,
         )
         info = next(t for t in broker.list_crew() if t.id == tid)
         return {"teammate_id": info.id, "name": info.name, "role": info.role}

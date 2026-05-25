@@ -182,15 +182,19 @@ class Broker:
         agent_def_resolver: "AgentDefResolver | None" = None,
         extra_tools: list[str] | None = None,
         extra_skills: list[str] | None = None,
+        env: "dict[str, str] | None" = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
         inbox: asyncio.Queue = asyncio.Queue()
-        teammate = factory(
-            teammate_id, resolved_name, role,
-            model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
-            extra_tools=extra_tools, extra_skills=extra_skills,
-        )
+        factory_kwargs: dict = {
+            "model": model, "effort": effort, "cwd": cwd,
+            "permission_mode": permission_mode,
+            "extra_tools": extra_tools, "extra_skills": extra_skills,
+        }
+        if env is not None:
+            factory_kwargs["env"] = env
+        teammate = factory(teammate_id, resolved_name, role, **factory_kwargs)
         await teammate.start(self, inbox)
 
         self._teammates[teammate_id] = teammate
