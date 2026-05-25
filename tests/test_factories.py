@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from claude_crew import factories
+from claude_crew.factories import default_factory
+from claude_crew.sdk_teammate import SdkTeammate
 from claude_crew.teammate import StubTeammate
 
 
@@ -73,7 +75,6 @@ class TestSdkFactoryAgentInjection:
         dict contains both the bundled pack and the planted one."""
         from textwrap import dedent
 
-        from claude_crew.sdk_teammate import SdkTeammate
 
         home = tmp_path / "home"
         agents_dir = home / ".claude" / "agents"
@@ -115,7 +116,6 @@ class TestSdkFactoryAgentInjection:
         import json
         from textwrap import dedent
 
-        from claude_crew.sdk_teammate import SdkTeammate
 
         home = tmp_path / "home"
         plugins_root = home / ".claude" / "plugins"
@@ -169,7 +169,6 @@ class TestSdkFactoryAgentInjection:
         import logging
         from textwrap import dedent
 
-        from claude_crew.sdk_teammate import SdkTeammate
 
         home = tmp_path / "home"
         plugins_root = home / ".claude" / "plugins"
@@ -329,7 +328,6 @@ class TestSdkFactoryAgentInjection:
         import logging
         from textwrap import dedent
 
-        from claude_crew.sdk_teammate import SdkTeammate
 
         home = tmp_path / "home"
         plugins_root = home / ".claude" / "plugins"
@@ -389,7 +387,6 @@ class TestSpawnChainParams:
 
     def test_sdk_factory_forwards_cwd_to_sdk_teammate(self, monkeypatch) -> None:
         """sdk_factory forwards cwd to SdkTeammate constructor."""
-        from claude_crew.sdk_teammate import SdkTeammate
 
         captured_kwargs = {}
 
@@ -413,7 +410,6 @@ class TestSpawnChainParams:
 
     def test_sdk_factory_forwards_permission_mode_to_sdk_teammate(self, monkeypatch) -> None:
         """sdk_factory forwards permission_mode to SdkTeammate constructor."""
-        from claude_crew.sdk_teammate import SdkTeammate
 
         captured_kwargs = {}
 
@@ -475,7 +471,6 @@ class TestSpawnChainParams:
         import importlib
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
         # Create a new default_factory with the patched function
-        from claude_crew.factories import default_factory
         f = default_factory()
 
         # Call the factory closure with cwd and permission_mode
@@ -501,7 +496,6 @@ class TestSettingSources:
 
     def test_sdk_factory_passes_setting_sources_to_sdk_teammate(self, monkeypatch) -> None:
         """sdk_factory forwards setting_sources=[] to SdkTeammate constructor."""
-        from claude_crew.sdk_teammate import SdkTeammate
 
         captured_kwargs: dict = {}
 
@@ -528,7 +522,6 @@ class TestSettingSources:
         [] means 'no sources' (kwarg present as empty list). A truthiness check would
         incorrectly treat [] as falsy and skip it.
         """
-        from claude_crew.sdk_teammate import SdkTeammate
 
         captured_kwargs: dict = {}
 
@@ -579,7 +572,6 @@ class TestSettingSources:
         monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
 
-        from claude_crew.factories import default_factory
         f = default_factory()
         f("t-1", "alice", "explorer")
 
@@ -613,7 +605,6 @@ class TestSettingSources:
         monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
         monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
 
-        from claude_crew.factories import default_factory
         f = default_factory()
         f("t-1", "bob", "planner")
 
@@ -657,7 +648,6 @@ class TestMakeServerAuthGate:
         """A custom factory with requires_auth=True is also gated, proving
         we use the attribute, not factory identity."""
         from claude_crew.server import make_server
-        from claude_crew.teammate import StubTeammate
 
         def custom_factory(id, name, role, **_kwargs):
             return StubTeammate(id, name, role)
@@ -753,7 +743,6 @@ class TestExtraToolsFactoryClosure:
         """
         import copy
         from claude_agent_sdk.types import AgentDefinition
-        from claude_crew.factories import default_factory
 
         (tmp_path / "home").mkdir()
         (tmp_path / "cwd").mkdir()
@@ -823,7 +812,6 @@ class TestExtraToolsFactoryClosure:
         import asyncio
         from claude_agent_sdk.types import AgentDefinition
         from claude_crew.broker import Broker
-        from claude_crew.factories import default_factory
 
         (tmp_path / "home").mkdir()
         (tmp_path / "cwd").mkdir()
@@ -929,7 +917,6 @@ class TestMcpServerAutoWiring:
     def _make_factory(self, monkeypatch, tmp_path, pack_def):
         """Build a default_factory with a controlled merged pack, capturing sdk_factory calls."""
         import copy
-        from claude_crew.factories import default_factory
 
         (tmp_path / "home").mkdir(exist_ok=True)
         (tmp_path / "cwd").mkdir(exist_ok=True)
@@ -1054,7 +1041,6 @@ class TestPackEffortPromotion:
 
     def _make_factory(self, monkeypatch, tmp_path, pack_def):
         """Build a default_factory with a controlled merged pack, capturing sdk_factory kwargs."""
-        from claude_crew.factories import default_factory
 
         (tmp_path / "home").mkdir(exist_ok=True)
         (tmp_path / "cwd").mkdir(exist_ok=True)
@@ -1121,4 +1107,92 @@ class TestPackEffortPromotion:
 
         assert captured[0]["effort"] is None, (
             f"expected None for unset effort; got {captured[0].get('effort')!r}"
+        )
+
+
+class TestEnvPassthrough:
+    """AT 6: sdk_factory forwards env kwarg to SdkTeammate constructor."""
+
+    def test_sdk_factory_forwards_env_to_sdk_teammate(self, monkeypatch) -> None:
+        """AT 6: sdk_factory(..., env={"X": "y"}) passes env={"X": "y"} to SdkTeammate."""
+
+        captured_kwargs: dict = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        factories.sdk_factory("t-1", "n", "r", env={"X": "y"})
+        assert captured_kwargs.get("env") == {"X": "y"}, (
+            f"expected env={{'X': 'y'}} forwarded to SdkTeammate; got {captured_kwargs.get('env')!r}"
+        )
+
+    def test_sdk_factory_omits_env_kwarg_when_none(self, monkeypatch) -> None:
+        """sdk_factory with env=None must NOT pass env kwarg to SdkTeammate."""
+
+        captured_kwargs: dict = {}
+
+        def mock_sdk_init(self, id, name, role, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.id = id
+            self.name = name
+            self.role = role
+            self._model = kwargs.get("model", "claude-sonnet-4-6")
+            self._effort = kwargs.get("effort")
+            self._cwd = kwargs.get("cwd")
+            self._permission_mode = kwargs.get("permission_mode")
+            self._agents = {}
+
+        monkeypatch.setattr(SdkTeammate, "__init__", mock_sdk_init)
+
+        factories.sdk_factory("t-1", "n", "r", env=None)
+        assert "env" not in captured_kwargs, (
+            f"expected env kwarg absent when None; got {captured_kwargs.get('env')!r}"
+        )
+
+    def test_stub_factory_accepts_env_kwarg_without_error(self) -> None:
+        """stub_factory accepts env kwarg for signature uniformity — ignores the value."""
+        t = factories.stub_factory("t-1", "n", "r", env={"FOO": "bar"})
+        assert isinstance(t, StubTeammate)
+
+    def test_default_factory_closure_forwards_env_to_sdk_factory(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Inner factory closure in default_factory() threads env to sdk_factory."""
+        (tmp_path / "home").mkdir()
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        def mock_build_merged_pack():
+            return {}, {}, {}
+
+        monkeypatch.setattr(
+            "claude_crew.subagents._user_loader.build_merged_pack",
+            mock_build_merged_pack,
+        )
+
+        captured_call_kwargs: dict = {}
+
+        def capturing_sdk_factory(id, name, role, **kwargs):
+            captured_call_kwargs.update(kwargs)
+            return StubTeammate(id, name, role)
+
+        monkeypatch.setattr("claude_crew.factories.sdk_factory", capturing_sdk_factory)
+        monkeypatch.setenv("CLAUDE_CREW_TEAMMATE_MODE", "sdk")
+
+        f = default_factory()
+        f("t-1", "n", "r", env={"X": "y"})
+
+        assert captured_call_kwargs.get("env") == {"X": "y"}, (
+            f"expected env={{'X': 'y'}} forwarded by closure; got {captured_call_kwargs.get('env')!r}"
         )
