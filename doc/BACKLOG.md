@@ -6,6 +6,15 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-25] Feature: ctx-window strategy — per-teammate local attribution at --parallel N
+
+### Local context-window strategy shows the SHARED slot on every local teammate's row at --parallel 1
+
+- **What**: The ctx-window strategy (merged `dfc2a76`) routes each teammate's context bar through `resolve_ctx_window()` — local teammates get the llama.cpp `/slots` gauge, Anthropic teammates get peak/200k. At `--parallel 1` the local model has ONE shared slot, so the `/slots` probe returns a single value and EVERY local teammate's row shows identical used/pct/cache-hit (the shared slot). Truthful, but not per-teammate-distinct. Confirmed live 2026-05-25 (two local workers both showed used=533, pct=0.7, cache=52.6%).
+- **Where**: `claude_crew/ctx_window.py` (resolver), `claude_crew/ui_server.py` `_build_state` (single instance-level `/slots` probe passed to all local agents), `~/dev/llama.cpp/run-gemma.sh` `--parallel`.
+- **Why it matters**: To show *distinct* per-teammate local context, the model must run `--parallel N` (N slots) AND each teammate must be mapped to its slot. The SDK doesn't expose which llama slot a request landed in; correlation is non-trivial. Candidate heuristic: at `--parallel 1` only one local teammate is `is_processing` at a time → attribute the active slot to it; ambiguous at 0 or 2+ active.
+- **Suggested action**: When per-teammate local attribution matters: (1) set `--parallel N` in run-gemma.sh (splits VRAM/ctx across slots — note the 16GB three-way tension); (2) probe all slots from `/slots`; (3) attribute slots to teammates via `id_task` correlation or the single-active-teammate heuristic. The strategy abstraction (one canonical `ctx_window` sink) already supports this — only the **local** strategy's data-source + attribution changes, not the routing or the dashboard. Orthogonal to the strategy design, as intended.
+
 ## [2026-05-24] Feature: per-teammate model/base_url override (mixed local + Anthropic crews)
 
 ### Let a crew run some teammates against a local model (via claude-code-router) while the lead and judgment-heavy roles stay on the Anthropic API
