@@ -138,9 +138,13 @@ Make routing **per-teammate** instead of per-crew-process.
   `base_url`/`api_key`) override from spawn-time through `broker.py`
   (`spawn_teammate` factory signature already carries `model`/`effort`/`cwd`) and
   `factories.py` into the SDK options.
-- **Open question (verify first)**: confirm `claude-agent-sdk`'s
-  `ClaudeAgentOptions` exposes an `env` passthrough to the CLI subprocess against
-  the installed SDK version. If not, may need a subprocess-mode path.
+- **RESOLVED 2026-05-24 (was the architectural fork)**: `claude-agent-sdk`
+  supports per-spawn env. `ClaudeAgentOptions.env: dict[str, str]`
+  (`types.py:1475`); `subprocess_cli.py` (lines ~406-456) builds
+  `process_env = {inherited os.environ minus CLAUDECODE, **options.env}` and
+  passes `env=process_env` to the subprocess — **`options.env` always wins on
+  conflict**. So the feature is a clean thread-through; **no subprocess-mode path
+  needed.**
 - **Design in**: the concurrency cap (limit local-routed teammates to slot count)
   and the attribution-header prereq (whatever sets per-teammate env must set
   `CLAUDE_CODE_ATTRIBUTION_HEADER=0` for local-routed teammates).
