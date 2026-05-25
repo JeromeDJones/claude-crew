@@ -1995,3 +1995,81 @@ class TestWaitMessagesHttp:
                 assert body["count"] == 1
             finally:
                 t.join(timeout=1)
+
+
+# ── ctx_window strategy wiring ────────────────────────────────────────────────
+
+class TestCtxWindowWiring:
+    """_build_local_instance attaches a per-agent ctx_window via the resolver,
+    choosing the local strategy for is_local teammates with metrics, else Anthropic."""
+
+    def _snap_with(self, *, is_local: bool, peak_in: int = 0):
+        import time as _time
+        from claude_crew.broker import BrokerSnapshot, LiveTeammateInfo, TeammateInfo
+        now = _time.time()
+        info = TeammateInfo(
+            id="t-1", name="a", role="builder", spawned_at=now - 10, alive=True
+        )
+        live = LiveTeammateInfo(
+            info=info,
+            status={
+                "current_tool_count": 0,
+                "current_turn_started_at_wallclock": None,
+                "last_turn_peak_invocation_input_tokens": peak_in,
+                "current_tools": [],
+            },
+            model="claude-sonnet-4-6",
+            is_local=is_local,
+        )
+        return BrokerSnapshot(crew_id="c", teammates=(info,), live=(live,), log=())
+
+    def test_anthropic_agent_gets_anthropic_window(self):
+        ui = UIServer(broker=Broker(), port=0)
+        inst, _ = ui._build_local_instance(self._snap_with(is_local=False, peak_in=50000), None)
+        cw = inst["agents"][0]["ctx_window"]
+        assert cw["source"] == "anthropic"
+        assert cw["limit"] == 200_000
+        assert cw["used"] == 50000
+
+    def test_local_agent_with_metrics_gets_local_window(self):
+        ui = UIServer(broker=Broker(), port=0)
+        metrics = {"ctx_used": 25688, "n_ctx": 80128, "cache_hit_pct": 94.2}
+        inst, _ = ui._build_local_instance(self._snap_with(is_local=True), metrics)
+        cw = inst["agents"][0]["ctx_window"]
+        assert cw["source"] == "local"
+        assert cw["limit"] == 80128
+        assert cw["used"] == 25688
+        assert cw["cache_hit_pct"] == 94.2
+
+    def test_local_agent_without_metrics_falls_back_to_anthropic(self):
+        ui = UIServer(broker=Broker(), port=0)
+        inst, _ = ui._build_local_instance(self._snap_with(is_local=True, peak_in=1234), None)
+        cw = inst["agents"][0]["ctx_window"]
+        assert cw["source"] == "anthropic"
+        assert cw["used"] == 1234
+
+
+class TestCtxWindowProbeGating:
+    """_build_state probes /slots only when the local-model URL is configured."""
+
+    async def test_probes_when_url_set(self, monkeypatch):
+        calls = {"n": 0}
+        async def fake(url, *, client=None, timeout=2.0):
+            calls["n"] += 1
+            return {"ctx_used": 1, "n_ctx": 2, "cache_hit_pct": 0.0}
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        await ui._build_state()
+        assert calls["n"] == 1
+
+    async def test_no_probe_when_url_unset(self, monkeypatch):
+        calls = {"n": 0}
+        async def fake(url, *, client=None, timeout=2.0):
+            calls["n"] += 1
+            return None
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = None
+        await ui._build_state()
+        assert calls["n"] == 0

@@ -28,7 +28,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from claude_crew.artifact_registry import ArtifactRegistry
 from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
+from claude_crew.ctx_window import resolve_ctx_window
 from claude_crew.instance_registry import InstanceRegistry
+from claude_crew.local_model_metrics import fetch_local_slot_metrics
 from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
 from claude_crew.teammate import ToolEvent
 
@@ -168,6 +170,11 @@ class UIServer:
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
+        # Optional local-model metrics probe URL (e.g. "http://127.0.0.1:8080").
+        # When set, _build_state fetches the local llama.cpp /slots gauge and the
+        # ctx-window resolver uses it for local-backed teammates. Unset = disabled
+        # (Anthropic strategy for all). Opt-in so non-local crews never probe.
+        self._local_model_url = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_URL")
 
     def _own_crew_id(self) -> str:
         """Local broker's crew_id, sourced from a snapshot (not a direct attr
@@ -201,7 +208,7 @@ class UIServer:
         return branch
 
     def _build_local_instance(
-        self, snapshot: BrokerSnapshot
+        self, snapshot: BrokerSnapshot, local_metrics: "dict[str, Any] | None" = None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Build the local broker's instance dict and transcript list FROM A SNAPSHOT.
 
@@ -274,6 +281,18 @@ class UIServer:
                         "out": agent_last_out,
                         "peak_in": agent_last_peak,
                     },
+                    # Canonical context-window metric — one sink, strategy chosen
+                    # per teammate: local /slots for local-backed teammates, else
+                    # Anthropic usage. Rendered source-agnostically by the dashboard.
+                    "ctx_window": resolve_ctx_window(
+                        is_local=(live_entry.is_local if live_entry is not None else False),
+                        peak_in=agent_last_peak,
+                        local_metrics=(
+                            local_metrics
+                            if (live_entry is not None and live_entry.is_local)
+                            else None
+                        ),
+                    ),
                     "tools": current_tool_names,
                     "current_tool": snap.get("current_tool"),
                     "oldest_in_flight": oldest_in_flight,
@@ -327,6 +346,10 @@ class UIServer:
                             "out": agent_last_out,
                             "peak_in": agent_last_peak,
                         },
+                        # Dead teammates: backend unknown post-death → Anthropic strategy.
+                        "ctx_window": resolve_ctx_window(
+                            is_local=False, peak_in=agent_last_peak, local_metrics=None
+                        ),
                         "tools": [],
                         "current_tool": None,
                         "oldest_in_flight": None,
@@ -464,7 +487,16 @@ class UIServer:
 
     async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
         snapshot = self._broker.snapshot(log_limit=200)
-        local_instance, local_messages = self._build_local_instance(snapshot)
+        # Local-model gauge: probe /slots once per build (opt-in). The ctx-window
+        # resolver inside _build_local_instance applies it to local-backed
+        # teammates. Each instance probes its own local model; the value rides
+        # _fetch_remote_state's wholesale copy, so no proxy endpoint is needed.
+        local_metrics = None
+        if self._local_model_url:
+            local_metrics = await fetch_local_slot_metrics(
+                self._local_model_url, client=self._http_client
+            )
+        local_instance, local_messages = self._build_local_instance(snapshot, local_metrics)
         instances: list[dict[str, Any]] = [local_instance]
         transcripts: dict[str, list] = {snapshot.crew_id: local_messages}
 
