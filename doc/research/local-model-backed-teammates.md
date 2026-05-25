@@ -104,6 +104,15 @@ around that.
 - ccr requests (`~/.claude-code-router/logs/ccr-*.log`): the `"system":[...]`
   array prefix must be byte-identical across turns (no `x-anthropic-billing-header`).
 
+> **Debugging lesson (cost us a near-false-victory):** a *synthetic* two-turn
+> cache test — feeding llama.cpp a byte-identical prefix twice — will show a huge
+> speedup (we measured 29×) **even when the real Claude Code path is still
+> reprocessing every turn.** The synthetic prefix is stable by construction; the
+> real ccr path had the rotating `cch` header busting it. **Always validate
+> caching against *captured real requests* (diff the `"system"` arrays in the ccr
+> log), not a hand-built prefix.** The definitive signal is `sim_best` and the
+> per-turn `prompt eval ... / N tokens` on *actual* agent turns, not a probe.
+
 ## Known ceiling
 Gemma-4 handles tool use and multi-turn agentic work (first local model that
 does — Qwen3.5-35B never cleared the bar). It's a reasoning model (burns thinking
