@@ -769,7 +769,6 @@ def main() -> None:
         # the correct loop (anyio creates its own; loop.add_signal_handler must
         # be called from within it, not from main() before anyio.run()).
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, registry.deregister)
 
         async def _ui_safe() -> None:
             try:
@@ -812,6 +811,43 @@ def main() -> None:
                 tg.cancel_scope.cancel()
 
         async with anyio.create_task_group() as tg:
+            # Full clean shutdown on SIGTERM/SIGINT: deregister, then cancel the
+            # task group so _ui_safe / _leader_watcher exit and the process can
+            # terminate. Previously SIGTERM only deregistered, leaving the UI
+            # server running and the process alive — orphan claude-crew processes
+            # required SIGKILL to clear. Idempotent on repeated signals via
+            # tg.cancel_scope (anyio collapses redundant cancels).
+            def _shutdown_signal(sig_name: str) -> None:
+                """Signal-driven full shutdown.
+
+                Why we use os._exit rather than relying on tg.cancel_scope.cancel()
+                alone: FastMCP's `run_stdio_async` blocks in a worker thread that
+                anyio cannot cancel. tg.cancel_scope.cancel() marks tasks for
+                cancellation, but the stdin-read thread keeps running, so
+                `async with create_task_group()` never exits and the process
+                never returns from anyio.run(). Pre-fix that's exactly the
+                orphan-claude-crew bug. We do the user-visible cleanup
+                synchronously (deregister the registry file so other instances
+                see us go) and then force-exit; the OS reclaims sockets, threads,
+                and the asyncio loop.
+                """
+                sys.stderr.write(f"[claude-crew] received {sig_name}, shutting down\n")
+                sys.stderr.flush()
+                try:
+                    registry.deregister()
+                except Exception:
+                    pass
+                os._exit(0)
+
+            for sig, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGINT, "SIGINT")):
+                try:
+                    loop.add_signal_handler(sig, _shutdown_signal, name)
+                except (NotImplementedError, RuntimeError):
+                    # add_signal_handler is unsupported on some platforms / when
+                    # not in the main thread. Fall back silently — the existing
+                    # EOF-based shutdown path still works when Claude closes stdin.
+                    pass
+
             tg.start_soon(_mcp_then_cancel)
             tg.start_soon(_ui_safe)
             tg.start_soon(_leader_watcher)
