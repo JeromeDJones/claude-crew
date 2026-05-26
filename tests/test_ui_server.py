@@ -2050,9 +2050,11 @@ class TestCtxWindowWiring:
 
 
 class TestCtxWindowProbeGating:
-    """_build_state probes /slots only when the local-model URL is configured."""
+    """_build_state probes /slots when the local-model URL is configured and the
+    probe is enabled. The probe defaults ON; CLAUDE_CREW_LOCAL_MODEL_PROBE=0 is
+    the kill switch for pathologically slow backends."""
 
-    async def test_probes_when_url_set(self, monkeypatch):
+    async def test_probes_when_url_set_and_probe_enabled(self, monkeypatch):
         calls = {"n": 0}
         async def fake(url, *, client=None, timeout=2.0):
             calls["n"] += 1
@@ -2060,6 +2062,7 @@ class TestCtxWindowProbeGating:
         monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
         ui = UIServer(broker=Broker(), port=0)
         ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = True
         await ui._build_state()
         assert calls["n"] == 1
 
@@ -2071,5 +2074,34 @@ class TestCtxWindowProbeGating:
         monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
         ui = UIServer(broker=Broker(), port=0)
         ui._local_model_url = None
+        ui._local_model_probe = True
         await ui._build_state()
         assert calls["n"] == 0
+
+    async def test_no_probe_when_probe_disabled(self, monkeypatch):
+        """Default: URL set but probe flag off → no /slots traffic (storm fix)."""
+        calls = {"n": 0}
+        async def fake(url, *, client=None, timeout=2.0):
+            calls["n"] += 1
+            return None
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = False
+        await ui._build_state()
+        assert calls["n"] == 0
+
+    async def test_probe_enabled_by_default(self, monkeypatch):
+        """A fresh UIServer with the URL env set probes by default (no flag)."""
+        monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_URL", "http://127.0.0.1:8080")
+        monkeypatch.delenv("CLAUDE_CREW_LOCAL_MODEL_PROBE", raising=False)
+        ui = UIServer(broker=Broker(), port=0)
+        assert ui._local_model_url == "http://127.0.0.1:8080"
+        assert ui._local_model_probe is True
+
+    async def test_probe_killswitch_env_zero(self, monkeypatch):
+        """CLAUDE_CREW_LOCAL_MODEL_PROBE=0 disables the probe (kill switch)."""
+        monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_URL", "http://127.0.0.1:8080")
+        monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_PROBE", "0")
+        ui = UIServer(broker=Broker(), port=0)
+        assert ui._local_model_probe is False
