@@ -106,7 +106,15 @@ def test_local_agent_bar_uses_local_strategy(monkeypatch, page):
         page.goto(url)
         bar = page.locator(".ctx-window-bar").first
         bar.wait_for(state="visible", timeout=15000)
+        # The gauge is now eventually-consistent: the bar renders immediately
+        # with the Anthropic fallback, then flips to the local strategy after the
+        # background probe loop populates the cache and the next WS push lands.
+        # Poll the title until it reflects local metrics.
+        deadline = time.time() + 15
         title = bar.get_attribute("title") or ""
+        while "local model context" not in title and time.time() < deadline:
+            page.wait_for_timeout(250)
+            title = bar.get_attribute("title") or ""
         assert "local model context" in title, title
         assert "cache hit" in title, title
         # Local window (80,128), not the Anthropic 200k.

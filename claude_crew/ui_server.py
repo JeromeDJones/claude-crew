@@ -38,6 +38,9 @@ _logger = logging.getLogger(__name__)
 
 _DASHBOARD_PATH = Path(__file__).parent / "ui" / "dashboard.html"
 _POLL_INTERVAL = 1.5
+# Cadence of the background local-model /slots probe. Decoupled from the state
+# build / push loop so a slow-or-down backend can never stall _build_state.
+_LOCAL_PROBE_INTERVAL = 5.0
 _BRANCH_TTL_SECONDS = 30
 _BRANCH_DETECT_TIMEOUT = 2.0
 # Server-side cap on the /wait-messages long-poll, mirroring the MCP
@@ -175,16 +178,20 @@ class UIServer:
         # ctx-window resolver uses it for local-backed teammates. Unset = disabled
         # (Anthropic strategy for all). Opt-in so non-local crews never probe.
         self._local_model_url = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_URL")
-        # The /slots probe powers the live local ctx-window gauge. It's safe
-        # whenever the model answers /slots within the 2s probe timeout — true on
-        # a well-offloaded config, where /slots is serviced between decode steps
-        # (tens of ms). On a pathologically slow config (a single decode step
-        # taking seconds, e.g. attention stranded on CPU at huge context), /slots
-        # queues behind generation, the probe disconnects, and the 1.5s dashboard
-        # push loop retries — spamming the llama.cpp server with cancelled tasks
-        # (should_stop storm). Default ON; set CLAUDE_CREW_LOCAL_MODEL_PROBE=0 to
-        # disable (kill switch for slow backends).
+        # The /slots probe powers the live local ctx-window gauge. It runs on a
+        # background task (_local_probe_loop) on its own cadence and writes the
+        # latest result into _local_metrics_cache; _build_state reads that cache
+        # synchronously and NEVER awaits the network. This keeps a slow-or-down
+        # backend from stalling state builds and flapping crews to "unreachable"
+        # (a down localhost port drops SYNs here rather than refusing, so an
+        # inline probe would block the full timeout every build). Default ON;
+        # set CLAUDE_CREW_LOCAL_MODEL_PROBE=0 to disable entirely (no task,
+        # no gauge).
         self._local_model_probe = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_PROBE", "1") != "0"
+        # Latest /slots metrics (or None when the backend is down/slow/absent),
+        # refreshed by _local_probe_loop. Read synchronously by _build_state.
+        self._local_metrics_cache: dict[str, Any] | None = None
+        self._local_metrics_task: asyncio.Task | None = None
 
     def _own_crew_id(self) -> str:
         """Local broker's crew_id, sourced from a snapshot (not a direct attr
@@ -495,17 +502,55 @@ class UIServer:
         except Exception:
             return None
 
-    async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
-        snapshot = self._broker.snapshot(log_limit=200)
-        # Local-model gauge: probe /slots once per build (opt-in). The ctx-window
-        # resolver inside _build_local_instance applies it to local-backed
-        # teammates. Each instance probes its own local model; the value rides
-        # _fetch_remote_state's wholesale copy, so no proxy endpoint is needed.
-        local_metrics = None
-        if self._local_model_url and self._local_model_probe:
-            local_metrics = await fetch_local_slot_metrics(
+    def _ensure_local_probe(self) -> None:
+        """Start the background /slots probe once, if enabled. Idempotent and
+        cheap (no await, single attribute check). Called from both serve() and
+        the WS handler so the probe runs regardless of how the server was
+        launched (direct uvicorn, leader, promoted leader). Requires a running
+        event loop. serve()'s finally cancels the task on teardown."""
+        if self._local_metrics_task is not None:
+            return
+        if not (self._local_model_url and self._local_model_probe):
+            return
+        self._local_metrics_task = asyncio.create_task(self._local_probe_loop())
+
+    async def _refresh_local_metrics(self) -> None:
+        """One /slots probe → cache write. Metrics on success, None on any
+        failure/timeout (a down backend self-hides the gauge). Re-raises only
+        CancelledError so the owning task can be torn down cleanly."""
+        try:
+            self._local_metrics_cache = await fetch_local_slot_metrics(
                 self._local_model_url, client=self._http_client
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._local_metrics_cache = None
+
+    async def _local_probe_loop(self) -> None:
+        """Refresh the local-model /slots cache on a fixed cadence.
+
+        Runs off the state-build path so a slow-or-down backend can never stall
+        _build_state. Each cycle refreshes the cache and sleeps
+        _LOCAL_PROBE_INTERVAL. A swallowed-exception refresh keeps the loop
+        alive; it only exits via cancellation (serve()'s finally).
+        """
+        while True:
+            await self._refresh_local_metrics()
+            await asyncio.sleep(_LOCAL_PROBE_INTERVAL)
+
+    async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
+        snapshot = self._broker.snapshot(log_limit=200)
+        # Local-model gauge: read the latest cached /slots metrics WITHOUT any
+        # network I/O. _local_probe_loop refreshes the cache on its own cadence;
+        # reading it here keeps _build_state instant even when the backend hangs.
+        # The ctx-window resolver inside _build_local_instance applies it to
+        # local-backed teammates. Each instance caches its own local model; the
+        # value rides _fetch_remote_state's wholesale copy, so no proxy endpoint
+        # is needed.
+        local_metrics = None
+        if self._local_model_url and self._local_model_probe:
+            local_metrics = self._local_metrics_cache
         local_instance, local_messages = self._build_local_instance(snapshot, local_metrics)
         instances: list[dict[str, Any]] = [local_instance]
         transcripts: dict[str, list] = {snapshot.crew_id: local_messages}
@@ -545,6 +590,7 @@ class UIServer:
 
     async def _handle_ws(self, ws: WebSocket) -> None:
         await ws.accept()
+        self._ensure_local_probe()
         try:
             while True:
                 state = await self._build_state()
@@ -848,6 +894,7 @@ class UIServer:
     async def serve(self) -> None:
         if self._registry is not None:
             self._registry.register()
+        self._ensure_local_probe()
         try:
             if self._sock is not None:
                 # The fd= path inherits whatever address the pre-bound socket
@@ -873,6 +920,12 @@ class UIServer:
             server = uvicorn.Server(config)
             await server.serve()
         finally:
+            if self._local_metrics_task is not None:
+                self._local_metrics_task.cancel()
+                try:
+                    await self._local_metrics_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if self._sock is not None:
                 try:
                     self._sock.close()
