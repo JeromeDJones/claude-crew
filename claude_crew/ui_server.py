@@ -192,6 +192,10 @@ class UIServer:
         # refreshed by _local_probe_loop. Read synchronously by _build_state.
         self._local_metrics_cache: dict[str, Any] | None = None
         self._local_metrics_task: asyncio.Task | None = None
+        # The uvicorn.Server instance owning the serving loop; populated in
+        # serve() so external callers (e.g. test harnesses driving the server
+        # in a thread) can request shutdown via `should_exit = True`.
+        self._uvicorn_server: "uvicorn.Server | None" = None
 
     def _own_crew_id(self) -> str:
         """Local broker's crew_id, sourced from a snapshot (not a direct attr
@@ -504,10 +508,10 @@ class UIServer:
 
     def _ensure_local_probe(self) -> None:
         """Start the background /slots probe once, if enabled. Idempotent and
-        cheap (no await, single attribute check). Called from both serve() and
-        the WS handler so the probe runs regardless of how the server was
-        launched (direct uvicorn, leader, promoted leader). Requires a running
-        event loop. serve()'s finally cancels the task on teardown."""
+        cheap (no await, single attribute check). Called only from serve() so
+        the task's lifetime is bound to serve()'s finally (cancel + await).
+        Any future caller MUST go through serve() or arrange equivalent
+        teardown — abandoned tasks emit `Task was destroyed but it is pending`."""
         if self._local_metrics_task is not None:
             return
         if not (self._local_model_url and self._local_model_probe):
@@ -533,7 +537,8 @@ class UIServer:
         Runs off the state-build path so a slow-or-down backend can never stall
         _build_state. Each cycle refreshes the cache and sleeps
         _LOCAL_PROBE_INTERVAL. A swallowed-exception refresh keeps the loop
-        alive; it only exits via cancellation (serve()'s finally).
+        alive; the loop only exits via cancellation, which serve()'s finally
+        issues during shutdown (the only sanctioned start path).
         """
         while True:
             await self._refresh_local_metrics()
@@ -590,7 +595,6 @@ class UIServer:
 
     async def _handle_ws(self, ws: WebSocket) -> None:
         await ws.accept()
-        self._ensure_local_probe()
         try:
             while True:
                 state = await self._build_state()
@@ -918,6 +922,7 @@ class UIServer:
                     lifespan="off",
                 )
             server = uvicorn.Server(config)
+            self._uvicorn_server = server
             await server.serve()
         finally:
             if self._local_metrics_task is not None:

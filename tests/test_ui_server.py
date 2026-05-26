@@ -2103,13 +2103,17 @@ class TestCtxWindowProbeGating:
         ui = UIServer(broker=Broker(), port=0)
         ui._local_model_url = "http://127.0.0.1:8080"
         task = asyncio.create_task(ui._local_probe_loop())
-        for _ in range(20):  # let it spin several cycles
-            if calls["n"] >= 3:
-                break
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            # Wait until the loop has spun ≥3 times, bounded by a real timeout
+            # so a stalled loop fails the test instead of hanging it.
+            async def _wait_iters():
+                while calls["n"] < 3:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(_wait_iters(), timeout=2.0)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         assert calls["n"] >= 3  # kept going despite every probe raising
 
     # --- consumer layer: _build_state reads cache, never the network -------
