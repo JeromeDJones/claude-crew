@@ -835,8 +835,12 @@ def main() -> None:
                 sys.stderr.flush()
                 try:
                     registry.deregister()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Surface so the operator knows the registry may be stale —
+                    # logger calls may not flush before os._exit. PermissionError
+                    # is the most likely culprit (file owned by another uid).
+                    sys.stderr.write(f"[claude-crew] deregister failed during shutdown: {exc}\n")
+                    sys.stderr.flush()
                 os._exit(0)
 
             for sig, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGINT, "SIGINT")):

@@ -60,7 +60,13 @@ def _spawn_claude_crew(registry_dir: Path) -> subprocess.Popen:
 
 
 def _wait_for_registry_entry(registry_dir: Path, deadline_seconds: float = 15.0) -> dict:
-    """Poll until claude-crew has registered itself, then return its entry."""
+    """Poll until claude-crew has registered itself, then return its entry.
+
+    These tests intentionally signal AFTER registration so the assertion that
+    the entry is removed is meaningful. The mid-startup-race case (SIGTERM
+    fired before the registry file exists) is safe in production — `unlink()`
+    swallows FileNotFoundError — but isn't exercised here.
+    """
     deadline = time.time() + deadline_seconds
     while time.time() < deadline:
         if registry_dir.exists():
