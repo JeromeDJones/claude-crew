@@ -98,6 +98,7 @@ def test_local_agent_bar_uses_local_strategy(monkeypatch, page):
         return dict(_LOCAL_METRICS)
 
     monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_PROBE", "1")
     monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
 
     url, server, t = _start_server(_patched_broker(_snapshot(is_local=True)))

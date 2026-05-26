@@ -175,6 +175,16 @@ class UIServer:
         # ctx-window resolver uses it for local-backed teammates. Unset = disabled
         # (Anthropic strategy for all). Opt-in so non-local crews never probe.
         self._local_model_url = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_URL")
+        # The /slots probe powers the live local ctx-window gauge. It's safe
+        # whenever the model answers /slots within the 2s probe timeout — true on
+        # a well-offloaded config, where /slots is serviced between decode steps
+        # (tens of ms). On a pathologically slow config (a single decode step
+        # taking seconds, e.g. attention stranded on CPU at huge context), /slots
+        # queues behind generation, the probe disconnects, and the 1.5s dashboard
+        # push loop retries — spamming the llama.cpp server with cancelled tasks
+        # (should_stop storm). Default ON; set CLAUDE_CREW_LOCAL_MODEL_PROBE=0 to
+        # disable (kill switch for slow backends).
+        self._local_model_probe = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_PROBE", "1") != "0"
 
     def _own_crew_id(self) -> str:
         """Local broker's crew_id, sourced from a snapshot (not a direct attr
@@ -492,7 +502,7 @@ class UIServer:
         # teammates. Each instance probes its own local model; the value rides
         # _fetch_remote_state's wholesale copy, so no proxy endpoint is needed.
         local_metrics = None
-        if self._local_model_url:
+        if self._local_model_url and self._local_model_probe:
             local_metrics = await fetch_local_slot_metrics(
                 self._local_model_url, client=self._http_client
             )
