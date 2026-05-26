@@ -2050,46 +2050,114 @@ class TestCtxWindowWiring:
 
 
 class TestCtxWindowProbeGating:
-    """_build_state probes /slots when the local-model URL is configured and the
-    probe is enabled. The probe defaults ON; CLAUDE_CREW_LOCAL_MODEL_PROBE=0 is
-    the kill switch for pathologically slow backends."""
+    """The /slots probe is decoupled from _build_state: a background loop
+    (_local_probe_loop) refreshes _local_metrics_cache, and _build_state reads
+    that cache WITHOUT network I/O. The probe defaults ON;
+    CLAUDE_CREW_LOCAL_MODEL_PROBE=0 disables it entirely (no task, no gauge)."""
 
-    async def test_probes_when_url_set_and_probe_enabled(self, monkeypatch):
-        calls = {"n": 0}
+    # --- probe layer: _refresh_local_metrics writes the cache --------------
+
+    async def test_refresh_populates_cache_on_success(self, monkeypatch):
+        """Happy path: a successful /slots probe lands in the cache."""
+        metrics = {"ctx_used": 1, "n_ctx": 2, "cache_hit_pct": 0.0}
         async def fake(url, *, client=None, timeout=2.0):
-            calls["n"] += 1
-            return {"ctx_used": 1, "n_ctx": 2, "cache_hit_pct": 0.0}
+            return metrics
         monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
         ui = UIServer(broker=Broker(), port=0)
         ui._local_model_url = "http://127.0.0.1:8080"
-        ui._local_model_probe = True
-        await ui._build_state()
-        assert calls["n"] == 1
+        await ui._refresh_local_metrics()
+        assert ui._local_metrics_cache == metrics
 
-    async def test_no_probe_when_url_unset(self, monkeypatch):
-        calls = {"n": 0}
+    async def test_refresh_sets_none_when_backend_down(self, monkeypatch):
+        """Sad path: probe returns None (down/absent) → cache cleared, no stale value."""
         async def fake(url, *, client=None, timeout=2.0):
-            calls["n"] += 1
-            return None
-        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
-        ui = UIServer(broker=Broker(), port=0)
-        ui._local_model_url = None
-        ui._local_model_probe = True
-        await ui._build_state()
-        assert calls["n"] == 0
-
-    async def test_no_probe_when_probe_disabled(self, monkeypatch):
-        """Default: URL set but probe flag off → no /slots traffic (storm fix)."""
-        calls = {"n": 0}
-        async def fake(url, *, client=None, timeout=2.0):
-            calls["n"] += 1
             return None
         monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
         ui = UIServer(broker=Broker(), port=0)
         ui._local_model_url = "http://127.0.0.1:8080"
-        ui._local_model_probe = False
+        ui._local_metrics_cache = {"stale": True}  # prior good value
+        await ui._refresh_local_metrics()
+        assert ui._local_metrics_cache is None
+
+    async def test_refresh_swallows_exception(self, monkeypatch):
+        """Sad path: probe raises (timeout/connect error) → cache None, no raise.
+        This is what keeps _local_probe_loop alive across a flaky backend."""
+        async def fake(url, *, client=None, timeout=2.0):
+            raise RuntimeError("connection hung")
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_metrics_cache = {"stale": True}
+        await ui._refresh_local_metrics()  # must NOT raise
+        assert ui._local_metrics_cache is None
+
+    async def test_probe_loop_survives_failures_and_can_be_cancelled(self, monkeypatch):
+        """The loop refreshes repeatedly despite a raising backend and exits
+        cleanly on cancellation (serve()'s teardown contract)."""
+        monkeypatch.setattr("claude_crew.ui_server._LOCAL_PROBE_INTERVAL", 0.0)
+        calls = {"n": 0}
+        async def fake(url, *, client=None, timeout=2.0):
+            calls["n"] += 1
+            raise RuntimeError("hung")
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        task = asyncio.create_task(ui._local_probe_loop())
+        try:
+            # Wait until the loop has spun ≥3 times, bounded by a real timeout
+            # so a stalled loop fails the test instead of hanging it.
+            async def _wait_iters():
+                while calls["n"] < 3:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(_wait_iters(), timeout=2.0)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert calls["n"] >= 3  # kept going despite every probe raising
+
+    # --- consumer layer: _build_state reads cache, never the network -------
+
+    async def test_build_state_reads_cache_without_network(self, monkeypatch):
+        """_build_state must NOT call fetch — it reads the cache synchronously."""
+        calls = {"n": 0}
+        async def fake(url, *, client=None, timeout=2.0):
+            calls["n"] += 1
+            return {"ctx_used": 9, "n_ctx": 10, "cache_hit_pct": 0.0}
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = True
+        ui._local_metrics_cache = {"ctx_used": 5, "n_ctx": 8, "cache_hit_pct": 1.0}
         await ui._build_state()
-        assert calls["n"] == 0
+        assert calls["n"] == 0  # zero network calls from the state path
+
+    async def test_build_state_does_not_block_when_backend_hangs(self, monkeypatch):
+        """The actual bug: even if fetch hangs forever, _build_state returns fast
+        because it never awaits the probe."""
+        async def fake(url, *, client=None, timeout=2.0):
+            await asyncio.sleep(3600)  # hang
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = True
+        # Must complete well within the leader's 2.0s remote-fetch budget.
+        await asyncio.wait_for(ui._build_state(), timeout=1.0)
+
+    async def test_build_state_no_gauge_when_cache_empty(self, monkeypatch):
+        """Cache None (down backend) → local instance built with no metrics."""
+        async def fake(url, *, client=None, timeout=2.0):
+            return None
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = True
+        ui._local_metrics_cache = None
+        state = await ui._build_state()
+        # No crash; local instance present. Gauge falls back to anthropic source.
+        assert state["instances"]
+
+    # --- config: env-driven enable/disable ---------------------------------
 
     async def test_probe_enabled_by_default(self, monkeypatch):
         """A fresh UIServer with the URL env set probes by default (no flag)."""
@@ -2105,3 +2173,17 @@ class TestCtxWindowProbeGating:
         monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_PROBE", "0")
         ui = UIServer(broker=Broker(), port=0)
         assert ui._local_model_probe is False
+
+    async def test_build_state_skips_cache_when_disabled(self, monkeypatch):
+        """Kill switch on: even a populated cache is ignored (no gauge)."""
+        async def fake(url, *, client=None, timeout=2.0):
+            return None
+        monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
+        ui = UIServer(broker=Broker(), port=0)
+        ui._local_model_url = "http://127.0.0.1:8080"
+        ui._local_model_probe = False
+        ui._local_metrics_cache = {"ctx_used": 5, "n_ctx": 8, "cache_hit_pct": 1.0}
+        # local_metrics gate is (_local_model_url and _local_model_probe); disabled
+        # → None passed to _build_local_instance regardless of cache contents.
+        inst, _ = ui._build_local_instance(ui._broker.snapshot(log_limit=10), None)
+        assert inst is not None

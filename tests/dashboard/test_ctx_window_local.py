@@ -64,32 +64,42 @@ def _start_server(broker: Broker):
         port = s.getsockname()[1]
 
     ui = UIServer(broker, port=port)
-    app = ui._make_app()
-    config = uvicorn.Config(
-        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
-    )
-    server = uvicorn.Server(config)
-    server.install_signal_handlers = lambda: None
 
     def run() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(server.serve())
+        try:
+            loop.run_until_complete(ui.serve())
+        finally:
+            loop.close()
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
 
+    # Wait for serve() to have created and stored its uvicorn.Server AND for
+    # the HTTP port to accept connections.
     deadline = time.time() + 10
     while time.time() < deadline:
-        try:
-            if httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5).status_code == 200:
-                break
-        except Exception:
-            time.sleep(0.1)
+        if ui._uvicorn_server is not None:
+            try:
+                if httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5).status_code == 200:
+                    break
+            except Exception:
+                pass
+        time.sleep(0.05)
     else:
         pytest.fail("UIServer did not start within 10 seconds")
 
-    return f"http://127.0.0.1:{port}", server, t
+    return f"http://127.0.0.1:{port}", ui, t
+
+
+def _stop_server(ui: UIServer, t: threading.Thread) -> None:
+    """Signal serve() to exit and join the server thread. Setting should_exit
+    from another thread is safe — uvicorn polls it from its serving loop, and
+    serve()'s finally cancels/awaits the probe task before returning."""
+    if ui._uvicorn_server is not None:
+        ui._uvicorn_server.should_exit = True
+    t.join(timeout=5)
 
 
 @pytest.mark.dashboard
@@ -101,26 +111,33 @@ def test_local_agent_bar_uses_local_strategy(monkeypatch, page):
     monkeypatch.setenv("CLAUDE_CREW_LOCAL_MODEL_PROBE", "1")
     monkeypatch.setattr("claude_crew.ui_server.fetch_local_slot_metrics", fake)
 
-    url, server, t = _start_server(_patched_broker(_snapshot(is_local=True)))
+    url, ui, t = _start_server(_patched_broker(_snapshot(is_local=True)))
     try:
         page.goto(url)
         bar = page.locator(".ctx-window-bar").first
         bar.wait_for(state="visible", timeout=15000)
+        # The gauge is now eventually-consistent: the bar renders immediately
+        # with the Anthropic fallback, then flips to the local strategy after the
+        # background probe loop populates the cache and the next WS push lands.
+        # Poll the title until it reflects local metrics.
+        deadline = time.time() + 15
         title = bar.get_attribute("title") or ""
+        while "local model context" not in title and time.time() < deadline:
+            page.wait_for_timeout(250)
+            title = bar.get_attribute("title") or ""
         assert "local model context" in title, title
         assert "cache hit" in title, title
         # Local window (80,128), not the Anthropic 200k.
         assert "80,128" in title, title
     finally:
-        server.should_exit = True
-        t.join(timeout=3)
+        _stop_server(ui, t)
 
 
 @pytest.mark.dashboard
 def test_anthropic_agent_bar_uses_anthropic_strategy(monkeypatch, page):
     monkeypatch.delenv("CLAUDE_CREW_LOCAL_MODEL_URL", raising=False)
 
-    url, server, t = _start_server(_patched_broker(_snapshot(is_local=False)))
+    url, ui, t = _start_server(_patched_broker(_snapshot(is_local=False)))
     try:
         page.goto(url)
         bar = page.locator(".ctx-window-bar").first
@@ -128,5 +145,4 @@ def test_anthropic_agent_bar_uses_anthropic_strategy(monkeypatch, page):
         title = bar.get_attribute("title") or ""
         assert "peak invocation" in title, title
     finally:
-        server.should_exit = True
-        t.join(timeout=3)
+        _stop_server(ui, t)
