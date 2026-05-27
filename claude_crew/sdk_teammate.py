@@ -186,6 +186,8 @@ async def _collect_response_text(
     client: Any,
     stamp_activity: Callable[[], None] | None = None,
     record_task_notif: Callable[[str, TaskNotificationMessage], None] | None = None,
+    *,
+    is_local: bool = False,
 ) -> TurnDrainResult:
     """Drain client.receive_response() and accumulate text + subagent failures.
 
@@ -213,15 +215,26 @@ async def _collect_response_text(
     """
     def _extract_token_cost_from_rm(
         rm: ResultMessage,
+        *,
+        is_local: bool = False,
     ) -> tuple[int | None, int | None, float | None]:
         """Extract (per_turn_input, per_turn_output, cumulative_cost_usd) from a ResultMessage.
 
         D-1: ResultMessage is the single source; AssistantMessage.usage is never read.
-        D-3: per_turn_input includes cache_read_input_tokens + cache_creation_input_tokens
-             (all billed context). Accumulate per-turn values across turns to get session total.
+        D-3 (Anthropic): per_turn_input includes cache_read + cache_creation tokens.
+        D-3 (OpenAI): per_turn_input = prompt_tokens (already includes cached; no double-count).
         D-2: cumulative_cost_usd is session-total; overwrite (not accumulate) this value per turn.
         D-8: returns (None, None, None) on malformed/absent data; logs WARNING
              with the offending dict's KEYS (not values) to avoid leaking content.
+
+        Shape detection:
+          - Anthropic-shaped if "input_tokens" present.
+          - OpenAI-shaped if "prompt_tokens" present.
+          - Both present → prefer Anthropic; log INFO.
+          - Neither → (None, None, cost_only).
+
+        is_local: operator-intent hint used for diagnostic logging only.
+                  The actual shape switch is key-presence, not this flag.
         """
         usage = rm.usage
         cost = rm.total_cost_usd
@@ -243,13 +256,40 @@ async def _collect_response_text(
                 )
                 # cost may still be valid — fall through
             else:
+                has_anthropic = "input_tokens" in usage
+                has_openai = "prompt_tokens" in usage
                 try:
-                    per_turn_input = int(
-                        usage.get("input_tokens", 0)
-                        + usage.get("cache_read_input_tokens", 0)
-                        + usage.get("cache_creation_input_tokens", 0)
-                    )
-                    per_turn_output = int(usage.get("output_tokens", 0))
+                    if has_anthropic and has_openai:
+                        # Both key families present — defensive case. Prefer Anthropic.
+                        logger.info(
+                            "_collect_response_text: ResultMessage.usage contains both "
+                            "Anthropic (input_tokens) and OpenAI (prompt_tokens) key "
+                            "families (keys=%s); preferring Anthropic shape. "
+                            "is_local=%s",
+                            list(usage.keys()),
+                            is_local,
+                        )
+                        per_turn_input = int(
+                            usage.get("input_tokens", 0)
+                            + usage.get("cache_read_input_tokens", 0)
+                            + usage.get("cache_creation_input_tokens", 0)
+                        )
+                        per_turn_output = int(usage.get("output_tokens", 0))
+                    elif has_anthropic:
+                        # Anthropic shape (existing behavior, unchanged).
+                        per_turn_input = int(
+                            usage.get("input_tokens", 0)
+                            + usage.get("cache_read_input_tokens", 0)
+                            + usage.get("cache_creation_input_tokens", 0)
+                        )
+                        per_turn_output = int(usage.get("output_tokens", 0))
+                    elif has_openai:
+                        # OpenAI / llama.cpp shape (local backend via ccr).
+                        # prompt_tokens already includes cached tokens — do NOT
+                        # add cached_tokens again (would double-count).
+                        per_turn_input = int(usage.get("prompt_tokens", 0))
+                        per_turn_output = int(usage.get("completion_tokens", 0))
+                    # else: neither key family present — leave both as None.
                 except (TypeError, ValueError):
                     logger.warning(
                         "_collect_response_text: malformed ResultMessage.usage values "
@@ -299,7 +339,7 @@ async def _collect_response_text(
             # D-1: single source for cost AND tokens — read from ResultMessage only.
             # D-2: per-turn tokens accumulate; cumulative cost overwrites (SDK-maintained total).
             # D-6: multiple ResultMessages → last wins (overwrite semantics for cost only).
-            ri, ro, rc = _extract_token_cost_from_rm(msg)
+            ri, ro, rc = _extract_token_cost_from_rm(msg, is_local=is_local)
             if ri is not None:
                 turn_input_tokens = ri
             if ro is not None:
@@ -363,11 +403,18 @@ async def _collect_response_text(
                 )
             if isinstance(ai_usage, dict):
                 try:
-                    invocation_input = int(
-                        ai_usage.get("input_tokens", 0)
-                        + ai_usage.get("cache_read_input_tokens", 0)
-                        + ai_usage.get("cache_creation_input_tokens", 0)
-                    )
+                    if "input_tokens" in ai_usage:
+                        # Anthropic shape.
+                        invocation_input = int(
+                            ai_usage.get("input_tokens", 0)
+                            + ai_usage.get("cache_read_input_tokens", 0)
+                            + ai_usage.get("cache_creation_input_tokens", 0)
+                        )
+                    elif "prompt_tokens" in ai_usage:
+                        # OpenAI / local backend shape.
+                        invocation_input = int(ai_usage.get("prompt_tokens", 0))
+                    else:
+                        invocation_input = None
                 except (TypeError, ValueError):
                     invocation_input = None
                 if invocation_input is not None and invocation_input > 0:
