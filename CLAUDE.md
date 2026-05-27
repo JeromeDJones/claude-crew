@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## How SDK teammates wire their tools / skills / MCP / memory
+
+Before reasoning about pack contracts, allowlist enforcement, or "why is the teammate calling a tool I didn't grant?" — read `doc/sdk-teammate-wiring.md`. It captures the asymmetry between in-session subagents (leaf nodes, no inheritance) and SDK teammates (top-level Claude CLI subprocesses that auto-load user/project settings, including plugin MCP, whenever the pack declares `skills:`). Re-derive only when the SDK is upgraded.
+
 ## Commands
 
 ```bash
