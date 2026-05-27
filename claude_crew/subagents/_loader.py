@@ -76,10 +76,10 @@ class PackFrontmatter:
     default) and `tools` semantics:
     - omitted in YAML → `tools=None` → inherit-all (mirrors Claude Code
       subagent semantics; the top-level teammate gets the CLI default).
-    - `tools: []` in YAML → `tools=()` → explicit empty (for SUBAGENTS this
-      is enforced as a no-tools surface; for top-level teammates the SDK
-      collapses this to inherit-all at the ClaudeAgentOptions boundary —
-      see doc/ideas/honor-pack-tools-allowlist.md).
+    - `tools: []` in YAML → `tools=()` → true no-tools surface: the spawn
+      path sets `ClaudeAgentOptions.tools=[]` which emits `--tools ""`,
+      restricting the CLI catalog to empty for both subagents AND top-level
+      teammates. See doc/ideas/honor-pack-tools-allowlist.md.
     - `tools: [Read, Grep]` → `tools=("Read", "Grep")` → strict allowlist.
 
     The ``mcpServers`` field accepts a list of (str | dict) entries — string
@@ -220,10 +220,9 @@ def parse_yaml_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, P
 
     if "tools" not in fm_dict:
         logger.info(
-            "agent %r has no tools declared — teammate will inherit all CLI tools "
-            "(declare a specific list, e.g. `tools: [Read, Grep, Glob]`, to "
-            "restrict; note: `tools: []` does NOT restrict top-level teammates — "
-            "the SDK collapses empty to inherit-all at that boundary)",
+            "agent %r has no tools declared — teammate will inherit all CLI tools. "
+            "Declare a specific list (e.g. `tools: [Read, Grep, Glob]`) to "
+            "restrict, or `tools: []` for a true no-tools surface.",
             key,
         )
 
@@ -317,10 +316,9 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     # "operator forgot" (INFO) from "operator chose empty" (silent).
     if "tools" not in fm_dict:
         logger.info(
-            "agent %r has no tools declared — teammate will inherit all CLI tools "
-            "(declare a specific list, e.g. `tools: [Read, Grep, Glob]`, to "
-            "restrict; note: `tools: []` does NOT restrict top-level teammates — "
-            "the SDK collapses empty to inherit-all at that boundary)",
+            "agent %r has no tools declared — teammate will inherit all CLI tools. "
+            "Declare a specific list (e.g. `tools: [Read, Grep, Glob]`) to "
+            "restrict, or `tools: []` for a true no-tools surface.",
             key,
         )
     agent_kwargs: dict[str, Any] = {
