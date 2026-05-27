@@ -558,10 +558,13 @@ def _warn_unknown_mcp_servers(
 
 # Optional fields whose AgentDefinition default is None. A drop is detected via
 # `is None` on the higher-precedence pack. `description` is required and cannot
-# drop. `tools` lives in _COLLECTION_FIELDS instead — its AgentDefinition default
-# is `[]` (not None), so shrink-to-empty needs a separate branch (#15 sentinel
-# H-2). `disallowedTools` IS in this set (default None) AND in _COLLECTION_FIELDS
-# (covers the explicit-empty case `disallowedTools: []`).
+# drop. `tools` lives in _COLLECTION_FIELDS as well — since
+# honor-pack-tools-allowlist, omitted tools yields `None` (inherit-all signal),
+# while `tools: []` yields `[]` (explicit empty, no-tools surface for subagents).
+# The collection-shrink check below still catches the non-empty → empty/None
+# shadow case (#15 sentinel H-2). `disallowedTools` IS in this set (default
+# None) AND in _COLLECTION_FIELDS (covers the explicit-empty case
+# `disallowedTools: []`).
 _OPTIONAL_AGENTDEF_FIELDS: tuple[str, ...] = (
     "mcpServers", "memory", "skills", "disallowedTools", "permissionMode",
     "maxTurns", "background", "initialPrompt", "effort", "model",

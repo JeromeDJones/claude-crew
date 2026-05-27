@@ -192,8 +192,14 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "explorer-like")
 
         opts = captured["options"]
+        # `tools` is the wire-level catalog (what the model sees);
+        # `allowed_tools` is pre-approval (no permission prompt). Both must
+        # reflect the pack list — see honor-pack-tools-allowlist.md.
+        assert list(opts.tools) == ["Read", "Grep", "Glob"], (
+            f"expected exact pack tools in catalog, got {opts.tools!r}"
+        )
         assert list(opts.allowed_tools) == ["Read", "Grep", "Glob"], (
-            f"expected exact pack tools, got {opts.allowed_tools!r}"
+            f"expected exact pack tools in allowlist, got {opts.allowed_tools!r}"
         )
 
     async def test_pack_tools_unioned_with_extra_tools_dedup(
@@ -219,8 +225,12 @@ class TestPackToolsAsAllowlist:
         )
 
         opts = captured["options"]
+        # Catalog (--tools) and allowlist (--allowedTools) both carry the union.
+        assert list(opts.tools) == ["Read", "Grep", "Bash"], (
+            f"expected deduped union in catalog, got {opts.tools!r}"
+        )
         assert list(opts.allowed_tools) == ["Read", "Grep", "Bash"], (
-            f"expected deduped union, got {opts.allowed_tools!r}"
+            f"expected deduped union in allowlist, got {opts.allowed_tools!r}"
         )
 
     async def test_pack_without_tools_key_yields_inherit_all(
@@ -228,9 +238,9 @@ class TestPackToolsAsAllowlist:
     ) -> None:
         """Given a pack that OMITS the `tools:` key entirely (inherit-all),
         When the teammate is spawned without extras,
-        Then opts.allowed_tools is empty (the SDK signal for inherit-all —
-        verified at subprocess_cli.py:238: `if effective_allowed_tools:` only
-        passes `--allowedTools` when the list is non-empty)."""
+        Then opts.tools is None (no --tools flag passed → CLI uses full
+        default catalog → model sees all tools). Mirrors Claude Code
+        subagent semantics."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
         _write_pack_file(
@@ -245,30 +255,20 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "wide-open")
 
         opts = captured["options"]
-        # ClaudeAgentOptions defaults allowed_tools to []; we also do NOT set it
-        # explicitly when pack has no tools. Either way the SDK does not pass
-        # --allowedTools to the CLI → inherit-all.
-        assert list(opts.allowed_tools) == [], (
-            f"expected empty list (inherit-all signal at SDK boundary), "
-            f"got {opts.allowed_tools!r}"
+        # ClaudeAgentOptions.tools default is None; we do NOT set --tools when
+        # pack omits. The CLI receives no --tools flag → inherit-all default.
+        assert opts.tools is None, (
+            f"expected None (no --tools flag → inherit-all), got {opts.tools!r}"
         )
 
-    async def test_pack_with_empty_tools_collapses_to_inherit_all_known_limitation(
+    async def test_pack_with_empty_tools_yields_true_no_tools_surface(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """Given a pack with `tools: []` (explicit empty),
         When the teammate is spawned,
-        Then opts.allowed_tools == [] BUT this is wire-equivalent to inherit-all
-        for top-level teammates (SDK limitation — see subprocess_cli.py:238).
-
-        For SUBAGENTS dispatched via Task, `tools: []` IS preserved as a true
-        no-tools surface (per claude-agent-sdk's AgentDefinition serialization).
-        For TOP-LEVEL teammates (what claude-crew spawns), the SDK's
-        ClaudeAgentOptions.allowed_tools collapses [] and missing to the same
-        wire-level no-flag → CLI uses inherit-all default.
-
-        This test documents the limitation so future change agents don't believe
-        `tools: []` in a pack restricts the top-level teammate's surface."""
+        Then opts.tools == [] → SDK passes `--tools ""` → CLI restricts the
+        catalog to empty → the model sees NO tools at all (true no-tools
+        surface, mirrors the subagent contract)."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
         _write_pack_file(
@@ -283,7 +283,123 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "no-tools")
 
         opts = captured["options"]
-        assert list(opts.allowed_tools) == []  # wire-equivalent to inherit-all
+        assert opts.tools == [], (
+            f"expected empty list (--tools '' → empty catalog), got {opts.tools!r}"
+        )
+
+    async def test_default_factory_extra_tools_no_double_grant(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Production path (default_factory) flows `extra_tools` two ways into
+        SdkTeammate: (a) baked into the patched AgentDefinition.tools via the
+        pack_tools ∪ extra_tools union at the factory level, AND (b) passed
+        again as `extra_tools=` to SdkTeammate constructor. The downstream
+        union+dedup in options assembly MUST collapse the duplication so
+        `allowed_tools` shows each tool exactly once."""
+        from claude_crew import factories
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        # conftest forces CLAUDE_CREW_TEAMMATE_MODE=stub autouse; clear it so
+        # default_factory returns the sdk-mode factory (where the double-flow
+        # under test lives). Without this, default_factory returns stub_factory
+        # and SdkTeammate's options-builder never runs.
+        monkeypatch.delenv("CLAUDE_CREW_TEAMMATE_MODE", raising=False)
+
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        # Use the bundled explorer (tools: [Read, Grep, Glob]) so the test
+        # exercises the actual production merge cascade, not a synthetic pack.
+        merged, role_ss, bodies = build_merged_pack(home_dir=home, project_root=proj)
+        assert "explorer" in merged
+
+        captured: dict = {}
+
+        class FakeCaptureSDKClient:
+            def __init__(self, options=None):
+                if options is not None:
+                    captured["options"] = options
+
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def query(self, prompt, session_id=None): pass
+            async def receive_response(self):
+                return
+                yield  # noqa
+        monkeypatch.setattr(sdk_module, "ClaudeSDKClient", FakeCaptureSDKClient)
+
+        # Drive through the REAL default_factory (not a hand-rolled test factory).
+        prod_factory = factories.default_factory(
+            home_dir=home, project_root=proj,
+        )
+        # default_factory requires auth in production; bypass for the fake SDK path.
+        prod_factory.requires_auth = False  # type: ignore[attr-defined]
+
+        broker = Broker()
+        async with create_connected_server_and_client_session(
+            make_server(broker=broker, factory=prod_factory)._mcp_server,
+        ) as s:
+            await s.initialize()
+            spawn = _content_json(await s.call_tool(
+                "spawn_teammate",
+                {"role": "explorer", "extra_tools": ["Bash", "Read"]},
+            ))
+            tid = spawn["teammate_id"]
+            await broker.send(Envelope(
+                id=new_message_id(), seq=0,
+                sender="lead", recipient=tid, timestamp=0.0, payload="hi",
+            ))
+            await broker.wait_for_lead_message(timeout=2.0)
+
+        opts = captured["options"]
+        # Pack: [Read, Grep, Glob]. Extras: [Bash, Read]. Union, dedup, order
+        # preserved: pack-first then extras. Catalog AND allowlist both reflect
+        # the union (so wire prompt restricts AND tools are pre-approved).
+        assert list(opts.tools) == ["Read", "Grep", "Glob", "Bash"], (
+            f"expected deduped union catalog via production factory, "
+            f"got {opts.tools!r}"
+        )
+        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob", "Bash"]
+        assert len(opts.tools) == len(set(opts.tools))
+
+    async def test_pack_tools_restrict_subprocess_cli_args(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Wire-level guarantee: when a pack declares `tools: [A, B, C]`,
+        the CLI subprocess command line MUST receive `--tools A,B,C` (the
+        catalog restriction). Without --tools, the model sees the full default
+        catalog regardless of --allowedTools — verified empirically on
+        2026-05-26 when the first cut of this fix set only allowed_tools and
+        the Qwen wire prompt stayed at 107 KB / 35 tools.
+
+        Asserts on the ARGV the SDK would build for the CLI, so the test
+        survives changes in how the model receives tool definitions."""
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+        from claude_agent_sdk.types import ClaudeAgentOptions
+
+        # Build the same options shape SdkTeammate would for the bundled explorer.
+        opts = ClaudeAgentOptions(
+            tools=["Read", "Grep", "Glob"],
+            allowed_tools=["Read", "Grep", "Glob"],
+            mcp_servers={},
+        )
+        # _build_command is internal; we drive a transport just to capture its
+        # argv. cli_path is normally resolved during connect() — set directly
+        # so we can call _build_command without spawning the real subprocess.
+        transport = SubprocessCLITransport(options=opts, prompt="hi")
+        transport._cli_path = "/usr/bin/true"  # placeholder; never executed
+        cmd = transport._build_command()
+        # Find the --tools flag and its value.
+        assert "--tools" in cmd, (
+            f"--tools (catalog) MUST be passed to the CLI to restrict the wire "
+            f"prompt; got cmd={cmd!r}"
+        )
+        idx = cmd.index("--tools")
+        tools_arg = cmd[idx + 1]
+        assert set(tools_arg.split(",")) == {"Read", "Grep", "Glob"}, (
+            f"--tools value mismatch; got {tools_arg!r}"
+        )
+        # --allowedTools should ALSO appear (pre-approval, no permission prompt).
+        assert "--allowedTools" in cmd
 
     async def test_bundled_explorer_role_ships_with_tight_tools(
         self, tmp_path: Path, monkeypatch
@@ -302,6 +418,7 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "explorer")
 
         opts = captured["options"]
+        assert list(opts.tools) == ["Read", "Grep", "Glob"]
         assert list(opts.allowed_tools) == ["Read", "Grep", "Glob"]
 
 

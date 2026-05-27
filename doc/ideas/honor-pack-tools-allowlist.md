@@ -16,14 +16,13 @@ Make claude-crew honor what Anthropic's own subagent semantics already promise:
    tool surface (allowlist). No SDK-injected "everything else."
 2. **`tools:` absent (key omitted) or `tools: null`** → inherit all tools
    (mirrors Claude Code subagent semantics).
-3. **`tools: []` (explicit empty)** for top-level teammates → wire-equivalent
-   to inherit-all (**SDK limitation** — `claude_agent_sdk` only emits
-   `--allowedTools` when the list is non-empty;
-   see `subprocess_cli.py:238`'s `if effective_allowed_tools:` guard).
-   Both omitted and explicit-empty collapse to "no `--allowedTools` flag" at
-   the wire, so the CLI uses its default (inherit-all). For SUBAGENTS dispatched
-   via Task, the distinction IS preserved (per AgentDefinition serialization);
-   only top-level teammates collapse the two cases.
+3. **`tools: []` (explicit empty)** → true no-tools surface. The fix sets
+   `ClaudeAgentOptions.tools = []` → SDK emits `--tools ""` → CLI restricts
+   the catalog to empty → the model sees no tools. (Mirrors the subagent
+   contract; earlier doc revisions incorrectly claimed this collapsed to
+   inherit-all — that was because the fix initially only set
+   `allowed_tools`, which is pre-approval-only and does NOT restrict the
+   catalog. `tools` is the catalog-restriction field; both are now set.)
 4. **MCP: pack does not declare `mcpServers:` and spawn does not grant any
    via `mcp_servers=`** → **no MCP servers attached.** Today claude-crew
    resolves `mcp_servers` from `~/.claude.json` by default, silently inheriting

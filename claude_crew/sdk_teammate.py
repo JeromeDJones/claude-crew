@@ -1224,15 +1224,28 @@ class SdkTeammate(Teammate):
         # Extract role-level fields from the agents pack.
         role_def = self._agents.get(self.role)
 
-        # allowed_tools: pack `tools:` is the allowlist for the teammate's own
-        # session (mirrors Claude Code subagent semantics). pack omits the key →
-        # don't set allowed_tools at all (CLI default: inherit-all). pack lists
-        # tools (incl. explicit empty []) → set the union (pack ∪ extra_tools ∪
-        # the existing MCP-pre-approval allowed_tools).
-        # See doc/ideas/honor-pack-tools-allowlist.md.
+        # Pack `tools:` becomes the teammate's tool surface — at BOTH wire and
+        # permission layers:
+        #   - opts.tools           → --tools  (CLI's catalog: what the model SEES
+        #                            in the wire prompt; restricts the toolset
+        #                            sent to the model)
+        #   - opts.allowed_tools   → --allowedTools (pre-approval: tools that
+        #                            don't trigger a permission prompt)
+        # Setting only allowed_tools without tools leaves the model seeing the
+        # full default catalog (35+ tool defs); restricting the catalog is what
+        # actually shrinks the wire prompt and makes local-backend teammates
+        # economically viable. See doc/ideas/honor-pack-tools-allowlist.md.
+        #
+        # Semantics:
+        #   - pack omits `tools:` → tools is None → don't set --tools → CLI
+        #     uses its default catalog (inherit-all).
+        #   - pack `tools: []`     → tools is [] → --tools "" → empty catalog
+        #     → true no-tools surface (the model sees no tools at all).
+        #   - pack `tools: [A,B]`  → --tools A,B → catalog limited to A,B.
+        # extras and the existing MCP-pre-approval are unioned in.
         pack_tools_decl = getattr(role_def, "tools", None) if role_def else None
         extras = self._extra_tools or []
-        mcp_extras = self._allowed_tools or []  # existing MCP-tool-id pre-approval
+        mcp_extras = self._allowed_tools or []
         any_explicit = (
             pack_tools_decl is not None or bool(extras) or bool(mcp_extras)
         )
@@ -1240,7 +1253,12 @@ class SdkTeammate(Teammate):
             combined = list(dict.fromkeys(
                 list(pack_tools_decl or []) + list(extras) + list(mcp_extras)
             ))
-            opts_kwargs["allowed_tools"] = combined
+            # --tools (catalog) — restricts what the model sees.
+            opts_kwargs["tools"] = combined
+            # --allowedTools (pre-approval) — only set when non-empty, since the
+            # SDK skips the flag for empty lists (subprocess_cli.py:238).
+            if combined:
+                opts_kwargs["allowed_tools"] = combined
 
         # permissionMode: spawn-time arg wins; falls back to role-pack; None → SDK default.
         effective_pm = self._permission_mode

@@ -73,10 +73,14 @@ class PackFrontmatter:
 
     `model` and `tools` were required pre-#15. Per Claude Code's agent file
     spec, both are optional; absence yields `model=None` (SDK applies its own
-    default) and `tools=()` (empty tuple, NOT None — claude-crew teammates
-    have no parent to inherit from, and the SDK's "inherits all if omitted"
-    semantic would silently grant full tool access). Empty tuple is
-    safe-by-default.
+    default) and `tools` semantics:
+    - omitted in YAML → `tools=None` → inherit-all (mirrors Claude Code
+      subagent semantics; the top-level teammate gets the CLI default).
+    - `tools: []` in YAML → `tools=()` → explicit empty (for SUBAGENTS this
+      is enforced as a no-tools surface; for top-level teammates the SDK
+      collapses this to inherit-all at the ClaudeAgentOptions boundary —
+      see doc/ideas/honor-pack-tools-allowlist.md).
+    - `tools: [Read, Grep]` → `tools=("Read", "Grep")` → strict allowlist.
 
     The ``mcpServers`` field accepts a list of (str | dict) entries — string
     entries reference servers in ``~/.claude.json``; dict entries are inline
@@ -101,7 +105,7 @@ class PackFrontmatter:
     description: str
     name: str | None = None
     model: str | None = None
-    tools: tuple[str, ...] = field(default_factory=tuple)
+    tools: tuple[str, ...] | None = None
     color: str | None = None
     effort: str | None = None
     maxTurns: int | None = None
@@ -217,7 +221,9 @@ def parse_yaml_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, P
     if "tools" not in fm_dict:
         logger.info(
             "agent %r has no tools declared — teammate will inherit all CLI tools "
-            "(declare tools: [] to lock to a no-tools surface)",
+            "(declare a specific list, e.g. `tools: [Read, Grep, Glob]`, to "
+            "restrict; note: `tools: []` does NOT restrict top-level teammates — "
+            "the SDK collapses empty to inherit-all at that boundary)",
             key,
         )
 
@@ -312,7 +318,9 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     if "tools" not in fm_dict:
         logger.info(
             "agent %r has no tools declared — teammate will inherit all CLI tools "
-            "(declare tools: [] to lock to a no-tools surface)",
+            "(declare a specific list, e.g. `tools: [Read, Grep, Glob]`, to "
+            "restrict; note: `tools: []` does NOT restrict top-level teammates — "
+            "the SDK collapses empty to inherit-all at that boundary)",
             key,
         )
     agent_kwargs: dict[str, Any] = {
