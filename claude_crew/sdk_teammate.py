@@ -75,12 +75,17 @@ MAX_CONCURRENT_TOOLS: int = 64
 _SHUTDOWN_SENTINEL: object = object()
 
 # Crew-level env defaults injected into every SDK subprocess.
-# Both keys exist for sound reasons — see the docstring in _run() for details.
-# A caller may override individual keys via the `env` ctor kwarg; a WARN log
-# accompanies any such override (visibility, not a hard error).
+# Each key exists for a specific reason — see the docstring in _run() for
+# details. A caller may override individual keys via the `env` ctor kwarg; a
+# WARN log accompanies any such override (visibility, not a hard error).
 CREW_DEFAULTS: dict[str, str] = {
     "CLAUDE_CREW_UI_PORT": "0",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    # SDK teammates are infrastructure subprocesses, not operator-facing CLI
+    # sessions. The operator's lead session can phone home with Statsig
+    # analytics on the operator's behalf; each spawned teammate would add
+    # duplicate noise. Default off; caller may override via env.
+    "DISABLE_TELEMETRY": "1",
 }
 
 

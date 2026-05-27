@@ -105,10 +105,11 @@ async def test_no_env_override_preserves_crew_defaults(monkeypatch):
     assert env == CREW_DEFAULTS, (
         f"Expected env == CREW_DEFAULTS, got {env!r}"
     )
-    # Explicitly check both keys and values — no extras.
+    # Explicitly check all keys and values — no extras.
     assert env == {
         "CLAUDE_CREW_UI_PORT": "0",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "DISABLE_TELEMETRY": "1",
     }
 
 
@@ -144,12 +145,13 @@ async def test_three_key_caller_env_merged_with_crew_defaults(monkeypatch):
     assert env["ANTHROPIC_API_KEY"] == "sk-local"
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
 
-    # Both crew-default keys must also be present.
+    # All crew-default keys must also be present.
     assert env["CLAUDE_CREW_UI_PORT"] == "0"
     assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert env["DISABLE_TELEMETRY"] == "1"
 
-    # Total: 5 keys.
-    assert len(env) == 5
+    # Total: 3 caller + 3 crew defaults = 6 keys.
+    assert len(env) == 6
 
 
 # ---------------------------------------------------------------------------
