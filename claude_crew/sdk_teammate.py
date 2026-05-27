@@ -1394,13 +1394,16 @@ class SdkTeammate(Teammate):
                     message="empty prompt — nothing to send to model",
                 )
                 return
+            # Derive is_local once for this turn — mirrors broker rule:
+            # bool(env) and "ANTHROPIC_BASE_URL" in env (set by local_backend preset).
+            is_local = bool(self._env) and "ANTHROPIC_BASE_URL" in self._env
             try:
                 # SC-16: use crew-teammate session format instead of "default" (D5).
                 assert self._broker is not None
                 session_id = f"{self._broker.crew_id}-{self.id}"
                 await client.query(prompt, session_id=session_id)
                 result = await asyncio.wait_for(
-                    _collect_response_text(client, self._stamp_activity, self._record_task_notif),
+                    _collect_response_text(client, self._stamp_activity, self._record_task_notif, is_local=is_local),
                     timeout=self._backstop_seconds,
                 )
             except asyncio.TimeoutError:
@@ -1427,7 +1430,7 @@ class SdkTeammate(Teammate):
                 else:
                     try:
                         await asyncio.wait_for(
-                            _collect_response_text(client, self._stamp_activity),
+                            _collect_response_text(client, self._stamp_activity, is_local=is_local),
                             timeout=POST_INTERRUPT_DRAIN_SECONDS,
                         )
                     except asyncio.TimeoutError:
@@ -1524,7 +1527,7 @@ class SdkTeammate(Teammate):
                         await client.query(nudged_prompt, session_id=session_id)
                         remaining_timeout = max(0.0, retry_deadline - time.time())
                         result = await asyncio.wait_for(
-                            _collect_response_text(client, self._stamp_activity, self._record_task_notif),
+                            _collect_response_text(client, self._stamp_activity, self._record_task_notif, is_local=is_local),
                             timeout=remaining_timeout,
                         )
                         text = result.text

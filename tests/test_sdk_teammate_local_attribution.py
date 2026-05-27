@@ -1,9 +1,10 @@
 """Unit tests for local-model token attribution — extract-helper-dual-shape slice.
 
-Covers AT#2, AT#3, AT#5, AT#6 from the local-model-attribution spec.
+Covers AT#2, AT#3, AT#4, AT#5, AT#6 from the local-model-attribution spec.
 
 AT#2 — No double-counting of cached prompt tokens.
 AT#3 — Peak-invocation input attributed from AssistantMessage OpenAI usage.
+AT#4 — _handle_one_turn threads is_local from self._env to _collect_response_text.
 AT#5 — Cost flows through verbatim from ResultMessage.total_cost_usd.
 AT#6 — Ambiguous dual-shape usage (both key families) prefers Anthropic keys.
 """
@@ -11,11 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
 
-from claude_crew.sdk_teammate import _collect_response_text
+import claude_crew.sdk_teammate as sdk_mod
+from claude_crew.sdk_teammate import SdkTeammate, TurnDrainResult, _collect_response_text
+from claude_crew.envelope import Envelope
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
 
 from tests.fakes.sdk import text_response_with_openai_usage
@@ -189,3 +194,75 @@ async def test_dual_shape_prefers_anthropic_keys(caplog: pytest.LogCaptureFixtur
         "Expected an INFO log mentioning both 'input_tokens' and 'prompt_tokens'; "
         f"got records: {[r.getMessage() for r in caplog.records]}"
     )
+
+
+# ── AT#4: is_local threaded from _handle_one_turn ────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env,expected_is_local", [
+    ({"ANTHROPIC_BASE_URL": "http://localhost:11434/v1"}, True),
+    ({"OTHER_KEY": "value"}, False),
+    (None, False),
+])
+async def test_is_local_kwarg_passed_from_handle_one_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict | None,
+    expected_is_local: bool,
+) -> None:
+    """AT#4: _handle_one_turn derives is_local from self._env and passes it to
+    _collect_response_text at every call site.
+
+    Strategy: monkeypatch _collect_response_text with a spy that records the
+    is_local kwarg. Drive _handle_one_turn with a minimal fake client and broker.
+    No network, no SDK subprocess.
+    """
+    captured_is_local: list[bool] = []
+
+    async def _spy_collect(
+        client: Any,
+        stamp_fn: Any = None,
+        record_fn: Any = None,
+        *,
+        is_local: bool = False,
+    ) -> TurnDrainResult:
+        captured_is_local.append(is_local)
+        return TurnDrainResult(text="ok", failed_task_notifs=[])
+
+    monkeypatch.setattr(sdk_mod, "_collect_response_text", _spy_collect)
+
+    # Minimal broker: satisfies crew_id lookup and envelope send.
+    sent: list[Envelope] = []
+
+    class _FakeBroker:
+        crew_id = "test-crew"
+
+        async def send(self, envelope: Envelope) -> None:
+            sent.append(envelope)
+
+    # Minimal client: query is a no-op; receive_response never called (spy intercepts).
+    class _FakeClient:
+        async def query(self, prompt: str, session_id: str | None = None) -> None:
+            pass
+
+    tm = SdkTeammate("t1", "tester", "general", env=env, agents={}, system_prompt="s")
+    tm._broker = _FakeBroker()  # type: ignore[assignment]
+
+    inbox_env = Envelope(
+        id="msg-1",
+        seq=1,
+        sender="lead",
+        recipient="t1",
+        timestamp=time.time(),
+        payload="hello",
+    )
+
+    await tm._handle_one_turn(_FakeClient(), inbox_env)
+
+    # The primary call site must have fired.
+    assert captured_is_local, "_collect_response_text was never called"
+    # Every call site must agree on the derived is_local value.
+    for actual in captured_is_local:
+        assert actual == expected_is_local, (
+            f"Expected is_local={expected_is_local!r}, got {actual!r}; env={env!r}"
+        )
