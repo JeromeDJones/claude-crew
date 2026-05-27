@@ -144,6 +144,7 @@ def make_server(
         permission_mode: str | None = None,
         extra_tools: list[str] | None = None,
         extra_skills: list[str] | None = None,
+        mcp_servers: list[str] | None = None,
         env: dict[str, str] | None = None,
         local_backend: bool | dict | None = None,
     ) -> dict[str, Any]:
@@ -181,6 +182,13 @@ def make_server(
                 connection — no separate mcpServers configuration needed.
             extra_skills: Optional list of additional skill names to grant
                 beyond the pack's declared skills. Additive only.
+            mcp_servers: Optional list of MCP server names (registered in
+                ~/.claude.json) to attach to this teammate. MCP is DENY by
+                default — without this grant AND without a pack-declared
+                `mcpServers:`, the teammate gets no MCP servers (even if the
+                operator has many configured). Unionsed with any pack-declared
+                servers; unknown names are skipped with a WARN, spawn still
+                succeeds.
             env: Optional dict of environment variables to set for the
                 teammate subprocess. Keys and values must both be strings.
                 Empty keys are rejected. Caller keys win on conflict with
@@ -240,6 +248,7 @@ def make_server(
             role=role, name=name, factory=factory,
             model=model, effort=effort, cwd=cwd, permission_mode=permission_mode,
             extra_tools=extra_tools, extra_skills=extra_skills,
+            mcp_servers=mcp_servers,
             env=resolved_env,
         )
         info = next(t for t in broker.list_crew() if t.id == tid)

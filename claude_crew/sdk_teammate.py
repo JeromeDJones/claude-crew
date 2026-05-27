@@ -486,6 +486,8 @@ class SdkTeammate(Teammate):
         cwd: str | None = None,
         permission_mode: str | None = None,
         allowed_tools: "list[str] | None" = None,
+        extra_tools: "list[str] | None" = None,
+        mcp_servers_grant: "list[str] | None" = None,
         env: "dict[str, str] | None" = None,
     ) -> None:
         self.id = id
@@ -564,6 +566,8 @@ class SdkTeammate(Teammate):
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._allowed_tools = allowed_tools
+        self._extra_tools = extra_tools
+        self._mcp_servers_grant = mcp_servers_grant
         # Validate and store per-teammate env override.
         if env is not None:
             for k, v in env.items():
@@ -1220,9 +1224,23 @@ class SdkTeammate(Teammate):
         # Extract role-level fields from the agents pack.
         role_def = self._agents.get(self.role)
 
-        # allowed_tools: pre-approve specific tool IDs (e.g. MCP tools granted via extra_tools).
-        if self._allowed_tools:
-            opts_kwargs["allowed_tools"] = self._allowed_tools
+        # allowed_tools: pack `tools:` is the allowlist for the teammate's own
+        # session (mirrors Claude Code subagent semantics). pack omits the key →
+        # don't set allowed_tools at all (CLI default: inherit-all). pack lists
+        # tools (incl. explicit empty []) → set the union (pack ∪ extra_tools ∪
+        # the existing MCP-pre-approval allowed_tools).
+        # See doc/ideas/honor-pack-tools-allowlist.md.
+        pack_tools_decl = getattr(role_def, "tools", None) if role_def else None
+        extras = self._extra_tools or []
+        mcp_extras = self._allowed_tools or []  # existing MCP-tool-id pre-approval
+        any_explicit = (
+            pack_tools_decl is not None or bool(extras) or bool(mcp_extras)
+        )
+        if any_explicit:
+            combined = list(dict.fromkeys(
+                list(pack_tools_decl or []) + list(extras) + list(mcp_extras)
+            ))
+            opts_kwargs["allowed_tools"] = combined
 
         # permissionMode: spawn-time arg wins; falls back to role-pack; None → SDK default.
         effective_pm = self._permission_mode
@@ -1240,14 +1258,25 @@ class SdkTeammate(Teammate):
             if role_disallowed is not None:
                 opts_kwargs["disallowed_tools"] = role_disallowed
 
-            # Feature #17 D-4: mcpServers translates list[str|dict] → dict
-            # via name resolution against ~/.claude.json (string entries) and
-            # name-stripped inline pass-through (dict entries).
-            role_mcp = getattr(role_def, "mcpServers", None)
-            if role_mcp:
-                opts_kwargs["mcp_servers"] = _resolve_mcp_servers(
-                    role_mcp, self.role, self.id, home_dir=None,
-                )
+        # mcp_servers: DENY by default. Always set this key explicitly (even to
+        # {}) so the CLI subprocess does NOT fall back to inheriting servers
+        # from ~/.claude.json. The effective set is the union of pack-declared
+        # `mcpServers:` and the spawn-time `mcp_servers` grant; both forms are
+        # resolved through _resolve_mcp_servers (string-name → ~/.claude.json
+        # config; inline-dict pass-through).
+        # See doc/ideas/honor-pack-tools-allowlist.md.
+        pack_mcp_resolved: dict[str, dict[str, Any]] = {}
+        role_mcp = getattr(role_def, "mcpServers", None) if role_def else None
+        if role_mcp:
+            pack_mcp_resolved = _resolve_mcp_servers(
+                role_mcp, self.role, self.id, home_dir=None,
+            )
+        spawn_mcp_resolved: dict[str, dict[str, Any]] = {}
+        if self._mcp_servers_grant:
+            spawn_mcp_resolved = _resolve_mcp_servers(
+                list(self._mcp_servers_grant), self.role, self.id, home_dir=None,
+            )
+        opts_kwargs["mcp_servers"] = {**pack_mcp_resolved, **spawn_mcp_resolved}
 
 
         # cwd: spawn-time only.

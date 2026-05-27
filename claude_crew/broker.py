@@ -187,6 +187,7 @@ class Broker:
         agent_def_resolver: "AgentDefResolver | None" = None,
         extra_tools: list[str] | None = None,
         extra_skills: list[str] | None = None,
+        mcp_servers: list[str] | None = None,
         env: "dict[str, str] | None" = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
@@ -196,6 +197,7 @@ class Broker:
             "model": model, "effort": effort, "cwd": cwd,
             "permission_mode": permission_mode,
             "extra_tools": extra_tools, "extra_skills": extra_skills,
+            "mcp_servers": mcp_servers,
         }
         if env is not None:
             factory_kwargs["env"] = env

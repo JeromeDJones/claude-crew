@@ -73,8 +73,10 @@ class TestMinimalPackE2E:
         )
 
         # SC-3, SC-4: optional model/tools default safely.
+        # Pack-omitted tools is now None (inherit-all); see
+        # doc/ideas/honor-pack-tools-allowlist.md.
         assert merged["minimal-probe"].model is None
-        assert merged["minimal-probe"].tools == []
+        assert merged["minimal-probe"].tools is None
 
         # SC-7: prompt leads with substrate guidance.
         assert merged["minimal-probe"].prompt.startswith(SUBSTRATE_SUBAGENT_GUIDANCE)
