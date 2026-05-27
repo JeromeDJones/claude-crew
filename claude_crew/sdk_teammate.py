@@ -1296,6 +1296,12 @@ class SdkTeammate(Teammate):
             )
         opts_kwargs["mcp_servers"] = {**pack_mcp_resolved, **spawn_mcp_resolved}
 
+        # Add unconditional --strict-mcp-config via extra_args pass-through.
+        # Merge semantics: setdefault preserves any pre-existing extra_args; the
+        # strict-mcp-config key is set unconditionally (claude-crew always honors
+        # the deny-by-default allowlist contract).
+        # See Design Decisions → "Allowlist Completeness"; AT#9.
+        opts_kwargs.setdefault("extra_args", {})["strict-mcp-config"] = None
 
         # cwd: spawn-time only.
         if self._cwd is not None:
