@@ -73,10 +73,14 @@ class PackFrontmatter:
 
     `model` and `tools` were required pre-#15. Per Claude Code's agent file
     spec, both are optional; absence yields `model=None` (SDK applies its own
-    default) and `tools=()` (empty tuple, NOT None — claude-crew teammates
-    have no parent to inherit from, and the SDK's "inherits all if omitted"
-    semantic would silently grant full tool access). Empty tuple is
-    safe-by-default.
+    default) and `tools` semantics:
+    - omitted in YAML → `tools=None` → inherit-all (mirrors Claude Code
+      subagent semantics; the top-level teammate gets the CLI default).
+    - `tools: []` in YAML → `tools=()` → true no-tools surface: the spawn
+      path sets `ClaudeAgentOptions.tools=[]` which emits `--tools ""`,
+      restricting the CLI catalog to empty for both subagents AND top-level
+      teammates. See doc/ideas/honor-pack-tools-allowlist.md.
+    - `tools: [Read, Grep]` → `tools=("Read", "Grep")` → strict allowlist.
 
     The ``mcpServers`` field accepts a list of (str | dict) entries — string
     entries reference servers in ``~/.claude.json``; dict entries are inline
@@ -101,7 +105,7 @@ class PackFrontmatter:
     description: str
     name: str | None = None
     model: str | None = None
-    tools: tuple[str, ...] = field(default_factory=tuple)
+    tools: tuple[str, ...] | None = None
     color: str | None = None
     effort: str | None = None
     maxTurns: int | None = None
@@ -216,14 +220,18 @@ def parse_yaml_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, P
 
     if "tools" not in fm_dict:
         logger.info(
-            "agent %r has no tools declared — teammate will spawn but cannot invoke tools",
+            "agent %r has no tools declared — teammate will inherit all CLI tools. "
+            "Declare a specific list (e.g. `tools: [Read, Grep, Glob]`) to "
+            "restrict, or `tools: []` for a true no-tools surface.",
             key,
         )
 
     agent_kwargs: dict[str, Any] = {
         "description": fm.description,
         "prompt": build_subagent_prompt(body),
-        "tools": list(fm.tools),
+        # Pack-tools is now None when the YAML key was omitted (inherit-all
+        # semantics), [] when explicitly empty (no-tools surface).
+        "tools": list(fm.tools) if fm.tools is not None else None,
         "model": fm.model,
         "effort": fm.effort,
         "maxTurns": fm.maxTurns,
@@ -308,13 +316,17 @@ def parse_pack_text(text: str, path: Path) -> tuple[str, AgentDefinition, PackFr
     # "operator forgot" (INFO) from "operator chose empty" (silent).
     if "tools" not in fm_dict:
         logger.info(
-            "agent %r has no tools declared — teammate will spawn but cannot invoke tools",
+            "agent %r has no tools declared — teammate will inherit all CLI tools. "
+            "Declare a specific list (e.g. `tools: [Read, Grep, Glob]`) to "
+            "restrict, or `tools: []` for a true no-tools surface.",
             key,
         )
     agent_kwargs: dict[str, Any] = {
         "description": fm.description,
         "prompt": build_subagent_prompt(body),
-        "tools": list(fm.tools),
+        # Pack-tools is now None when the YAML key was omitted (inherit-all
+        # semantics), [] when explicitly empty (no-tools surface).
+        "tools": list(fm.tools) if fm.tools is not None else None,
         "model": fm.model,
         "effort": fm.effort,
         "maxTurns": fm.maxTurns,
@@ -508,7 +520,14 @@ def _validate_frontmatter(d: dict[str, Any], path: Path) -> PackFrontmatter:
         description=str(d["description"]),
         name=raw_name if raw_name is not None else None,
         model=str(d["model"]) if d.get("model") is not None else None,
-        tools=tuple(_coerce_str_or_list(d["tools"], "tools", path)) if "tools" in d else (),
+        # Distinguish "tools: omitted" (None → inherit-all per Claude Code subagent
+        # semantics) from "tools: []" (explicit empty surface). Was previously
+        # collapsed to () for both cases; the distinction is now load-bearing.
+        # See doc/ideas/honor-pack-tools-allowlist.md.
+        tools=(
+            tuple(_coerce_str_or_list(d["tools"], "tools", path))
+            if "tools" in d else None
+        ),
         color=str(d["color"]) if d.get("color") is not None else None,
         effort=str(d["effort"]) if d.get("effort") is not None else None,
         maxTurns=int(d["maxTurns"]) if d.get("maxTurns") is not None else None,

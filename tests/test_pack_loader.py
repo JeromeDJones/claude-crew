@@ -519,8 +519,12 @@ class TestOptionalTools:
         ])
         with caplog.at_level(logging.INFO, logger=LOGGER):
             _, agent, fm, _ = parse_pack_text(text, tmp_path / "agent.md")
-        assert fm.tools == ()
-        assert agent.tools == []
+        # Pack-omitted tools is now None (inherit-all signal, mirrors Claude
+        # Code subagent semantics). Previously defaulted to () / [] which
+        # collapsed missing-key with explicit-empty.
+        # See doc/ideas/honor-pack-tools-allowlist.md.
+        assert fm.tools is None
+        assert agent.tools is None
 
     def test_pack_without_tools_emits_info(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         text = _build_pack([
@@ -590,8 +594,9 @@ class TestMinimalPack:
             _, agent, fm, _ = parse_pack_text(text, tmp_path / "minimal-probe.md")
         assert fm.description == "A minimal probe."
         assert fm.model is None
-        assert fm.tools == ()
-        assert agent.tools == []
+        # Pack-omitted tools is now None (inherit-all). See honor-pack-tools-allowlist.
+        assert fm.tools is None
+        assert agent.tools is None
         assert agent.model is None
 
 
