@@ -1,12 +1,13 @@
 # Honor pack-declared tools as allowlist; deny MCP unless granted
 
 **Status:** idea — ship ASAP for token savings
-**Why now:** local-backed (Qwen/Gemma) teammates are economically gated by wire
-prompt size. A single explorer spawn currently sends **~107 KB / ~27K tokens** —
-the pack body is only 1.7 KB; **103 KB is tool defs (35 tools)** the SDK auto-
-injects because we never honor the pack's declared tool list. Fixing this
-alone drops the explorer wire prompt to ~3 KB and turn-1 latency from ~7 min
-to seconds on Qwen 3.6.
+**Why now:** wire-prompt size matters everywhere request-size drives latency
+or cost (small / lower-throughput backends are the most punishing case but the
+win is universal). A single explorer spawn currently sends **~107 KB / ~27K
+tokens** — the pack body is only 1.7 KB; **103 KB is tool defs (35 tools)** the
+SDK auto-injects because we never honor the pack's declared tool list. Fixing
+this drops the explorer wire prompt to ~3 KB; observed on a small-context
+backend, turn-1 latency went from ~7 min to seconds.
 
 ## What this idea does (scope of the minimum fix)
 
@@ -47,7 +48,7 @@ the richer contract.
 
 ## Current behavior (the bug, with evidence)
 
-Verified 2026-05-25 via ccr request-body log + the explorer pack file
+Verified 2026-05-25 via an upstream-gateway request-body log + the explorer pack file
 (`claude_crew/subagents/explorer.md`):
 
 ```
@@ -80,7 +81,7 @@ MCP plumbing: `_resolve_mcp_servers` in `sdk_teammate.py` reads
 
 ## Validation
 
-- **Wire-level**: spawn a default explorer, inspect ccr request body, assert
+- **Wire-level**: spawn a default explorer, inspect the upstream-gateway request body, assert
   tool count and total bytes ≤ a budget (e.g. tools ≤ 5, request body ≤ 10 KB).
 - **Behavior**: spawn an explorer, ask it to try a denied tool (Bash); assert
   the tool is not available (model can't call it, OR the SDK rejects).
@@ -88,8 +89,8 @@ MCP plumbing: `_resolve_mcp_servers` in `sdk_teammate.py` reads
   in the request body.
 - **Backward compat**: existing `extra_tools=` callers still see their extras
   added on top of pack tools.
-- **Local-backend smoke**: turn-1 latency on Qwen for a default explorer
-  should drop dramatically (~7 min → seconds for a trivial reply).
+- **Small-backend smoke**: turn-1 latency for a default explorer should drop
+  dramatically on any small-context backend (~7 min → seconds for a trivial reply).
 
 ## Cross-reference
 

@@ -63,7 +63,7 @@ if options.skills is not None:
 
 So: **a pack that declares any `skills:` is implicitly opting into the full user+project settings load**, which includes plugin-provided MCP servers (see §4) regardless of what the pack's own `tools:` allowlist says.
 
-**Consequence:** a pack with `tools: [Read, Grep, Glob, Write, Agent]` and `skills: [plan-feature]` still gets context-mode's `mcp__plugin_context-mode_context-mode__ctx_*` tools wired in if context-mode is installed as a user-level plugin. Verified live 2026-05-26 with `rr-planner` for the `local-model-attribution` slice.
+**Consequence:** a pack with `tools: [Read, Grep, Glob, Write, Agent]` and `skills: [plan-feature]` still gets context-mode's `mcp__plugin_context-mode_context-mode__ctx_*` tools wired in if context-mode is installed as a user-level plugin. Verified live 2026-05-26 with `rr-planner` for the `plugin-MCP-isolation` slice.
 
 ---
 
@@ -90,7 +90,7 @@ Pass `--strict-mcp-config` to the CLI subprocess via the SDK's generic `extra_ar
 opts_kwargs.setdefault("extra_args", {})["strict-mcp-config"] = None
 ```
 
-With `--strict-mcp-config`, the CLI ignores all MCP sources except the explicit `--mcp-config` payload (which claude-crew already writes as deny-by-default empty). Plugin-MCP suppression, no other behavior change. Being implemented as task #5 of the `local-model-attribution` slice.
+With `--strict-mcp-config`, the CLI ignores all MCP sources except the explicit `--mcp-config` payload (which claude-crew already writes as deny-by-default empty). Plugin-MCP suppression, no other behavior change. Being implemented as task #5 of the `plugin-MCP-isolation` slice.
 
 **Secondary consideration not addressed by `--strict-mcp-config`:** the rest of the `setting_sources=["user","project"]` payload (hooks, sub-agents, slash commands, CLAUDE.md auto-discovery) still loads. Locking those down requires overriding `setting_sources=[]` and loading the pack's own skills via an alternate channel (`--agents`, explicit paths). Trade-off: stricter isolation vs. losing user-level conveniences. Filed but not in scope for the current allowlist fix.
 
@@ -135,4 +135,4 @@ When something looks wrong, the fastest paths to ground-truth:
 ## 8. History
 
 - **2026-05-19** — honor-pack-tools-allowlist (`c683922`) makes pack `tools:` the wire catalog AND pre-approval set, with `~/.claude.json` mcpServers deny-by-default. Closed the original 107 KB / 35-tool wire-prompt bug on Qwen-backed teammates.
-- **2026-05-26** — discovered the plugin-MCP leak via context-mode tools being called by rr-planner despite the pack not granting them. Root cause: SDK auto-defaulting `setting_sources=["user","project"]` whenever `skills:` is declared. Fix scope: add `--strict-mcp-config` via `extra_args`. Tracked as task #5 of the `local-model-attribution` slice.
+- **2026-05-26** — discovered the plugin-MCP leak via context-mode tools being called by rr-planner despite the pack not granting them. Root cause: SDK auto-defaulting `setting_sources=["user","project"]` whenever `skills:` is declared. Fix scope: add `--strict-mcp-config` via `extra_args`. Tracked as task #5 of the `plugin-MCP-isolation` slice.

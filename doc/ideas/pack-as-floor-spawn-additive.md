@@ -96,7 +96,7 @@ environment beyond what the pack declares + what spawn grants.
 - **Unit-level**: a `resolve_surface(pack, spawn_args) → ResolvedSurface`
   pure function with happy + sad cases for every cell of the tables above.
 - **Integration-level**: spawn teammates with each combination, inspect the
-  ccr request body or `ClaudeAgentOptions`, assert the effective tool/MCP
+  upstream-gateway request body or `ClaudeAgentOptions`, assert the effective tool/MCP
   lists.
 - **Regression check**: bundled `explorer`/`planner`/`general` teammates
   spawned without any spawn-time additions still get the same tool sets they

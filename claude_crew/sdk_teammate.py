@@ -1247,8 +1247,9 @@ class SdkTeammate(Teammate):
         #                            don't trigger a permission prompt)
         # Setting only allowed_tools without tools leaves the model seeing the
         # full default catalog (35+ tool defs); restricting the catalog is what
-        # actually shrinks the wire prompt and makes local-backend teammates
-        # economically viable. See doc/ideas/honor-pack-tools-allowlist.md.
+        # actually shrinks the wire prompt — meaningful for backends where
+        # request size drives cost or throughput. See
+        # doc/ideas/honor-pack-tools-allowlist.md.
         #
         # Semantics:
         #   - pack omits `tools:` → tools is None → don't set --tools → CLI
