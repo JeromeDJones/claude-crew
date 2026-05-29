@@ -30,7 +30,6 @@ from claude_crew.artifact_registry import ArtifactRegistry
 from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
 from claude_crew.ctx_window import resolve_ctx_window
 from claude_crew.instance_registry import InstanceRegistry
-from claude_crew.local_model_metrics import fetch_local_slot_metrics
 from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
 from claude_crew.teammate import ToolEvent
 
@@ -38,9 +37,6 @@ _logger = logging.getLogger(__name__)
 
 _DASHBOARD_PATH = Path(__file__).parent / "ui" / "dashboard.html"
 _POLL_INTERVAL = 1.5
-# Cadence of the background local-model /slots probe. Decoupled from the state
-# build / push loop so a slow-or-down backend can never stall _build_state.
-_LOCAL_PROBE_INTERVAL = 5.0
 _BRANCH_TTL_SECONDS = 30
 _BRANCH_DETECT_TIMEOUT = 2.0
 # Server-side cap on the /wait-messages long-poll, mirroring the MCP
@@ -173,25 +169,6 @@ class UIServer:
         # Long-lived client: connection pooling across push cycles.
         # Closed in serve()'s finally block.
         self._http_client = httpx.AsyncClient(timeout=2.0)
-        # Optional local-model metrics probe URL (e.g. "http://127.0.0.1:8080").
-        # When set, _build_state fetches the local llama.cpp /slots gauge and the
-        # ctx-window resolver uses it for local-backed teammates. Unset = disabled
-        # (Anthropic strategy for all). Opt-in so non-local crews never probe.
-        self._local_model_url = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_URL")
-        # The /slots probe powers the live local ctx-window gauge. It runs on a
-        # background task (_local_probe_loop) on its own cadence and writes the
-        # latest result into _local_metrics_cache; _build_state reads that cache
-        # synchronously and NEVER awaits the network. This keeps a slow-or-down
-        # backend from stalling state builds and flapping crews to "unreachable"
-        # (a down localhost port drops SYNs here rather than refusing, so an
-        # inline probe would block the full timeout every build). Default ON;
-        # set CLAUDE_CREW_LOCAL_MODEL_PROBE=0 to disable entirely (no task,
-        # no gauge).
-        self._local_model_probe = os.environ.get("CLAUDE_CREW_LOCAL_MODEL_PROBE", "1") != "0"
-        # Latest /slots metrics (or None when the backend is down/slow/absent),
-        # refreshed by _local_probe_loop. Read synchronously by _build_state.
-        self._local_metrics_cache: dict[str, Any] | None = None
-        self._local_metrics_task: asyncio.Task | None = None
         # The uvicorn.Server instance owning the serving loop; populated in
         # serve() so external callers (e.g. test harnesses driving the server
         # in a thread) can request shutdown via `should_exit = True`.
@@ -229,7 +206,7 @@ class UIServer:
         return branch
 
     def _build_local_instance(
-        self, snapshot: BrokerSnapshot, local_metrics: "dict[str, Any] | None" = None
+        self, snapshot: BrokerSnapshot
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Build the local broker's instance dict and transcript list FROM A SNAPSHOT.
 
@@ -302,18 +279,10 @@ class UIServer:
                         "out": agent_last_out,
                         "peak_in": agent_last_peak,
                     },
-                    # Canonical context-window metric — one sink, strategy chosen
-                    # per teammate: local /slots for local-backed teammates, else
-                    # Anthropic usage. Rendered source-agnostically by the dashboard.
-                    "ctx_window": resolve_ctx_window(
-                        is_local=(live_entry.is_local if live_entry is not None else False),
-                        peak_in=agent_last_peak,
-                        local_metrics=(
-                            local_metrics
-                            if (live_entry is not None and live_entry.is_local)
-                            else None
-                        ),
-                    ),
+                    # Canonical context-window metric — Anthropic peak-invocation
+                    # input tokens against the 200k context limit. Rendered
+                    # source-agnostically by the dashboard.
+                    "ctx_window": resolve_ctx_window(peak_in=agent_last_peak),
                     "tools": current_tool_names,
                     "current_tool": snap.get("current_tool"),
                     "oldest_in_flight": oldest_in_flight,
@@ -367,10 +336,7 @@ class UIServer:
                             "out": agent_last_out,
                             "peak_in": agent_last_peak,
                         },
-                        # Dead teammates: backend unknown post-death → Anthropic strategy.
-                        "ctx_window": resolve_ctx_window(
-                            is_local=False, peak_in=agent_last_peak, local_metrics=None
-                        ),
+                        "ctx_window": resolve_ctx_window(peak_in=agent_last_peak),
                         "tools": [],
                         "current_tool": None,
                         "oldest_in_flight": None,
@@ -506,57 +472,9 @@ class UIServer:
         except Exception:
             return None
 
-    def _ensure_local_probe(self) -> None:
-        """Start the background /slots probe once, if enabled. Idempotent and
-        cheap (no await, single attribute check). Called only from serve() so
-        the task's lifetime is bound to serve()'s finally (cancel + await).
-        Any future caller MUST go through serve() or arrange equivalent
-        teardown — abandoned tasks emit `Task was destroyed but it is pending`."""
-        if self._local_metrics_task is not None:
-            return
-        if not (self._local_model_url and self._local_model_probe):
-            return
-        self._local_metrics_task = asyncio.create_task(self._local_probe_loop())
-
-    async def _refresh_local_metrics(self) -> None:
-        """One /slots probe → cache write. Metrics on success, None on any
-        failure/timeout (a down backend self-hides the gauge). Re-raises only
-        CancelledError so the owning task can be torn down cleanly."""
-        try:
-            self._local_metrics_cache = await fetch_local_slot_metrics(
-                self._local_model_url, client=self._http_client
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._local_metrics_cache = None
-
-    async def _local_probe_loop(self) -> None:
-        """Refresh the local-model /slots cache on a fixed cadence.
-
-        Runs off the state-build path so a slow-or-down backend can never stall
-        _build_state. Each cycle refreshes the cache and sleeps
-        _LOCAL_PROBE_INTERVAL. A swallowed-exception refresh keeps the loop
-        alive; the loop only exits via cancellation, which serve()'s finally
-        issues during shutdown (the only sanctioned start path).
-        """
-        while True:
-            await self._refresh_local_metrics()
-            await asyncio.sleep(_LOCAL_PROBE_INTERVAL)
-
     async def _build_state(self, local_only: bool = False) -> dict[str, Any]:
         snapshot = self._broker.snapshot(log_limit=200)
-        # Local-model gauge: read the latest cached /slots metrics WITHOUT any
-        # network I/O. _local_probe_loop refreshes the cache on its own cadence;
-        # reading it here keeps _build_state instant even when the backend hangs.
-        # The ctx-window resolver inside _build_local_instance applies it to
-        # local-backed teammates. Each instance caches its own local model; the
-        # value rides _fetch_remote_state's wholesale copy, so no proxy endpoint
-        # is needed.
-        local_metrics = None
-        if self._local_model_url and self._local_model_probe:
-            local_metrics = self._local_metrics_cache
-        local_instance, local_messages = self._build_local_instance(snapshot, local_metrics)
+        local_instance, local_messages = self._build_local_instance(snapshot)
         instances: list[dict[str, Any]] = [local_instance]
         transcripts: dict[str, list] = {snapshot.crew_id: local_messages}
 
@@ -898,7 +816,6 @@ class UIServer:
     async def serve(self) -> None:
         if self._registry is not None:
             self._registry.register()
-        self._ensure_local_probe()
         try:
             if self._sock is not None:
                 # The fd= path inherits whatever address the pre-bound socket
@@ -925,12 +842,6 @@ class UIServer:
             self._uvicorn_server = server
             await server.serve()
         finally:
-            if self._local_metrics_task is not None:
-                self._local_metrics_task.cancel()
-                try:
-                    await self._local_metrics_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             if self._sock is not None:
                 try:
                     self._sock.close()
