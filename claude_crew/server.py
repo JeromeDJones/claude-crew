@@ -17,7 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from claude_crew.auth import validate_auth_or_exit
-from claude_crew.local_backend import local_backend_env
+from claude_crew.backend_routing import custom_endpoint_env
 from claude_crew.subagents._loader import _VALID_PERMISSION_MODES
 from claude_crew.broker import (
     LEAD_ID,
@@ -146,7 +146,7 @@ def make_server(
         extra_skills: list[str] | None = None,
         mcp_servers: list[str] | None = None,
         env: dict[str, str] | None = None,
-        local_backend: bool | dict | None = None,
+        custom_endpoint: dict | None = None,
     ) -> dict[str, Any]:
         """Spawn a new teammate with the given role.
 
@@ -193,11 +193,16 @@ def make_server(
                 teammate subprocess. Keys and values must both be strings.
                 Empty keys are rejected. Caller keys win on conflict with
                 crew defaults; use with care.
-            local_backend: Optional preset for routing the teammate through a
-                local model backend (e.g. ccr / llama.cpp). Pass True to use
-                default settings (base_url=http://127.0.0.1:3456), or a dict
-                with optional "base_url" and/or "api_key" overrides. Explicit
-                env keys win over preset values.
+            custom_endpoint: Optional preset for routing the teammate to a
+                custom Anthropic-shape endpoint (gateway, proxy, self-hosted
+                router). Dict with required "base_url" and optional "api_key".
+                Expands to ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, and
+                CLAUDE_CODE_ATTRIBUTION_HEADER=0. The endpoint MUST produce
+                Anthropic-shape responses — claude-crew's attribution path
+                assumes that shape uniformly. For Amazon Bedrock, pass the
+                output of ``claude_crew.backend_routing.bedrock_env(...)``
+                via the ``env`` parameter instead. Explicit ``env`` keys
+                win over preset values.
         """
         if permission_mode is not None and permission_mode not in _VALID_PERMISSION_MODES:
             raise ToolError(
@@ -229,16 +234,18 @@ def make_server(
                         "all env values must be strings"
                     )
 
-        # Resolve local_backend preset → base env dict (empty if no preset).
+        # Resolve custom_endpoint preset → base env dict (empty if no preset).
         resolved_env: dict[str, str] | None = None
-        if local_backend:
-            preset_kwargs: dict[str, str] = {}
-            if isinstance(local_backend, dict):
-                if "base_url" in local_backend:
-                    preset_kwargs["base_url"] = local_backend["base_url"]
-                if "api_key" in local_backend:
-                    preset_kwargs["api_key"] = local_backend["api_key"]
-            preset = local_backend_env(**preset_kwargs)
+        if custom_endpoint:
+            if not isinstance(custom_endpoint, dict) or "base_url" not in custom_endpoint:
+                raise ToolError(
+                    "custom_endpoint must be a dict with required 'base_url' "
+                    "(and optional 'api_key')"
+                )
+            preset_kwargs: dict[str, str] = {"base_url": custom_endpoint["base_url"]}
+            if "api_key" in custom_endpoint:
+                preset_kwargs["api_key"] = custom_endpoint["api_key"]
+            preset = custom_endpoint_env(**preset_kwargs)
             # Merge: preset as base, explicit env wins on conflict.
             resolved_env = {**preset, **(env or {})}
         elif env:

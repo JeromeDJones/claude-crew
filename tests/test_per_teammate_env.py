@@ -262,39 +262,45 @@ async def test_env_non_string_value_rejected_at_mcp_boundary():
 
 
 # ---------------------------------------------------------------------------
-# AT 8 — local_backend=True expands to the three-var preset
+# AT 8 — custom_endpoint preset expands to the three-var Anthropic-shape env
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_local_backend_preset_expands_to_three_vars():
-    """AT 8: spawn_teammate(local_backend=True) → broker receives the three preset vars."""
-    server, broker, spawn_calls = _make_server_with_spy_broker()
-
-    await _call_spawn_tool(server, role="builder", local_backend=True)
-
-    assert len(spawn_calls) == 1
-    env = spawn_calls[0].get("env")
-    assert env is not None, "broker must receive env kwarg"
-    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456"
-    assert env["ANTHROPIC_API_KEY"] == "sk-local-no-key-required"
-    assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
-
-
-# ---------------------------------------------------------------------------
-# AT 9 — local_backend=True + explicit env: explicit key wins
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_local_backend_with_explicit_env_explicit_wins():
-    """AT 9: local_backend=True AND env={'ANTHROPIC_API_KEY': 'sk-override'} → explicit wins."""
+async def test_custom_endpoint_preset_expands_to_three_vars():
+    """AT 8: spawn_teammate(custom_endpoint={"base_url": …}) →
+    broker receives the three preset vars."""
     server, broker, spawn_calls = _make_server_with_spy_broker()
 
     await _call_spawn_tool(
         server,
         role="builder",
-        local_backend=True,
+        custom_endpoint={"base_url": "http://127.0.0.1:3456"},
+    )
+
+    assert len(spawn_calls) == 1
+    env = spawn_calls[0].get("env")
+    assert env is not None, "broker must receive env kwarg"
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456"
+    assert env["ANTHROPIC_API_KEY"] == "sk-custom-no-key-required"
+    assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# AT 9 — custom_endpoint preset + explicit env: explicit key wins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_custom_endpoint_with_explicit_env_explicit_wins():
+    """AT 9: custom_endpoint preset AND env={'ANTHROPIC_API_KEY': 'sk-override'}
+    → explicit wins."""
+    server, broker, spawn_calls = _make_server_with_spy_broker()
+
+    await _call_spawn_tool(
+        server,
+        role="builder",
+        custom_endpoint={"base_url": "http://127.0.0.1:3456"},
         env={"ANTHROPIC_API_KEY": "sk-override"},
     )
 
