@@ -100,11 +100,6 @@ class LiveTeammateInfo:
     # None when no AgentDefinition was resolved for the role; omitted from
     # the WS payload in that case (key absent, not null).
     config: "dict[str, Any] | None" = None
-    # True when the teammate is routed to a local backend — derived from the
-    # teammate's env carrying ANTHROPIC_BASE_URL (e.g. spawned with
-    # local_backend=True). Drives the dashboard's context-window strategy
-    # selection (local /slots metrics vs Anthropic usage).
-    is_local: bool = False
 
 
 @dataclass(frozen=True)
@@ -768,14 +763,8 @@ class Broker:
             model = getattr(teammate, "_model", None) if teammate is not None else None
             # Config snapshot taken at spawn time; None when no AgentDef resolved.
             config = self._configs.get(info.id)
-            # Local-backend detection: a teammate routed to a local model carries
-            # ANTHROPIC_BASE_URL in its env (set by the local_backend preset or a
-            # raw env override). Derived here, never stored separately.
-            env = getattr(teammate, "_env", None) if teammate is not None else None
-            is_local = bool(env) and "ANTHROPIC_BASE_URL" in env
             live_entries.append(LiveTeammateInfo(
                 info=info, status=status, model=model, config=config,
-                is_local=is_local,
             ))
 
         if log_limit is None:
