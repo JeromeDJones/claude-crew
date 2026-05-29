@@ -40,6 +40,8 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ## [2026-05-20] Feature candidate: crew-artifact viewer (surface docs in the dashboard)
 
+> **SHIPPED** — merged `ea8709a` (`feat/crew-artifact-viewer`). Active `surface_document(path, title)` MCP tool + opaque-id `/artifact/<crew_id>/<artifact_id>` endpoint + drawer/tray/pill UI with sanitizing markdown render (XSS gate). Server layer `b1bdeb9`, client surface `b827d31`, production wire-up + sentinel hardening `80d7ffa`. Active-only shape (no passive auto-list) as recommended.
+
 ### Operator should be able to read the spec/reports/plans the crew is working from, rendered in Mission Control
 
 - **What**: A dashboard surface that renders a crew artifact (markdown doc) nicely in the UI — spec, plan-review report, build report, plan doc, etc. Today the operator cannot see the artifacts the crew produces/consumes without leaving the dashboard and reading files on disk (e.g. a repo-react run buries everything in `.rr/specs/`, `.rr/reports/`). The coordinator-in-the-loop can see *that* agents are working but not *what they're working from*.
@@ -89,7 +91,9 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ## [2026-05-19] Feature: multi-scope-agent-memory
 
-> **Update (2026-05-20):** items 1, 3, and 4 below were **RESOLVED** in `fix/memory-scope-typing` (commit `a0f1f7b`, merged to master 2026-05-20). Item 2 (inline-import hoist) remains **OPEN** — deferred as cosmetic / possibly load-bearing.
+> **Update (2026-05-20):** items 1, 3, and 4 below were **RESOLVED** in `fix/memory-scope-typing` (commit `a0f1f7b`, merged to master 2026-05-20).
+>
+> **Update (2026-05-29):** item 2 (inline-import hoist) **RESOLVED** in `refactor/hoist-teammate-memory-imports`. Cycle check was clean (`teammate_memory` → `teammate_prompt` → `typing.Any` only); the "load-bearing-by-fear" comment was wrong. Hoisted the two **runtime** inline imports (`__init__` site + PreToolUse hook site) to module top in `sdk_teammate.py`. `Scope` was deliberately **kept under `TYPE_CHECKING`** — with `from __future__ import annotations` active, its sole use is a lazy annotation, so a runtime import would be gratuitous (it was never the inline-import smell). Full suite green.
 
 ### ✅ RESOLVED `Scope` type alias missing — signatures typed `str` instead of `Literal`
 
@@ -99,9 +103,9 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 - **Why it matters**: Static type checkers won't flag invalid scope literals passed to these helpers; future callers have no IDE completion for valid values. Flagged `feature.spec.type-drift.scope-literal` in `multi-scope-agent-memory-feature-review-0.md`.
 - **Suggested action**: Add `Scope = Literal["user", "project", "local"]` at module top; re-type the three signatures. Simultaneously tighten `build_memory_section`'s else-branch to `raise ValueError` (mirror `memory_dir`) per the scope-fallthrough finding below. XS change.
 
-### ⏳ OPEN Inline import in `sdk_teammate.__init__` unjustified
+### ✅ RESOLVED Inline import in `sdk_teammate.__init__` unjustified
 
-- **Status**: OPEN (deferred 2026-05-20). Left inline intentionally — likely guards a circular import (`teammate_memory` → `teammate_prompt` → `sdk_teammate`); cosmetic. The follow-up slice added a `TYPE_CHECKING`-only import of `Scope` alongside it, confirming the runtime import must stay inline. Hoist only after proving no cycle.
+- **Status**: RESOLVED 2026-05-29 (`refactor/hoist-teammate-memory-imports`). Cycle hypothesis disproven by inspection — `teammate_memory.py` imports only `teammate_prompt`, which imports only `typing.Any`; no path back to `sdk_teammate`. Hoisted the two runtime inline imports (the `__init__` site at the original L536 and a second inline at L681 inside the PreToolUse hook callback) to module top. `Scope` stayed `TYPE_CHECKING`-only: `from __future__ import annotations` makes its sole annotation use lazy, so promoting it to a runtime import would have been a regression, not a fix. Full suite green.
 - **What**: `sdk_teammate.py` imports `from claude_crew.teammate_memory import build_memory_section, ensure_write_tool` inside the `__init__` method body with no comment explaining a circular-import rationale. Per project CLAUDE.md, inline imports are a code smell (named for test functions; the same concern applies to method bodies in production code). The import is re-executed on every `SdkTeammate` construction (cached in `sys.modules` after the first hit, but still obscures the dependency graph).
 - **Where**: `claude_crew/sdk_teammate.py` — inline import inside `__init__`.
 - **Why it matters**: Obscures dependency graph; inconsistent with module-top import convention. Flagged `feature.cracks.inline-imports` in `multi-scope-agent-memory-feature-review-0.md`.
@@ -126,6 +130,8 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 ---
 
 ## [2026-05-18] Feature candidate: click-to-view tool output in dashboard stream
+
+> **SHIPPED** — merged `bfc01c0` (`click-to-view-tool-output`), plus two follow-up merges: `ff0668e` (leader-proxy `/tool-output` across multi-instance dashboards) and `c6b6b66` (32KB cap + nice JSON envelope rendering in modal). Lazy-fetch `GET /tool-output/<teammate_id>/<tool_use_id>` endpoint, PostToolUse capture, redaction pass (output-only patterns O-3/O-4), sentinel security review (`e1edfaa`). Open follow-ups tracked in the 2026-05-20 redaction entry above (redaction v2 bump for Vault/npm/Stripe arg-side; store-time `truncated` flag; `_dead_teammates` eviction).
 
 ### Operator wants to inspect tool output without leaving Mission Control
 

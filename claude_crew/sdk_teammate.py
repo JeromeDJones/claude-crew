@@ -50,12 +50,19 @@ from pathlib import Path
 
 from claude_crew.subagents import load_default_pack
 from claude_crew.teammate import Teammate, ToolEvent, _ToolUseEntry, _tool_events_maxlen
+from claude_crew.teammate_memory import (
+    build_memory_section,
+    ensure_write_tool,
+    is_lead_project_memory_path,
+    write_guard_deny_message,
+)
 from claude_crew.teammate_prompt import build_teammate_prompt
 
 if TYPE_CHECKING:
     from claude_crew.broker import Broker
-    # Type-only import — keeps the runtime dependency on teammate_memory inline
-    # (see __init__) to avoid the import cycle, while typing role_memory below.
+    # Type-only — used solely in annotations, which `from __future__ import
+    # annotations` (top of module) never evaluates at runtime. The runtime
+    # symbols above were the inline-import smell; Scope was always type-only.
     from claude_crew.teammate_memory import Scope
 
 # Bounded wait for graceful shutdown of the worker task.
@@ -533,7 +540,6 @@ class SdkTeammate(Teammate):
         # block below (no I/O when a system_prompt override is active).
         _memory_project_root: Path | None = None
         if role_memory in ("user", "project", "local"):
-            from claude_crew.teammate_memory import build_memory_section, ensure_write_tool
             if role_memory in ("project", "local"):
                 _memory_project_root = (
                     Path(cwd).resolve() if cwd else Path.cwd()
@@ -678,10 +684,6 @@ class SdkTeammate(Teammate):
                 tool_input = inp.get("tool_input") or {}
                 file_path = tool_input.get("file_path")
                 if isinstance(file_path, str) and file_path:
-                    from claude_crew.teammate_memory import (
-                        is_lead_project_memory_path,
-                        write_guard_deny_message,
-                    )
                     if is_lead_project_memory_path(file_path):
                         reason = write_guard_deny_message(self.role, file_path)
                         logger.warning(
