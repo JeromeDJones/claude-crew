@@ -572,18 +572,14 @@
     }
 
     // --- ContextWindowBar ---
-    // Context-window utilization, source-agnostic. The server's strategy
-    // resolver emits a canonical agent.ctx_window = {used, limit, pct, source,
-    // cache_hit_pct?}: for Anthropic teammates `used` is the peak single-LLM
-    // invocation input vs the 200k window (the cliff signal — the API bills the
-    // SUM across a turn's invocations, but peak-per-invocation is what nears the
-    // wall); for local teammates it's the live /slots context occupancy vs the
-    // model's real window, plus cache-hit. Falls back to the legacy
-    // lastTurn-derived Anthropic computation if ctx_window is absent.
+    // Context-window utilization. The server's resolver emits a canonical
+    // agent.ctx_window = {used, limit, pct, source="anthropic"}: `used` is the
+    // peak single-LLM invocation input vs the 200k window (the cliff signal —
+    // the API bills the SUM across a turn's invocations, but peak-per-invocation
+    // is what nears the wall). Falls back to the legacy lastTurn-derived
+    // computation if ctx_window is absent.
     function ContextWindowBar({ ctxWindow, lastTurn, totalIn, totalOut }) {
       const cw         = ctxWindow || null;
-      const source     = cw && cw.source ? cw.source : "anthropic";
-      const isLocal    = source === "local";
       const legacyPeak = lastTurn && typeof lastTurn.peak_in === "number" ? lastTurn.peak_in : 0;
       const used       = cw && typeof cw.used  === "number" ? cw.used  : legacyPeak;
       const limit      = cw && typeof cw.limit === "number" && cw.limit > 0 ? cw.limit : CONTEXT_WINDOW_LIMIT;
@@ -595,16 +591,12 @@
       const widthPct   = pct.toFixed(1) + "%";
       const turnSumIn  = lastTurn && typeof lastTurn.in  === "number" ? lastTurn.in  : 0;
       const turnSumOut = lastTurn && typeof lastTurn.out === "number" ? lastTurn.out : 0;
-      const cacheHit   = cw && typeof cw.cache_hit_pct === "number" ? cw.cache_hit_pct : null;
-      const tooltip = isLocal
-        ? `local model context\n` +
-          `${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct.toFixed(1)}%)` +
-          (cacheHit !== null ? `\ncache hit: ${cacheHit.toFixed(1)}%` : "")
-        : `peak invocation: ${used.toLocaleString()} in` +
-          ` (${pct.toFixed(0)}% of ${fmtTokens(limit)} window)\n` +
-          `last turn billed: ${turnSumIn.toLocaleString()} in · ${turnSumOut.toLocaleString()} out` +
-          ` (sum across all LLM calls in the turn)\n` +
-          `cumulative: ${(totalIn || 0).toLocaleString()} in · ${(totalOut || 0).toLocaleString()} out`;
+      const tooltip =
+        `peak invocation: ${used.toLocaleString()} in` +
+        ` (${pct.toFixed(0)}% of ${fmtTokens(limit)} window)\n` +
+        `last turn billed: ${turnSumIn.toLocaleString()} in · ${turnSumOut.toLocaleString()} out` +
+        ` (sum across all LLM calls in the turn)\n` +
+        `cumulative: ${(totalIn || 0).toLocaleString()} in · ${(totalOut || 0).toLocaleString()} out`;
       return (
         <span className="ctx-window-bar" title={tooltip}>
           <span className="ctx-window-bar-track">

@@ -1980,6 +1980,49 @@ class TestCollectResponseTextT2:
             for r in caplog.records
         ), f"expected SDK-shape-change warning; got {[r.message for r in caplog.records]}"
 
+    async def test_result_message_usage_missing_input_tokens_leaves_totals_none(self) -> None:
+        """Anthropic-shape-only contract: a ResultMessage.usage dict lacking
+        'input_tokens' (malformed / partial / different upstream wire shape that
+        didn't translate) results in (None, None, cost_only) — no crash, no
+        invented values. The backend-routing doc claims backends must translate
+        to Anthropic shape upstream; this proves graceful behavior if they don't.
+        """
+        class _FakeClient:
+            async def receive_response(self):
+                yield AssistantMessage(content=[TextBlock(text="ok")], model="m")
+                yield ResultMessage(
+                    subtype="success", duration_ms=0, duration_api_ms=0,
+                    is_error=False, num_turns=1, session_id="s",
+                    total_cost_usd=0.42,
+                    # NB: no "input_tokens" — only output_tokens-shaped key.
+                    usage={"output_tokens": 5},
+                )
+
+        result = await _collect_response_text(_FakeClient())
+        # Tokens stay None; cost is still captured.
+        assert result.turn_input_tokens is None
+        assert result.turn_output_tokens is None
+        assert result.cumulative_cost_usd == 0.42
+
+    async def test_result_message_usage_empty_dict_leaves_totals_none(self) -> None:
+        """Pathological-but-legal: ResultMessage.usage == {} → no shape match,
+        no token totals, cost still captured if present. Mirrors the missing-key
+        path above for the degenerate empty-dict shape."""
+        class _FakeClient:
+            async def receive_response(self):
+                yield AssistantMessage(content=[TextBlock(text="ok")], model="m")
+                yield ResultMessage(
+                    subtype="success", duration_ms=0, duration_api_ms=0,
+                    is_error=False, num_turns=1, session_id="s",
+                    total_cost_usd=0.01,
+                    usage={},
+                )
+
+        result = await _collect_response_text(_FakeClient())
+        assert result.turn_input_tokens is None
+        assert result.turn_output_tokens is None
+        assert result.cumulative_cost_usd == 0.01
+
     async def test_last_assistant_model_ignores_empty_string(self) -> None:
         """active-model-display: defensively, an AssistantMessage with an
         empty-string model leaves last_assistant_model unchanged (None when

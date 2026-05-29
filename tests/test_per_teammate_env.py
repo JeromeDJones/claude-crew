@@ -312,3 +312,47 @@ async def test_custom_endpoint_with_explicit_env_explicit_wins():
     # Other preset keys retain preset values.
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456"
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# custom_endpoint sad paths — validation errors at the MCP boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_custom_endpoint_empty_dict_errors():
+    """An empty dict is NOT silently a no-op — it's a malformed preset."""
+    server, broker, spawn_calls = _make_server_with_spy_broker()
+
+    with pytest.raises(ToolError, match="base_url"):
+        await _call_spawn_tool(server, role="builder", custom_endpoint={})
+
+    assert spawn_calls == [], "broker must not be called on validation error"
+
+
+@pytest.mark.asyncio
+async def test_custom_endpoint_missing_base_url_errors():
+    """custom_endpoint without 'base_url' → ToolError naming the missing key."""
+    server, broker, spawn_calls = _make_server_with_spy_broker()
+
+    with pytest.raises(ToolError, match="base_url"):
+        await _call_spawn_tool(
+            server, role="builder",
+            custom_endpoint={"api_key": "sk-only"},
+        )
+
+    assert spawn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_custom_endpoint_non_dict_errors():
+    """custom_endpoint must be a dict; a string (or any non-dict) is rejected."""
+    server, broker, spawn_calls = _make_server_with_spy_broker()
+
+    with pytest.raises(ToolError, match="must be a dict"):
+        await _call_spawn_tool(
+            server, role="builder",
+            custom_endpoint="http://example:1234",  # type: ignore[arg-type]
+        )
+
+    assert spawn_calls == []

@@ -6,6 +6,8 @@ Audience: maintainers reasoning about pack contracts, allowlist enforcement, or 
 
 Source of truth for the SDK side: `claude_agent_sdk/_internal/transport/subprocess_cli.py` (read directly when the SDK is upgraded). Source of truth for the claude-crew side: `claude_crew/sdk_teammate.py` — specifically the `_build_options`-style block that translates pack + spawn args into `ClaudeAgentOptions`.
 
+> **Slice-name note.** This doc references the `plugin-MCP-isolation` slice — originally shipped under the `local-model-attribution` label on 2026-05-26, which combined plugin-MCP isolation with OpenAI-shape token attribution. The attribution half was removed 2026-05-29 (backends now translate to Anthropic-shape upstream); the isolation half is what's discussed here. The historical slice name appears in git history (`bffaf1e`, `lma`).
+
 ---
 
 ## 1. The big picture

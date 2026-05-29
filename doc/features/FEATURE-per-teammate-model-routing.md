@@ -55,7 +55,7 @@ controls egress.
 - **`env=None` is byte-identical to pre-feature behavior** — the non-regression
   contract. Teammates spawned without an override are unchanged.
 - **Anthropic-shape responses are assumed end-to-end.** Backends that produce a
-  different wire shape (OpenAI-style, llama.cpp native, etc.) MUST translate
+  different wire shape (e.g. OpenAI-style or other non-Anthropic shapes) MUST translate
   upstream — claude-crew's token / cost attribution path is shape-uniform with
   no dual-shape branching.
 - **Conditional forwarding** at broker + factory — passing `env=None`

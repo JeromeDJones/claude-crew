@@ -235,12 +235,19 @@ def make_server(
                     )
 
         # Resolve custom_endpoint preset → base env dict (empty if no preset).
+        # `is not None` (not truthy): an empty / partial dict must surface as
+        # a clear validation error, not be silently skipped.
         resolved_env: dict[str, str] | None = None
-        if custom_endpoint:
-            if not isinstance(custom_endpoint, dict) or "base_url" not in custom_endpoint:
+        if custom_endpoint is not None:
+            if not isinstance(custom_endpoint, dict):
                 raise ToolError(
                     "custom_endpoint must be a dict with required 'base_url' "
-                    "(and optional 'api_key')"
+                    f"(and optional 'api_key'); got {type(custom_endpoint).__name__}"
+                )
+            if "base_url" not in custom_endpoint:
+                raise ToolError(
+                    "custom_endpoint requires a 'base_url' key "
+                    f"(got keys: {sorted(custom_endpoint.keys())})"
                 )
             preset_kwargs: dict[str, str] = {"base_url": custom_endpoint["base_url"]}
             if "api_key" in custom_endpoint:
