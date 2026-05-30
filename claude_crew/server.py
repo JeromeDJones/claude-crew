@@ -594,6 +594,42 @@ def make_server(
         }
 
     @mcp.tool()
+    async def refresh_agents() -> dict[str, Any]:
+        """Reload agent definitions from disk and swap the in-memory pack.
+
+        future-spawns-only: already-running teammates keep the AgentDefinition
+        snapshot they were spawned on. Refresh only affects teammates spawned
+        AFTER this call returns — in-flight or previously-spawned teammates are
+        not mutated.
+
+        Returns a RefreshResult dict with:
+          ok:       True if the rebuild succeeded; False if build_merged_pack raised.
+          error:    Exception repr when ok=False; None otherwise.
+          counts:   Post-refresh pack counts. `total` and `plugin` are populated;
+                    `default`/`user`/`project` are reserved and always 0 in v1
+                    (per-layer attribution can't be recovered from the merged pack
+                    without re-loading each layer). Use `total` for the overall size
+                    and `diff` for what actually changed.
+          diff:     {added, removed, changed} role keys vs the prior pack.
+          warnings: WARN/INFO records captured during this refresh pass.
+          note:     Human-readable future-spawns-only reminder.
+        """
+        refresh_fn = getattr(factory, "refresh_pack", None)
+        if refresh_fn is None:
+            # Fallback no-op (should not happen in practice; stub and sdk modes
+            # both attach refresh_pack).
+            from claude_crew.factories import _REFRESH_NOTE
+            return {
+                "ok": True,
+                "error": None,
+                "counts": {"default": 0, "plugin": 0, "user": 0, "project": 0, "total": 0},
+                "diff": {"added": [], "removed": [], "changed": []},
+                "warnings": [],
+                "note": _REFRESH_NOTE,
+            }
+        return refresh_fn()
+
+    @mcp.tool()
     async def surface_document(path: str, title: str) -> dict[str, Any]:
         """Surface a markdown document to Mission Control for operator review.
 

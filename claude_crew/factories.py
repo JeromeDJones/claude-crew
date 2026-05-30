@@ -7,8 +7,10 @@ decide whether to invoke `validate_auth_or_exit()` at startup.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
+import threading
 from pathlib import Path
 
 from claude_crew.broker import TeammateFactory
@@ -59,6 +61,25 @@ def stub_factory(
 
 
 stub_factory.requires_auth = False  # type: ignore[attr-defined]
+
+
+def _stub_refresh_pack() -> dict:
+    """No-op refresh for stub mode.
+
+    Returns the empty-diff / zero-counts RefreshResult so make_server() can
+    register refresh_agents unconditionally without sdk-mode being required.
+    """
+    return {
+        "ok": True,
+        "error": None,
+        "counts": {"default": 0, "plugin": 0, "user": 0, "project": 0, "total": 0},
+        "diff": {"added": [], "removed": [], "changed": []},
+        "warnings": [],
+        "note": _REFRESH_NOTE,
+    }
+
+
+stub_factory.refresh_pack = _stub_refresh_pack  # type: ignore[attr-defined]
 
 
 def sdk_factory(
@@ -116,6 +137,131 @@ _STARTUP_SOURCE_LOGGERS: tuple[str, ...] = (
     "claude_crew.subagents._user_loader",
     "claude_crew.factories",
 )
+
+
+_REFRESH_NOTE = (
+    "future-spawns-only: running teammates keep their original AgentDefinition snapshot."
+)
+
+
+@dataclasses.dataclass
+class _PackState:
+    """Mutable holder for the merged agent pack state.
+
+    All three mutable fields (pack, role_ss, bodies) are read live at every
+    call-site so that a future refresh() can swap them atomically without
+    re-wiring closures.  home_dir and project_root are frozen at startup and
+    used as the roots for any subsequent refresh.
+    """
+
+    pack: dict  # dict[str, AgentDefinition]
+    role_ss: dict  # dict[str, list[str] | None]
+    bodies: dict  # dict[str, str]
+    home_dir: Path | None  # frozen at startup; refresh reuses
+    project_root: Path | None  # frozen at startup; refresh reuses
+    _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+
+    def refresh(self) -> dict:
+        """Re-read agent definitions from disk and atomically swap the pack.
+
+        Re-invokes ``build_merged_pack`` against the same ``home_dir`` /
+        ``project_root`` captured at startup (never ``Path.cwd()``). On
+        success, atomically replaces ``pack``, ``role_ss``, and ``bodies``
+        under the holder's lock.  On failure the prior pack is left
+        untouched and ``ok=False`` is returned.
+
+        Returns a ``RefreshResult`` dict (JSON-serialisable).
+        """
+        from claude_crew.subagents._user_loader import build_merged_pack
+
+        # Snapshot current pack for diff comparison (outside the lock —
+        # grabbing a reference is atomic at the Python level).
+        old_pack: dict = self.pack
+
+        new_pack: dict | None = None
+        new_role_ss: dict | None = None
+        new_bodies: dict | None = None
+        error_str: str | None = None
+
+        # Run the rebuild inside a diagnostic capture window — mirrors the
+        # startup path in default_factory().
+        with collect_startup_diagnostics() as coll:
+            extra_attached, restore_pairs = _direct_attach_fallbacks(coll)
+            try:
+                new_pack, new_role_ss, new_bodies = build_merged_pack(
+                    home_dir=self.home_dir,
+                    project_root=self.project_root,
+                )
+            except Exception as exc:
+                error_str = repr(exc)
+            finally:
+                for src in extra_attached:
+                    src.removeHandler(coll)
+                for src, prev in restore_pairs:
+                    src.setLevel(prev)
+
+        diags = coll.freeze()  # idempotent; context exit already froze it
+
+        warnings = [
+            {"level": d.level, "logger": d.source, "message": d.message}
+            for d in diags
+        ]
+
+        if error_str is not None:
+            # Rebuild failed — leave state untouched.
+            return {
+                "ok": False,
+                "error": error_str,
+                "counts": {
+                    "default": 0, "plugin": 0, "user": 0, "project": 0, "total": 0,
+                },
+                "diff": {"added": [], "removed": [], "changed": []},
+                "warnings": warnings,
+                "note": _REFRESH_NOTE,
+            }
+
+        # Compute diff: added, removed, changed.
+        # Role keys exactly match merged_pack keys: bare for default/user/project,
+        # "<plugin>:<role>" for plugin agents (AT-7).
+        # Use dataclasses.asdict for deterministic field comparison (AT-2).
+        assert new_pack is not None  # error_str is None → new_pack was set
+        added = sorted(k for k in new_pack if k not in old_pack)
+        removed = sorted(k for k in old_pack if k not in new_pack)
+        changed = sorted(
+            k for k in new_pack
+            if k in old_pack
+            and dataclasses.asdict(new_pack[k]) != dataclasses.asdict(old_pack[k])
+        )
+
+        # Counts: plugin agents use "<plugin>:<role>" keys (namespaced).
+        # Per-layer breakdown for default/user/project is not recoverable from
+        # the merged result without re-loading each layer separately; plugin count
+        # is derivable from key shape.  total is authoritative.
+        plugin_count = sum(1 for k in new_pack if ":" in k)
+        counts = {
+            "default": 0,
+            "plugin": plugin_count,
+            "user": 0,
+            "project": 0,
+            "total": len(new_pack),
+        }
+
+        # Atomic swap — only executed on rebuild success (AT-4).
+        assert new_role_ss is not None
+        assert new_bodies is not None
+        with self._lock:
+            self.pack = new_pack
+            self.role_ss = new_role_ss
+            self.bodies = new_bodies
+
+        return {
+            "ok": True,
+            "error": None,
+            "counts": counts,
+            "diff": {"added": added, "removed": removed, "changed": changed},
+            "warnings": warnings,
+            "note": _REFRESH_NOTE,
+        }
 
 
 def _propagates_to_root(logger_name: str) -> bool:
@@ -220,6 +366,17 @@ def default_factory(
                     src.setLevel(prev)
         startup_diagnostics = collector_handler.freeze()
 
+        # Mutable holder: every read-site reads fields LIVE off this object
+        # so a future refresh() can atomically swap the pack without re-wiring
+        # closures.  home_dir / project_root are frozen at startup.
+        holder = _PackState(
+            pack=merged_pack,
+            role_ss=role_ss,
+            bodies=merged_bodies,
+            home_dir=home_dir,
+            project_root=project_root,
+        )
+
         def _resolve_role(requested: str) -> str:
             """Promote a bare role name to a namespaced plugin key when the
             promotion is unambiguous.
@@ -228,7 +385,7 @@ def default_factory(
             surface form. A lead may still spawn by the bare role name (legacy
             usage, or matching a name they saw in another tool). We resolve:
 
-            - Exact match in merged_pack → use as-is.
+            - Exact match in holder.pack → use as-is.
             - No exact match, and exactly one ``*:requested`` exists → promote,
               log INFO so the operator sees the trail.
             - Multiple ``*:requested`` candidates → WARN listing them; fall
@@ -236,10 +393,11 @@ def default_factory(
               AgentDef path). The lead has to disambiguate.
             - Zero candidates → fall through; existing unknown-role behavior.
             """
-            if requested in merged_pack:
+            current_pack = holder.pack
+            if requested in current_pack:
                 return requested
             candidates = sorted(
-                k for k in merged_pack if k.endswith(f":{requested}")
+                k for k in current_pack if k.endswith(f":{requested}")
             )
             if len(candidates) == 1:
                 logger.info(
@@ -264,6 +422,11 @@ def default_factory(
             mcp_servers: list[str] | None = None,
             env: "dict[str, str] | None" = None,
         ) -> Teammate:
+            # Read holder fields live at call time (not captured at closure build).
+            current_pack = holder.pack
+            current_role_ss = holder.role_ss
+            current_bodies = holder.bodies
+
             role = _resolve_role(role)
             # Warn about unknown extra skills at spawn time.
             if extra_skills:
@@ -277,8 +440,8 @@ def default_factory(
                         )
 
             if extra_tools or extra_skills:
-                # Per-spawn patched agents dict — original merged_pack must not be mutated.
-                agent_def = merged_pack.get(role)
+                # Per-spawn patched agents dict — original pack must not be mutated.
+                agent_def = current_pack.get(role)
                 if agent_def is not None:
                     pack_tools = agent_def.tools or []
                     pack_skills = agent_def.skills or []
@@ -320,16 +483,16 @@ def default_factory(
                             )
 
                 # Fresh dict per spawn — no shared mutable reference
-                effective_agents = {**merged_pack, role: patched_def}
+                effective_agents = {**current_pack, role: patched_def}
             else:
-                effective_agents = merged_pack
+                effective_agents = current_pack
 
             # If no explicit model override, apply the pack's declared model (with alias resolution).
             # Pack frontmatter `model: opus` is otherwise only applied for subagent dispatch,
             # not when the role is spawned as a top-level claude-crew teammate.
             resolved_model = model
             resolved_effort = effort
-            pack_def = merged_pack.get(role)
+            pack_def = current_pack.get(role)
             if pack_def is not None:
                 if resolved_model is None:
                     pack_model = getattr(pack_def, "model", None)
@@ -346,9 +509,9 @@ def default_factory(
 
             return sdk_factory(
                 id, name, role, model=resolved_model, effort=resolved_effort, agents=effective_agents,
-                pack_bodies=merged_bodies,
+                pack_bodies=current_bodies,
                 cwd=cwd, permission_mode=permission_mode,
-                setting_sources=role_ss.get(role),
+                setting_sources=current_role_ss.get(role),
                 allowed_tools=mcp_extra or None,
                 extra_tools=extra_tools,
                 mcp_servers=mcp_servers,
@@ -356,6 +519,9 @@ def default_factory(
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]
+        # Callable returning RefreshResult dict; consumed by the refresh_agents
+        # MCP tool (task 3 — mcp-refresh-agents-tool).
+        factory.refresh_pack = holder.refresh  # type: ignore[attr-defined]
         # Expose the merged pack to the broker so it can snapshot each
         # teammate's resolved AgentDefinition at spawn time. Without this,
         # production teammates have no `config` block and dashboard chips
@@ -365,8 +531,9 @@ def default_factory(
             # finds the same AgentDefinition that the teammate is running on.
             # Without this, a lead spawning by bare name (auto-promoted at
             # factory()) gets a correct teammate but an empty dashboard chip.
+            # Reads holder.pack LIVE so post-refresh state is visible immediately.
             role = _resolve_role(role)
-            agent_def = merged_pack.get(role)
+            agent_def = holder.pack.get(role)
             if agent_def is None:
                 return None
             pack_model = getattr(agent_def, "model", None)
@@ -380,5 +547,7 @@ def default_factory(
         # Frozen startup diagnostics tuple; consumed by make_server() when it
         # constructs the default Broker (Broker(startup_diagnostics=...)).
         factory.startup_diagnostics = startup_diagnostics  # type: ignore[attr-defined]
+        # Expose the holder so tests (and future refresh() wiring) can reach it.
+        factory._holder = holder  # type: ignore[attr-defined]
         return factory
     return stub_factory
