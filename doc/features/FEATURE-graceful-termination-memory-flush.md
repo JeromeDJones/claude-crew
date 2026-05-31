@@ -1,3 +1,18 @@
+<!-- vars: SLUG, SPEC_BODY, WHAT_SHIPPED, FEATURE_REVIEW_SUMMARY,
+     RETRO_FINDINGS, BACKLOG_DELTAS, VALIDATION_SUMMARY, COMMITS -->
+<!-- Rendered by bin/extract-feature-doc.sh via envsubst at signoff.
+     Written to doc/features/FEATURE-<slug>.md in the slice worktree.
+     This template is the canonical condensed audit record for a shipped
+     feature. All ${VAR} placeholders are substituted by the extractor;
+     literal dollar signs in content must be escaped as $$ in source. -->
+
+# Feature: graceful-termination-memory-flush
+
+## Spec
+
+<!-- Full verbatim spec body extracted from .rr/specs/<slug>.md.
+     Populated by SPEC_BODY. -->
+
 <!-- vars: SLUG=graceful-termination-memory-flush -->
 
 # Spec: graceful-termination-memory-flush
@@ -438,3 +453,123 @@ tasks:
   only to the explicit-kill / shutdown paths.
 - Tombstone telemetry (D2 ordering, frozen `TeammateInfo`, tool-event capture) is unchanged; the
   flush is purely a pre-step gated before tombstone step 1.
+
+## What Shipped
+
+<!-- One bullet per task name from the spec's ## Task Breakout, in
+     declaration order. Extracted via bin/spec-tasks.sh or equivalent.
+     Populated by WHAT_SHIPPED. -->
+
+- teammate-base-graceful-hook
+- teammate-sdk-flush
+- broker-graceful-kill
+- broker-shutdown-all-parallel
+- server-graceful-arg
+- doc-sync-wiring
+
+## Feature Review Summary
+
+<!-- Feature-review verdict (PASS / REQUEST-CHANGES) followed by one
+     line per Critical or High finding from the feature-review report.
+     Low/Advisory findings are omitted. Populated by FEATURE_REVIEW_SUMMARY.
+     Format:
+       Verdict: PASS
+       - [High] finding title (rr-feature-reviewer, cycle N) -->
+
+Verdict: UNKNOWN
+
+## Retro Findings
+
+<!-- What Went Well + What Didn't bullets from the feature-retro report
+     and (when workflowRetroEnabled=true) the workflow-retro report.
+     Populated by RETRO_FINDINGS.
+
+     Skip semantics: when state.retroSkipped=true or RR_SKIP_RETRO=1,
+     the extractor sets RETRO_FINDINGS to the literal text:
+       _retrospective: skipped_
+     No bullets are added; the section renders exactly that one line. -->
+
+### What Went Well
+
+- **Plan-review and every slice-review PASSed on cycle 0 — zero rework cycles.** Unusual for a
+  feature this size. The breakout DAG was clean on first draft (contrast: `fidelity-audit-followups`
+  took 3 breakout-review cycles). Evidence: `*-plan-review-0.md`, all six `*-slice-review-0.md`.
+- **Pre-emptive coordinator guidance closed the only spec gap before it cost a cycle.** Plan-review
+  flagged MEDIUM-01 (AT#10/AT#11 need a *controllable* flush double, not the zero-window Stub). The
+  coordinator folded explicit "build an `asyncio.Event`-gated/sleeping double" instructions into the
+  T2 and T3 implementor prompts; both landed correct doubles (`_HoldingTeammate`, `_SlowFlushTeammate`)
+  on first try. Evidence: `broker-graceful-kill` + `broker-shutdown-all-parallel` slice-reviews.
+- **The review chain caught and confirmed the real integration risk.** Two slice-reviewers
+  independently flagged the *double-bounded flush* seam (timeout passed into
+  `begin_graceful_termination` AND the broker's outer `asyncio.wait_for`) as an Info to forward;
+  the feature-reviewer then traced the real SdkTeammate↔broker composition and confirmed no
+  double-cancel (flush turn runs in the isolated `_run` task). The "forward an Info up the chain"
+  mechanism worked exactly as designed. Evidence: `*-feature-review-0.md` Check 1.
+- **Parallel cloud dispatch shortened the middle.** T1∥T2 then T3∥T4 ran concurrently once the
+  single-GPU contention constraint was lifted (see below).
+- **Full-suite validation green twice** after the load flake cleared.
+
+### What Didn't
+
+- **Local-model dogfood hit a hard GPU ceiling.** The user wanted the implementor on the local
+  Qwen3-35B (via CCR) to exercise per-teammate-model-routing. It OOM'd (`HSA ... BlockAllocator::alloc
+  failed`) at ~38k tokens of accumulated context (turn ~15). The routing capability *works* — verified
+  requests hitting `llama-server:8080` — but a 35B model on this GPU cannot hold a heavy RR implementor
+  prompt. Switched all implementor tasks to cloud Sonnet. Lesson: local routing is viable for light
+  teammates, not context-heavy implementor turns on this hardware.
+- **Silent cloud fallback from a model-routing footgun.** Setting `custom_endpoint` (→ CCR) *without*
+  `model="local"` routed the teammate to **cloud Sonnet**, because the SdkTeammate default model
+  `claude-sonnet-4-6` matched CCR's `anthropic` provider and went to the `:3457` oauth shim. Caught
+  only by reading the CCR log. Cost a wasted spawn + a kill that raced the user's "don't kill it"
+  message by ~1s. Lesson: when routing via CCR, the model name must *not* match a cloud provider in
+  the CCR config — set `model="local"` (or the explicit `provider,model` comma form). Now recorded in
+  coordinator-notes.
+- **`rr-documenter` could not write its own artifacts.** Its SDK context exposed no Write/Edit/Bash
+  and a disabled Read; it produced all three retro artifacts inline and mis-reported "no prior
+  reports" because it couldn't read the `.rr/reports/` evidence. The coordinator wrote the artifacts
+  and re-authored this retro. This blocks the documenter's core contract (it *is* the agent that
+  writes retro + doc-sync). Filed as retro debt. Evidence: documenter return message tool-limitation note.
+- **Persistent slice-reviewer spawned into an ephemeral cwd.** It was first spawned with cwd = T0's
+  per-task worktree, which was torn down at T0 merge-back, leaving a dangling cwd. Respawned rooted at
+  the stable slice worktree. Lesson: persistent reviewers must be spawned with cwd = slice worktree,
+  never a per-task worktree.
+- **`test_shutdown_signals.py` flaked under teammate load.** Its 15s process-registration timeout
+  failed during the heavy build/feature-review phases (many concurrent SDK subprocesses), then passed
+  cleanly once the crew wound down. Not a regression; an environment-load artifact. Worth knowing the
+  suite has a load-sensitive test.
+
+## BACKLOG Deltas
+
+<!-- Bullet list of items added to doc/BACKLOG.md during this slice,
+     sourced from the doc-sync checklist report (slug-retro-doc-sync.md).
+     Populated by BACKLOG_DELTAS.
+     Format: one `- item text` line per delta.
+
+     Skip semantics: when state.retroSkipped=true or RR_SKIP_RETRO=1,
+     the extractor sets BACKLOG_DELTAS to the literal text:
+       _None — retro skipped._
+     The section renders exactly that one line. -->
+
+_None._
+
+## Validation
+
+<!-- Validation verdict (PASS / MANUAL / surgical-fix) and a one-line
+     outcome statement drawn from the validation report.
+     Populated by VALIDATION_SUMMARY.
+     Format: `PASS — <one-line outcome>` -->
+
+PASS
+
+## Commits
+
+<!-- Output of: git log --oneline main..HEAD from the slice worktree.
+     Injected verbatim by the extractor. Do NOT replace with prose.
+     Populated by COMMITS.
+
+     Edge case: if the branch has no commits ahead of main (should not
+     happen for a PASS slice), the extractor sets COMMITS to the literal
+     text:
+       _No commits on slice branch ahead of main._ -->
+
+_No commits on slice branch ahead of main._

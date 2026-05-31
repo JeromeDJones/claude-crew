@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-05-16
-**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29)
+**Last Updated**: 2026-05-31
+**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush
 **Next up**: TBD — #20 peer messaging backlogged 2026-05-17 (coordinator-in-the-loop is the moat; see row 20 for rationale)
 
 ---
