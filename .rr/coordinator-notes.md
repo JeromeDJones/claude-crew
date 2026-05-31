@@ -1,5 +1,13 @@
 # Coordinator standing notes — graceful-termination-memory-flush
 
+## ⚠️ LOCAL BACKEND ABANDONED (2026-05-31) — implementor now CLOUD
+
+The local Qwen3-35B (llama-server :8080 via CCR :3456) crashed with a GPU OOM:
+`HSA exception: MemoryRegion::BlockAllocator::alloc failed` — couldn't hold the ~41k-token
+implementor prompt. Per user, the implementor switches to a REGULAR cloud team member.
+=> Spawn rr-implementor with NO custom_endpoint, NO model="local" (pack default Sonnet 4.6 on
+normal cloud auth) + CRG extra_tools. The local-routing notes below are HISTORICAL — do not use.
+
 ## CRG grant for ALL spawned teammates (user instruction 2026-05-31)
 
 EVERY teammate spawned from here on gets the CRG tool set via `extra_tools`. MCP tool IDs in
@@ -28,8 +36,16 @@ The implementor ALSO runs on the LOCAL backend. Every
 (Step PD3 step 3) and any re-dispatch MUST include BOTH:
 
 ```
-custom_endpoint = {"base_url": "http://127.0.0.1:3456"}   # local CCR -> Qwen3-35B; no api_key (CCR has no APIKEY)
-extra_tools = CRG_TOOLS   # (the standing set above)
+model = "local"                                          # CRITICAL: routes CCR to its default (llama-cpp/Qwen3-35B).
+                                                          # WITHOUT this, the teammate sends model=claude-sonnet-4-6,
+                                                          # which CCR matches to its cloud `anthropic` provider (:3457
+                                                          # oauth shim) -> CLOUD, not local. Verified via CCR log
+                                                          # 2026-05-31: model name w/o comma + matching anthropic
+                                                          # provider == cloud. "local" has no provider match -> default
+                                                          # route (llama-cpp). The comma form "llama-cpp,Qwen3.6-35B-
+                                                          # A3B-UD-Q4_K_M.gguf" also works (explicit provider,model).
+custom_endpoint = {"base_url": "http://127.0.0.1:3456"}  # local CCR; no api_key (CCR has no APIKEY)
+extra_tools = CRG_TOOLS                                   # (the standing set above)
 ```
 
 Rationale:
