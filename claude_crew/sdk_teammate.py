@@ -1719,7 +1719,7 @@ class SdkTeammate(Teammate):
                     await asyncio.wait_for(
                         client.interrupt(), timeout=INTERRUPT_GRACE_SECONDS
                     )
-                except (asyncio.TimeoutError, Exception) as exc:
+                except Exception as exc:
                     logger.warning(
                         "begin_graceful_termination: interrupt failed for "
                         "teammate=%s: %s",

@@ -19,6 +19,7 @@ from claude_agent_sdk.types import AgentDefinition, AssistantMessage, ResultMess
 
 from claude_crew import sdk_teammate as sdk_module
 from claude_crew.broker import Broker
+from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.sdk_teammate import (
     FLUSH_PROMPT,
     GRACEFUL_FLUSH_SECONDS,
@@ -305,7 +306,6 @@ class TestBusyFlushHappy:
         self, monkeypatch: Any,
     ) -> None:
         """interrupt() is called once; flush query carries FLUSH_PROMPT; event set."""
-        from claude_crew.envelope import Envelope, new_message_id
 
         flush_resp = _text_result("Memory written.")
         fake = _BlockingInterruptibleClient(flush_responses=flush_resp)
@@ -375,7 +375,6 @@ class TestBusyFlushHappy:
         self, monkeypatch: Any,
     ) -> None:
         """_flush_complete is set even if the flush drain returns empty text."""
-        from claude_crew.envelope import Envelope, new_message_id
 
         # Flush turn returns no text (ResultMessage only — empty assistant response).
         empty_flush_resp: list[Any] = [
