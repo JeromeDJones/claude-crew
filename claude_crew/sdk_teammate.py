@@ -81,6 +81,23 @@ MAX_CONCURRENT_TOOLS: int = 64
 
 _SHUTDOWN_SENTINEL: object = object()
 
+# Graceful flush constants (Feature: graceful-termination-memory-flush).
+# Budget matches the codebase's established hang-detection budget (90s).
+GRACEFUL_FLUSH_SECONDS: float = 90.0
+
+# Sentinel injected into the inbox to break an idle _run loop and trigger
+# the flush turn.  Distinct from _SHUTDOWN_SENTINEL so the loop can route to
+# _run_flush_turn instead of exiting.
+_GRACEFUL_FLUSH_SENTINEL: object = object()
+
+# Prompt sent to the model during the flush turn.  Deliberately concise —
+# the spawn-side memory addendum already explains what/where to save; we only
+# nudge the model to act now.
+FLUSH_PROMPT: str = (
+    "You are about to be terminated. Per your memory instructions, persist "
+    "anything worth saving now using the Write tool, then stop. Do nothing else."
+)
+
 # Crew-level env defaults injected into every SDK subprocess.
 # Each key exists for a specific reason — see the docstring in _run() for
 # details. A caller may override individual keys via the `env` ctor kwarg; a
@@ -532,6 +549,9 @@ class SdkTeammate(Teammate):
         # build_teammate_prompt has access to the full agents dict (A-3).
         role_def = self._agents.get(role)
         role_memory: Scope | None = getattr(role_def, "memory", None)
+        # Captured for has_memory_surface() — read after ensure_write_tool may
+        # have patched role_def's tools, but memory scope itself never changes.
+        self._role_memory: "Scope | None" = role_memory
 
         # Memory scope injection for user / project / local scopes.
         # ensure_write_tool fires regardless of pack_bodies availability so that
@@ -659,6 +679,18 @@ class SdkTeammate(Teammate):
         self._backstop_seconds = float(
             os.environ.get("CLAUDE_CREW_TURN_BACKSTOP_SECONDS", TURN_BACKSTOP_SECONDS_DEFAULT)
         )
+
+        # Graceful flush state (Feature: graceful-termination-memory-flush).
+        # _terminating: set True before the flush sentinel is injected; gates
+        #   the retry loop in _handle_one_turn so a busy-path interrupt returns
+        #   promptly without re-querying after an empty drain.
+        # _flush_complete: event signaled by _run_flush_turn (in finally) so
+        #   begin_graceful_termination's wait_for returns once the flush is done.
+        # _client: held reference to the live ClaudeSDKClient inside _run; used
+        #   by begin_graceful_termination to interrupt an in-flight turn.
+        self._terminating: bool = False
+        self._flush_complete: asyncio.Event = asyncio.Event()
+        self._client: Any | None = None
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker
@@ -1327,21 +1359,32 @@ class SdkTeammate(Teammate):
         options = ClaudeAgentOptions(**opts_kwargs)
         try:
             async with ClaudeSDKClient(options=options) as client:
-                # Spawn poll task inside the client context so it has a valid
-                # client reference for the transport probe.
-                self._poll_task = asyncio.create_task(
-                    self._liveness_poll_loop(client), name=f"poll-{self.id}"
-                )
-                # D2 start-ordering invariant: do not enter inbox loop until
-                # the poll task is live and ready to observe _death_suspected.
-                await self._poll_started.wait()
-                while True:
-                    assert self._inbox is not None
-                    msg = await self._inbox.get()
-                    if msg is _SHUTDOWN_SENTINEL:
-                        return
-                    assert isinstance(msg, Envelope)
-                    await self._handle_one_turn(client, msg)
+                # Hold a reference so begin_graceful_termination can call
+                # client.interrupt() from outside this task (busy path).
+                self._client = client
+                try:
+                    # Spawn poll task inside the client context so it has a valid
+                    # client reference for the transport probe.
+                    self._poll_task = asyncio.create_task(
+                        self._liveness_poll_loop(client), name=f"poll-{self.id}"
+                    )
+                    # D2 start-ordering invariant: do not enter inbox loop until
+                    # the poll task is live and ready to observe _death_suspected.
+                    await self._poll_started.wait()
+                    while True:
+                        assert self._inbox is not None
+                        msg = await self._inbox.get()
+                        if msg is _SHUTDOWN_SENTINEL:
+                            return
+                        if msg is _GRACEFUL_FLUSH_SENTINEL:
+                            # Idle path: sentinel injected by begin_graceful_termination.
+                            # Run the flush turn on the held client, then exit the loop.
+                            await self._run_flush_turn(client)
+                            return
+                        assert isinstance(msg, Envelope)
+                        await self._handle_one_turn(client, msg)
+                finally:
+                    self._client = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # construction or context-mgr failure
@@ -1475,6 +1518,11 @@ class SdkTeammate(Teammate):
                         code="invalid_response",
                         message=f"subagent failed: {summary}",
                     )
+                    return
+                # Graceful flush: if begin_graceful_termination interrupted this
+                # turn (busy path), abandon the retry loop and return.  The flush
+                # sentinel is already in the inbox; _run will pick it up next.
+                if self._terminating:
                     return
                 # Retry on empty text with nudge. Up to 2 retries (3 total attempts).
                 # H-1: compute shared deadline so total retry sequence respects per-turn backstop.
@@ -1624,3 +1672,105 @@ class SdkTeammate(Teammate):
                 except (asyncio.CancelledError, Exception):
                     pass
             self._task = None
+
+    # ------------------------------------------------------------------
+    # Graceful-termination memory flush (Feature: graceful-termination-memory-flush)
+    # ------------------------------------------------------------------
+
+    def has_memory_surface(self) -> bool:
+        """True iff this teammate has a memory scope AND Write in its effective tools.
+
+        Memory scope is the load-bearing signal (``ensure_write_tool`` in
+        ``__init__`` always adds Write for any memory-scoped role, so the two
+        checks are redundant in practice).  Checking Write is belt-and-suspenders
+        per the spec's explicit contract.
+        """
+        if self._role_memory not in ("user", "project", "local"):
+            return False
+        role_def = self._agents.get(self.role)
+        tools = getattr(role_def, "tools", None)
+        return tools is not None and "Write" in tools
+
+    async def begin_graceful_termination(self, *, timeout: float) -> None:
+        """Trigger a bounded memory-distillation flush turn, then return.
+
+        Idempotent: if ``_flush_complete`` is already set the method returns
+        immediately.  SDK errors and timeouts are swallowed (logged) so the
+        caller can proceed to tombstone regardless of flush outcome.
+
+        Idle path:  inject ``_GRACEFUL_FLUSH_SENTINEL`` into the inbox to break
+            the ``await inbox.get()`` wait.  The ``_run`` loop recognises the
+            sentinel and calls ``_run_flush_turn(client)``.
+        Busy path:  call ``client.interrupt()`` to break an in-flight drain;
+            also inject the sentinel so the loop picks it up after the
+            interrupted turn exits.  ``_handle_one_turn`` checks
+            ``_terminating`` and returns without retrying empty text.
+        """
+        if self._flush_complete.is_set():
+            return  # already flushed — idempotent
+
+        self._terminating = True
+
+        # Busy path: interrupt any in-flight turn so it exits promptly.
+        if self._current_turn_started_at_wallclock is not None:
+            client = self._client
+            if client is not None:
+                try:
+                    await asyncio.wait_for(
+                        client.interrupt(), timeout=INTERRUPT_GRACE_SECONDS
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "begin_graceful_termination: interrupt failed for "
+                        "teammate=%s: %s",
+                        self.id, exc,
+                    )
+
+        # Both paths: put the sentinel so the _run loop routes to _run_flush_turn.
+        if self._inbox is not None:
+            await self._inbox.put(_GRACEFUL_FLUSH_SENTINEL)
+
+        # Await flush completion, bounded by the caller's timeout budget.
+        try:
+            await asyncio.wait_for(self._flush_complete.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "begin_graceful_termination: flush timed out (%.1fs) for "
+                "teammate=%s — proceeding to tombstone",
+                timeout, self.id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "begin_graceful_termination: unexpected error waiting for flush "
+                "on teammate=%s: %s",
+                self.id, exc,
+            )
+
+    async def _run_flush_turn(self, client: Any) -> None:
+        """Run the final memory-distillation turn on the held SDK client.
+
+        Sends ``FLUSH_PROMPT`` via the existing session and drains the
+        response (bounded by ``GRACEFUL_FLUSH_SECONDS``).  Always sets
+        ``_flush_complete`` in the ``finally`` block so
+        ``begin_graceful_termination`` never hangs past its own ``wait_for``.
+        """
+        try:
+            assert self._broker is not None
+            session_id = f"{self._broker.crew_id}-{self.id}"
+            await client.query(FLUSH_PROMPT, session_id=session_id)
+            await asyncio.wait_for(
+                _collect_response_text(client, self._stamp_activity),
+                timeout=GRACEFUL_FLUSH_SECONDS,
+            )
+            logger.debug(
+                "teammate=%s role=%s flush turn completed", self.id, self.role,
+            )
+        except Exception as exc:
+            logger.warning(
+                "teammate=%s flush turn raised: %s — proceeding to tombstone",
+                self.id, exc,
+            )
+        finally:
+            # Always signal, even on error/timeout, so begin_graceful_termination
+            # is never left waiting past its own timeout budget.
+            self._flush_complete.set()

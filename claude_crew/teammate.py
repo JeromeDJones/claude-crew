@@ -126,6 +126,22 @@ class Teammate(ABC):
     async def shutdown(self) -> None:
         """Stop consuming and release resources. Must be idempotent."""
 
+    async def begin_graceful_termination(self, *, timeout: float) -> None:
+        """Run one final memory-distillation turn, bounded by ``timeout`` seconds,
+        then return.  Best-effort: SDK errors / timeouts are swallowed (logged) so
+        the caller can proceed to tombstone.  Idempotent.
+
+        Base default: no-op (immediately returns).  ``SdkTeammate`` overrides
+        with the real client-driven flush turn.
+        """
+
+    def has_memory_surface(self) -> bool:
+        """True iff this teammate can persist memory: has a memory scope AND the
+        Write tool.  Base default: False.  ``SdkTeammate`` overrides based on
+        the role's effective tool list and memory scope.
+        """
+        return False
+
     def store_tool_output(self, tool_use_id: str, body: str) -> None:
         """Store a (redacted, capped) tool output body keyed by tool_use_id.
 
@@ -306,7 +322,15 @@ class StubTeammate(Teammate):
     real Agent-SDK teammates exist.
     """
 
-    def __init__(self, id: str, name: str, role: str, slow_echo_delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        id: str,
+        name: str,
+        role: str,
+        slow_echo_delay: float = 0.0,
+        *,
+        has_memory: bool = False,
+    ) -> None:
         self.id = id
         self.name = name
         self.role = role
@@ -314,6 +338,9 @@ class StubTeammate(Teammate):
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
         self._slow_echo_delay = slow_echo_delay
+        # Graceful-termination support (AT#5)
+        self._has_memory = has_memory
+        self._flush_invoked: bool = False
         # Initialize activity telemetry (base class fields)
         self._last_activity_monotonic = time.monotonic()
         self._last_activity_wallclock = time.time()
@@ -329,6 +356,13 @@ class StubTeammate(Teammate):
         )
         # Tool output store: keyed by tool_use_id (FIFO, 50 entries, 4096-byte cap).
         self._tool_outputs: collections.OrderedDict[str, str] = collections.OrderedDict()
+
+    def has_memory_surface(self) -> bool:
+        return self._has_memory
+
+    async def begin_graceful_termination(self, *, timeout: float) -> None:
+        """No-op flush: records invocation for broker orchestration tests."""
+        self._flush_invoked = True
 
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker
