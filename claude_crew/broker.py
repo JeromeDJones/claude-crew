@@ -631,13 +631,65 @@ class Broker:
 
         await self._tombstone_teammate(teammate_id, None, "kill", reason=reason)
 
-    async def shutdown_all(self) -> None:
+    async def shutdown_all(
+        self, *, graceful: bool = True, flush_timeout: float = 90.0
+    ) -> None:
+        """Terminate all alive teammates and close the broker.
+
+        When ``graceful=True`` (default), teammates that have a memory surface
+        are flushed in **parallel** under ONE shared deadline (a single
+        ``asyncio.wait_for`` over a ``gather``), not N×timeout sequentially.
+        Teammates without a memory surface are hard-tombstoned directly.
+        When ``graceful=False``, all teammates are hard-killed immediately.
+        """
         teammate_ids = list(self._teammates.keys())
+
+        if graceful and teammate_ids:
+            # Collect teammates that need a flush.
+            memory_ids = [
+                tid for tid in teammate_ids
+                if tid in self._teammates and self._teammates[tid].has_memory_surface()
+            ]
+
+            if memory_ids:
+                # Mark all as terminating so sends bounce during the flush window.
+                for tid in memory_ids:
+                    self._terminating.add(tid)
+
+                try:
+                    # ONE shared deadline — flush all in parallel, not N×timeout.
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            *(
+                                self._teammates[tid].begin_graceful_termination(
+                                    timeout=flush_timeout
+                                )
+                                for tid in memory_ids
+                                if tid in self._teammates
+                            ),
+                            return_exceptions=True,
+                        ),
+                        timeout=flush_timeout,
+                    )
+                except asyncio.TimeoutError as exc:
+                    logger.warning(
+                        "parallel graceful flush in shutdown_all timed out: %s", exc
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "parallel graceful flush in shutdown_all errored: %s", exc
+                    )
+                finally:
+                    for tid in memory_ids:
+                        self._terminating.discard(tid)
+
+        # Tombstone all remaining alive teammates (hard-kill; parallel flush already done).
         for tid in teammate_ids:
             try:
-                await self.kill_teammate(tid, reason="shutdown")
+                await self._tombstone_teammate(tid, None, "kill", reason="shutdown")
             except Exception:
                 pass
+
         self._sink.write_lifecycle("shutdown", {
             "teammate_count": len(teammate_ids),
         })
