@@ -6,6 +6,54 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-05-31] Feature: graceful-termination-memory-flush
+
+Out-of-scope observations surfaced during the `graceful-termination-memory-flush` repo-react run (validation PASS, 1299 tests). All advisory — none blocked the feature.
+
+### `test_shutdown_signals.py` fails under concurrent-teammate load — masks real regressions
+
+- **What**: During the build/feature-review phases (many concurrent SDK teammate subprocesses running), `tests/test_shutdown_signals.py` failed 2 tests with `claude-crew did not register within 15.0s`. The failures cleared once the crew wound down — confirmed change-independent via `git stash` re-run by three separate agents, and the full suite was 1299-green when run in isolation. The 15s process-registration timeout is too tight under host load.
+- **Where**: `tests/test_shutdown_signals.py` (registration-wait timeout, ~15s).
+- **Why it matters**: A load-sensitive test fails non-deterministically in exactly the situation RepoReactor creates (parallel teammates). Every full-suite gate during a crew run sees red and a human must adjudicate "pre-existing flake vs real regression" each time — it will eventually mask a genuine regression.
+- **Suggested action**: Widen/back-off the registration timeout (poll with a longer ceiling), make the test independent of wall-clock registration timing, or mark it `flaky`/quarantine it from the default full-suite gate. Lowest-effort: bump the timeout and add a retry.
+
+### `_terminating` name is overloaded across broker and teammate
+
+- **What**: `Broker._terminating` is a `set[str]` of teammate ids (send-bounce gate during a flush window); `SdkTeammate._terminating` is a per-instance `bool` (retry-loop gate). Same name, different type, different concern. No collision today, but a future reader can conflate them.
+- **Where**: `claude_crew/broker.py` (`_terminating` set) and `claude_crew/sdk_teammate.py` (`_terminating` bool).
+- **Why it matters**: Latent readability/maintenance trap on the termination path — the most invariant-dense code in the system.
+- **Suggested action**: Add a one-line cross-reference comment at each declaration, or rename one (e.g. broker `_terminating_ids`).
+
+### `shutdown_all` parallel-timing test relies on a tight wall-clock bound
+
+- **What**: `tests/test_graceful_shutdown_all.py` AT#11 proves parallel-not-sequential flush with N=3 sleeping 0.15s and a `wall_time < 2×T` assertion. Stable (5/5 local at 0.17s), but it's a wall-clock margin and the first thing to flake under CI load.
+- **Where**: `tests/test_graceful_shutdown_all.py`.
+- **Why it matters**: Same class of load-sensitivity as the signals flake; pre-emptive hardening is cheap.
+- **Suggested action**: Assert against a larger N (sharper parallel/sequential ratio, e.g. N=8) instead of a tight absolute time bound.
+
+### Inline test imports recurred (CLAUDE.md "imports at module top")
+
+- **What**: `tests/test_graceful_flush_sdk.py` shipped two `from claude_crew.envelope import …` inline inside test methods (fixed in coordinator cleanup this run). Second feature where slice-review spent attention on this convention.
+- **Where**: test files generally; convention in CLAUDE.md "Imports at module top."
+- **Why it matters**: Reviewer attention spent on a mechanically-enforceable rule.
+- **Suggested action**: Add a `ruff` rule (e.g. `PLC0415` import-outside-top-level) so the linter catches it and reviewers don't have to.
+
+### Idle-path flush drains pre-queued envelopes before the sentinel (INFO)
+
+- **What**: If real envelopes are already queued in an `SdkTeammate` inbox before the flush sentinel is injected, they drain FIFO ahead of the flush (the broker only bounces *new* sends via `_terminating`, not pre-queued ones). A backlogged teammate can spend its 90s flush budget on queued work instead of memory persistence. Bounded by the outer `flush_timeout`, so benign today.
+- **Where**: `claude_crew/sdk_teammate.py` `_run` loop sentinel handling; `claude_crew/broker.py` `_terminating` bounce.
+- **Why it matters**: If memory-flush reliability ever matters more than termination promptness, the flush should jump the queue rather than wait behind backlog.
+- **Suggested action**: Defer. Revisit only if flush-reliability becomes a priority — then make the sentinel preempt queued envelopes.
+
+### Guardrail: warn when `spawn_teammate(custom_endpoint=…)` is set without `model`
+
+- **What**: Routing a teammate through a local CCR-style gateway via `custom_endpoint`, *without* also setting `model`, silently routes to CLOUD — the default `claude-sonnet-4-6` model name matched the gateway's cloud provider. Cost a wasted spawn this run; only caught by reading the gateway log.
+- **Where**: `claude_crew/server.py::spawn_teammate` (custom_endpoint resolution).
+- **Why it matters**: Silent wrong-backend routing is expensive (cloud spend when you wanted local) and invisible without log inspection.
+- **Suggested action**: Emit a WARN at spawn when `custom_endpoint` is provided but `model` is not. Cheap, high-signal.
+
+---
+
 ## [2026-05-24] Bug: SDK teammate dies (exit 1 / "no text content") on reuse — and we can't see why
 
 ### Surfaced during the `agent-pack-refresh` repo-react run: the `rr-slice-reviewer` teammate died 3 times; root cause undiagnosable because we discard the subprocess's stderr
