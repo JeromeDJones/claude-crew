@@ -165,6 +165,11 @@ class Broker:
         # after it's popped from _teammates so get_tool_output can still delegate
         # to it for evicted-but-recently-dead lookups.
         self._dead_teammates: dict[str, Teammate] = {}
+        # Teammate ids currently in the graceful-flush window (between flush start
+        # and tombstone). send() bounces new envelopes addressed to these ids with
+        # TeammateAlreadyDeadError semantics — the flush turn must not be
+        # interleaved with real inbound traffic. Ids are discarded on tombstone.
+        self._terminating: set[str] = set()
         self._sink = TranscriptSink(crew_id=self.crew_id)
         self._sink.write_lifecycle("started", {})
 
@@ -596,12 +601,34 @@ class Broker:
 
     async def kill_teammate(
         self, teammate_id: str, reason: str = "explicit",
+        *, graceful: bool = True, flush_timeout: float = 90.0,
     ) -> None:
         if teammate_id not in self._teammates:
             # Already tombstoned → distinct error from never-existed
             if teammate_id in self._info:
                 raise TeammateAlreadyDeadError(teammate_id)
             raise UnknownTeammateError(teammate_id)
+
+        teammate = self._teammates[teammate_id]
+
+        # Graceful flush: skip when not graceful, or teammate has no memory surface.
+        # Pre-tombstone step — runs BEFORE _tombstone_teammate (D2 ordering preserved).
+        if graceful and teammate.has_memory_surface():
+            self._terminating.add(teammate_id)
+            try:
+                await asyncio.wait_for(
+                    teammate.begin_graceful_termination(timeout=flush_timeout),
+                    timeout=flush_timeout,
+                )
+            except Exception as exc:
+                # Timeout or SDK error: swallow so tombstone always proceeds.
+                logger.warning(
+                    "graceful flush for teammate %s timed out or errored: %s",
+                    teammate_id, exc,
+                )
+            finally:
+                self._terminating.discard(teammate_id)
+
         await self._tombstone_teammate(teammate_id, None, "kill", reason=reason)
 
     async def shutdown_all(self) -> None:
@@ -634,6 +661,11 @@ class Broker:
         # D6: check tombstone BEFORE _teammates (tombstoned = in _info but NOT in _teammates)
         info = self._info.get(env.recipient)
         if info is not None and not info.alive:
+            raise TeammateAlreadyDeadError(env.recipient)
+
+        # Bounce sends during graceful-flush window (terminating but not yet tombstoned).
+        # The flush turn must not be interleaved with new inbound traffic.
+        if env.recipient in self._terminating:
             raise TeammateAlreadyDeadError(env.recipient)
 
         if env.recipient != LEAD_ID and env.recipient not in self._teammates:
