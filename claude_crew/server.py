@@ -453,7 +453,11 @@ def make_server(
         }
 
     @mcp.tool()
-    async def kill_teammate(teammate_id: str) -> dict[str, Any]:
+    async def kill_teammate(
+        teammate_id: str,
+        graceful: bool = True,
+        flush_timeout: float = 90.0,
+    ) -> dict[str, Any]:
         """Terminate a teammate. Subsequent send_to calls will return teammate_dead.
 
         Use this for genuine teardown — the work is finished, the role is no
@@ -479,9 +483,19 @@ def make_server(
         - The teammate is in an unrecoverable state (looping, deadlocked,
           repeatedly producing malformed output despite correction).
         - You need to free resources and the teammate has no more work.
+
+        graceful: when True (default), a teammate with a memory surface gets one
+        final bounded turn to distill anything worth saving into its memory files
+        before being tombstoned. Pass graceful=False to hard-kill immediately
+        (e.g. for wedged/urgent teardown).
+
+        flush_timeout: seconds to wait for the graceful memory-flush turn to
+        complete before falling through to a hard tombstone (default 90.0).
         """
         try:
-            await broker.kill_teammate(teammate_id)
+            await broker.kill_teammate(
+                teammate_id, graceful=graceful, flush_timeout=flush_timeout,
+            )
         except UnknownTeammateError:
             return _err("unknown_teammate", f"no teammate with id {teammate_id!r}")
         return {"ok": True}
