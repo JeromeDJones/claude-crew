@@ -1,0 +1,124 @@
+Graceful termination — give a healthy teammate a final turn to write memory before it is killed.
+
+**Goal**
+
+When the coordinator (or shutdown) terminates a *healthy* claude-crew teammate, give that
+teammate one final turn to distill anything worth saving into its project-scoped memory — per
+the memory guidance ALREADY injected into its system prompt at spawn — before the broker
+tombstones it. A graceful termination, replacing today's immediate hard kill.
+
+**Problem (current behavior)**
+
+Termination does NO memory distillation today. broker._tombstone_teammate (the shared
+kill+death path, claude_crew/broker.py:361-557) does: end-turn, snapshot telemetry into the
+tombstone, bounce in-flight + queued envelopes, close open tools, emit a lifecycle event,
+detached shutdown(). It never calls build_memory_section / memory_dir / ensure_write_tool.
+The memory feature (multi-scope-agent-memory) is entirely SPAWN-SIDE and self-directed: at
+SdkTeammate.__init__ the teammate gets the Write tool (ensure_write_tool) plus a memory
+addendum in its system prompt (build_memory_section), and writes memory itself mid-session if
+it chooses. Kill it before it self-distills and that conversation's lessons are lost.
+
+Also: doc/sdk-teammate-wiring.md line 109 currently claims "Auto-distilled at kill_teammate exit" —
+this is FALSE today. Fix that line as part of this feature (doc-sync).
+
+**Locked design decisions (user-confirmed)**
+
+1. DEFAULT-ON, auto-skip when no memory surface. The flush runs whenever the teammate has the
+   Write tool AND a memory scope; auto-skipped (zero cost, immediate tombstone) for memory-less
+   teammates. A graceful=False parameter on the kill path forces an immediate hard kill.
+2. 90s flush budget. Matches the established hang-detection budget in this codebase. On timeout,
+   fall through to the existing hard tombstone (partial memory writes are fine — Write is
+   incremental and the file persists).
+3. INTERRUPT the in-flight turn and flush immediately. The in-flight turn's result is already
+   discarded on kill today (bounced as teammate_dead), so do not wait for it to finish.
+4. shutdown_all flushes too — PARALLEL, under ONE shared 90s deadline (not N x 90s sequential).
+
+**Architecture findings (load-bearing — verified against the code)**
+
+- The flush MUST run on the SAME ClaudeSDKClient session the teammate has been using (_run
+  holds it in its async-with ClaudeSDKClient(...) block, sdk_teammate.py:1329). A fresh
+  session has no conversation to distill from. Therefore the flush turn must execute INSIDE the
+  teammate's own _run loop task (the single owner of client), NOT in the broker's task.
+- _handle_one_turn (sdk_teammate.py:1356) already implements the exact sequence a flush needs:
+  client.query(...) then a bounded _collect_response_text drain, and on backstop-timeout an
+  client.interrupt() -> bounded-grace -> re-drain ladder (sdk_teammate.py:1376-1404). The
+  flush reuses this proven machinery; interrupt is not a new primitive here.
+- Idle vs busy unify under one termination signal:
+    - IDLE (teammate blocked on inbox.get()): inject a flush sentinel to break the wait, run the
+      flush turn, then exit the loop.
+    - BUSY (inside _handle_one_turn): client.interrupt() breaks the in-flight drain; the turn
+      handler observes the termination signal and runs the flush turn inline (same task, same
+      client), then exits.
+- Proposed control flow: broker.kill_teammate(graceful=True) ->
+  await teammate.begin_graceful_termination(timeout=90) (stores/uses the client ref, sets a
+  _terminating flag, interrupts the in-flight turn or enqueues the flush sentinel, awaits a
+  _flush_complete event bounded by the timeout) -> THEN the existing _tombstone_teammate runs
+  unchanged. Tombstone ordering invariants (D2 tombstone-before-pop, idempotency) are preserved
+  because the flush happens BEFORE tombstone step 1.
+- New intermediate teammate state during the flush window: the teammate is no longer accepting
+  normal work but is not yet tombstoned. New sends arriving during the window should bounce
+  (teammate-already-dead semantics) so the flush turn is not interleaved with real traffic.
+
+**Flush prompt**
+
+A synthetic final turn that LEANS ON the already-injected memory guidance — do NOT re-explain the
+save rules. Approximately: "You are about to be terminated. Per your memory instructions, persist
+anything worth saving now using the Write tool, then stop. Do nothing else." Bounded by 90s.
+
+**Edge cases (must be specified + tested)**
+
+- No memory surface (no Write tool / no scope) -> skip flush, immediate tombstone (decision 1).
+- graceful=False -> skip flush, immediate hard kill.
+- DEATH detection (broker._handle_teammate_death) -> NEVER flush; the subprocess is already gone.
+  Graceful applies only to explicit kill of a live, healthy teammate.
+- Flush turn hangs -> 90s timeout -> proceed to hard tombstone. (If client.interrupt() itself
+  hangs, the existing _death_suspected wedge path applies.)
+- Flush turn raises an SDK error -> log, proceed to tombstone (don't block teardown).
+- Interrupt unsupported / raises -> graceful-degrade to hard kill.
+- Double kill -> idempotent (already-dead error), as today.
+- StubTeammate needs a no-op / simple flush implementation so non-SDK tests can exercise the
+  broker orchestration without the SDK.
+
+**Validation strategy (per repo standards — two layers, happy + sad, plus gated live)**
+
+- IMPLEMENTATION layer: begin_graceful_termination / the flush turn — stub-level unit tests for
+  the state transitions and the idle-sentinel vs busy-interrupt branch; PLUS a gated live test
+  (CLAUDE_CREW_LIVE_TESTS=1) proving a real SDK teammate actually writes a memory file when flushed.
+- INTEGRATION layer (broker): kill_teammate(graceful=True) -> flush turn ran -> memory written;
+  auto-skip path (no Write -> no flush, immediate tombstone); graceful=False -> immediate;
+  timeout path (flush hangs -> hard kill after budget, telemetry tombstone intact); shutdown_all
+  parallel flush under one shared deadline.
+- Happy AND sad paths at BOTH layers.
+- Bound any open-ended async-iterator drains in tests with asyncio.wait_for (repo convention).
+- RUN THE FULL SUITE (uv run pytest) for the validation gate, not a keyword-filtered subset —
+  this mutates the termination path that many suites assert on (CLAUDE.md: validate the whole
+  suite when changing widely-consumed behavior). Stub-mode is the default; live tests stay gated.
+
+**Surfaces likely touched (pointers for the planner to read)**
+
+- claude_crew/broker.py — kill_teammate (:597), _tombstone_teammate (:361), shutdown_all (:607),
+  _handle_teammate_death (:589). New pre-tombstone flush step; graceful parameter; intermediate
+  terminating-state bookkeeping.
+- claude_crew/sdk_teammate.py — _run (:1186), _handle_one_turn (:1356), interrupt ladder
+  (:1376-1404), shutdown (:1602). Client-ref storage, _terminating/_flush_complete, flush turn,
+  sentinel handling, begin_graceful_termination.
+- claude_crew/teammate.py — abstract base: a begin_graceful_termination hook + StubTeammate flush.
+- claude_crew/teammate_memory.py — REUSE as-is (read/inject side). Do NOT build a new distillation
+  engine; the teammate distills itself via its injected guidance + the Write tool.
+- claude_crew/server.py — kill_teammate MCP tool (:456 / :484) gains a graceful (and possibly
+  flush_timeout) argument threaded to broker.kill_teammate.
+- doc/sdk-teammate-wiring.md line 109 — fix the false "auto-distilled at kill" claim.
+
+**Non-goals / out of scope**
+
+- No memory distillation on unexpected DEATH (process already gone — can't flush).
+- No new summarization/distillation engine — reuse the existing injected-guidance + Write-tool
+  self-distill mechanism.
+- No change to the spawn-side memory injection (multi-scope-agent-memory) — that stays as is.
+- No peer-to-peer or autonomous behavior — the coordinator/shutdown still owns the kill decision.
+
+**Reference**
+
+A fuller design brief lives in the MAIN repo at
+/home/jerome/dev/claude-crew/doc/ideas/graceful-termination-memory-flush.md (untracked; not in
+this worktree). Same content as above; this idea.txt is authoritative for the slice.
