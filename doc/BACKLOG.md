@@ -6,6 +6,19 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-03] Bug: teammate subprocess inherits the server's `VIRTUAL_ENV`, breaking `uv run` in the teammate's own project
+
+Surfaced while driving a local-model teammate (`role=nathan`, `model="local"`, `cwd=/home/jerome/dev/note-nest`) that runs project tooling via `uv run`.
+
+### The teammate's `VIRTUAL_ENV` points at claude-crew's venv, not the teammate's `cwd` project
+
+- **What**: The claude-crew MCP server process runs from its own virtualenv, so `VIRTUAL_ENV=/home/jerome/dev/claude-crew/.venv` is in its environment. When `spawn_teammate(cwd=<other-project>)` launches the teammate subprocess, that `VIRTUAL_ENV` is inherited unchanged. In the teammate's project, every `uv run …` prints `warning: VIRTUAL_ENV=…/claude-crew/.venv does not match the project environment path .venv and will be ignored; use --active to target the active environment instead` to **stderr**. `uv` does the right thing (ignores the stale var, uses the project's own `.venv`), so commands still succeed — but the warning is emitted on every invocation.
+- **Where**: wherever the teammate subprocess environment is constructed for spawn — `claude_crew/server.py::spawn_teammate` / the SdkTeammate process-launch env (the same env path that already handles `custom_endpoint`/`env` overrides). The leaked var is the server process's own `VIRTUAL_ENV`.
+- **Why it matters**: (1) Real failure mode — the warning lands on stdout under `2>&1`, so any `uv run … --json 2>&1 | <parser>` pipe gets a non-JSON first line and the parser crashes. Observed live: a local teammate's `uv run notenest catalog resolve … --json 2>&1 | python3 -c "json.load(...)"` failed Exit 1; the teammate self-recovered with `2>/dev/null`, but a less capable model may not. (2) It's a silent cross-project env leak — the teammate's `cwd` says "I'm a note-nest process" but its `VIRTUAL_ENV` says claude-crew. (3) Current mitigation is a per-caller workaround (pass `env={"VIRTUAL_ENV": "<cwd-project>/.venv"}` at spawn), which only helps callers who know about the trap — not a fix.
+- **Suggested action**: When constructing the teammate subprocess env, **strip `VIRTUAL_ENV`** (let `uv`/tooling resolve the venv from `cwd`), or set it to `<cwd>/.venv` when that path exists. Stripping is simplest and matches "tooling discovers its own environment from cwd." Add a test: spawn with `cwd` = a project whose `.venv` differs from the server's, assert the child env has no stale `VIRTUAL_ENV` (or one matching `cwd`). Consider auditing for other leaked server-process vars (e.g. `VIRTUAL_ENV_PROMPT`, `PYTHONHOME`) on the same code path.
+
+---
+
 ## [2026-05-31] Feature: graceful-termination-memory-flush
 
 Out-of-scope observations surfaced during the `graceful-termination-memory-flush` repo-react run (validation PASS, 1299 tests). All advisory — none blocked the feature.
