@@ -1199,6 +1199,23 @@ class SdkTeammate(Teammate):
                     )
                 return  # poll task exits after triggering death handler
 
+    def _venv_env_overrides(self) -> dict[str, str]:
+        """Compute VIRTUAL_ENV / VIRTUAL_ENV_PROMPT overrides for the teammate's cwd.
+
+        Returns {} when self._cwd is None (teammate inherits the server cwd, where
+        the parent VIRTUAL_ENV is already correct — no override needed).
+        Otherwise:
+          - VIRTUAL_ENV = "<cwd>/.venv" when that directory exists;
+          - VIRTUAL_ENV = "" when it does not exist (uv treats empty as absent);
+          - VIRTUAL_ENV_PROMPT = "" in both branches (strip the leaked prompt).
+        """
+        if self._cwd is None:
+            return {}
+        venv_path = os.path.join(self._cwd, ".venv")
+        if os.path.isdir(venv_path):
+            return {"VIRTUAL_ENV": venv_path, "VIRTUAL_ENV_PROMPT": ""}
+        return {"VIRTUAL_ENV": "", "VIRTUAL_ENV_PROMPT": ""}
+
     def _build_merged_env(self) -> dict[str, str]:
         """Return the merged env dict for ClaudeAgentOptions.
 
@@ -1213,7 +1230,7 @@ class SdkTeammate(Teammate):
                     "with value %r — crew default was %r",
                     self.id, key, caller_env[key], CREW_DEFAULTS[key],
                 )
-        return {**CREW_DEFAULTS, **caller_env}
+        return {**CREW_DEFAULTS, **self._venv_env_overrides(), **caller_env}
 
     async def _run(self) -> None:
         # D6: Log env override for CLAUDE_CREW_TOOL_ARGS_FULL if set.
