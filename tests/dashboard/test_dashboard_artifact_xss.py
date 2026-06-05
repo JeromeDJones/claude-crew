@@ -216,6 +216,20 @@ _PAYLOAD_JS_URL = (
     '[click me](javascript:window.XSS_FIRED=true)'
 )
 
+# Payload class 4: malicious mermaid block with embedded XSS vectors.
+# A fenced mermaid block containing <script>, onclick, onerror, and
+# javascript: payloads. The renderMermaidBlocks pipeline must sanitize
+# the source and re-sanitize the SVG output so no JS executes.
+_PAYLOAD_MALICIOUS_MERMAID = (
+    "```mermaid\n"
+    "graph TD\n"
+    '  A["<script>window.XSS_FIRED=true;</script>"] --> B\n'
+    '  B["<img src=x onerror=window.XSS_FIRED=true>"] --> C\n'
+    '  C["javascript:window.XSS_FIRED=true"] --> D\n'
+    '  D["onclick=window.XSS_FIRED=true"]\n'
+    "```\n"
+)
+
 
 # ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -268,6 +282,57 @@ def test_xss_javascript_url_href_is_stripped(page):
         assert not fired, "javascript: href executed — link-hardening in sanitizeArtifact failed"
         # The link text must still be visible (content preserved, href stripped).
         assert "click me" in page.locator(".artifact-md").inner_text()
+    finally:
+        server.should_exit = True
+        t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_xss_malicious_mermaid_payload(page):
+    """Payload class 4: malicious mermaid block with embedded <script>, onclick,
+    onerror, and javascript: payloads must NOT execute JS.
+
+    The renderMermaidBlocks pipeline must:
+    (a) sanitize the mermaid source before passing to mermaid.render(),
+    (b) re-sanitize the SVG output through DOMPurify,
+    (c) produce an SVG without <script> tags.
+    """
+    url, server, t, artifact_id = _make_xss_server(_PAYLOAD_MALICIOUS_MERMAID)
+    try:
+        _open_artifact_drawer(page, url, artifact_id)
+        # Give the browser time for the mermaid render to complete.
+        page.wait_for_timeout(8_000)
+        # (a) No JS should have fired.
+        fired = page.evaluate(_PROBE_SCRIPT)
+        assert not fired, "malicious mermaid payload executed — renderMermaidBlocks sanitization failed"
+        # (b) The SVG should be present in the DOM (render succeeded).
+        svgs = page.locator(".artifact-md svg")
+        assert svgs.count() > 0, "no SVG rendered inside .artifact-md — mermaid render may have failed"
+        # (c) No <script> ELEMENT should exist in the artifact. NOTE: do NOT
+        #     substring-check innerHTML for "onclick"/"onerror" — mermaid renders a
+        #     malicious label as harmless escaped TEXT (e.g. "<p>onclick=...</p>"),
+        #     so those literal strings legitimately appear as visible text. The real
+        #     guards are: nothing executed (assert not fired, above), no <script>
+        #     element, and no element carrying a real event-handler ATTRIBUTE.
+        assert (
+            page.locator(".artifact-md script").count() == 0
+        ), "<script> element found in rendered artifact"
+        # (d) No element carries an actual on* event-handler attribute (DOM query —
+        #     attribute names, not innerHTML text).
+        handler_attrs = page.evaluate(
+            """() => {
+                let n = 0;
+                for (const el of document.querySelectorAll('.artifact-md *')) {
+                    for (const a of el.attributes) {
+                        if (/^on/i.test(a.name)) n++;
+                    }
+                }
+                return n;
+            }"""
+        )
+        assert handler_attrs == 0, f"element with on* handler attribute found ({handler_attrs})"
+        # The artifact-md container rendered (pipeline ran at all).
+        assert page.locator(".artifact-md").count() > 0
     finally:
         server.should_exit = True
         t.join(timeout=3)

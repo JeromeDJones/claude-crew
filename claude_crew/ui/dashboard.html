@@ -466,6 +466,10 @@
        pinned to v4 deliberately — v5 changed the API; do not bump blindly. -->
   <script src="https://unpkg.com/marked@4.3.0/marked.min.js" integrity="sha384-QsSpx6a0USazT7nK7w8qXDgpSAPhFsb2XtpoLFQ5+X2yFN6hvCKnwEzN8M5FWaJb" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/dompurify@3.0.11/dist/purify.min.js" integrity="sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
+  <script>
+    mermaid.initialize({ securityLevel: 'strict', theme: 'dark', startOnLoad: false });
+  </script>
   <script type="text/babel" data-presets="env,react">
     const { useState, useEffect, useMemo, useRef } = React;
 
@@ -1012,6 +1016,60 @@
       return tmp.innerHTML;
     }
 
+    // --- Mermaid render pass ---
+    // Post-render hook: walks .artifact-md descendants, finds fenced mermaid
+    // blocks, renders them as inline SVG, and re-sanitizes the output.
+    function renderMermaidBlocks(artifactNode) {
+      const codeBlocks = artifactNode.querySelectorAll('pre > code.language-mermaid');
+      codeBlocks.forEach(codeEl => {
+        const mermaidSource = codeEl.textContent;
+        const preEl = codeEl.parentElement;
+        if (!preEl) return;
+
+        // Pass raw text to mermaid; securityLevel: 'strict' sanitizes the source.
+        // DOMPurify on the source text would corrupt mermaid syntax (e.g. -->
+        // becomes --&gt;), so we rely on strict mode + SVG output re-sanitization.
+        mermaid.render('mermaid-svg-' + crypto.randomUUID(), mermaidSource)
+          .then(({ svg }) => {
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = svg;
+            const svgEl = wrapper.firstChild;
+
+            // Re-sanitize the SVG output with SVG-specific config.
+            // Mermaid (securityLevel:'strict') renders diagram labels as HTML
+            // (<p>/<span>/<div>) inside <foreignObject> — NOT as SVG <text>. So we
+            // must allow <foreignObject> + those HTML label tags, or every label
+            // vanishes (nodes render as black boxes with no text). DOMPurify still
+            // sanitises the HTML *inside* the foreignObject, so this is safe:
+            // <script>/<a>/<iframe>/<object>/<embed> stay forbidden and all event
+            // handlers (onerror/onload/onclick/…) are stripped. Verified on both
+            // axes (labels render AND a malicious-mermaid payload is neutralised);
+            // the malicious-mermaid XSS test is the regression guard.
+            const safeSvg = DOMPurify.sanitize(svgEl.outerHTML, {
+              USE_PROFILES: { svg: true, svgFilters: true },
+              ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br', 'style'],
+              ADD_ATTR: ['style', 'class', 'xmlns'],
+              FORBID_TAGS: ['script', 'image', 'a', 'iframe', 'object', 'embed'],
+              FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover',
+                             'onfocus', 'onblur'],
+            });
+
+            // Parse the sanitized SVG leniently as HTML — NOT strict XML.
+            // DOMParser('image/svg+xml') is strict XML and chokes on HTML void
+            // elements (<br>, <img>) that mermaid emits inside foreignObject labels
+            // (e.g. a multi-line label written with <br/>), erroring the whole
+            // render. safeSvg is already DOMPurify-sanitized, so innerHTML is safe.
+            const holder = document.createElement('div');
+            holder.innerHTML = safeSvg;
+            const cleanSvg = holder.querySelector('svg');
+            if (cleanSvg) preEl.replaceWith(cleanSvg);
+          })
+          .catch(() => {
+            // On render failure, leave the original <pre> block in place.
+          });
+      });
+    }
+
     // --- OverlayPanel primitive ---
     // Portal-based overlay. mode="modal" = centered panel; mode="drawer" = right-side
     // slide-in. Handles Esc, backdrop click-outside, X button, and focus management.
@@ -1219,7 +1277,11 @@
                 This is the single approved site for dangerouslySetInnerHTML in the dashboard.
                 Do not add additional dangerouslySetInnerHTML calls elsewhere. */}
             {fetchStatus === 'ok' && rec && (
-              <div className="artifact-md" dangerouslySetInnerHTML={{ __html: sanitizeArtifact(rec.body) }}/>
+              <div
+                className="artifact-md"
+                dangerouslySetInnerHTML={{ __html: sanitizeArtifact(rec.body) }}
+                ref={(el) => { if (el) renderMermaidBlocks(el); }}
+              />
             )}
           </div>
 
