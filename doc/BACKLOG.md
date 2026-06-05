@@ -6,6 +6,48 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-04] Bug: SDK teammate dies on a non-zero Bash exit (turn aborts with `internal: Command failed exit 1` instead of returning the tool result)
+
+**HIGH — recurred 3× in a single all-local repo-react run; this is the upstream root of repo-reactor BACKLOG #45.**
+
+- **What**: When a teammate's `Bash` tool call exits non-zero, the SdkTeammate turn aborts at the SDK level and the broker returns `{"error":"internal","message":"Command failed with exit code 1"}` to the lead **instead of** handing the (failed) tool result back to the model to react to. The teammate is tombstoned (`alive:false`, `exit_code:1`). A non-zero exit is *normal tool output* (a failing test, a `grep` with no match, a `git` check) — the model should see it and decide, exactly as the interactive CLI does.
+- **Where**: the SdkTeammate per-turn loop / SDK `query` drain in `sdk_teammate.py` — wherever a tool-call error propagates up as a turn-fatal exception rather than being surfaced as a tool result. The `Bash` non-zero-exit path specifically.
+- **Why it matters**: makes any Bash-running teammate fragile. This run the local `rr-slice-reviewer` crashed **three times**, each from running a test command that exited non-zero (failing/misrouted pytest). Every crash cost a kill + re-spawn + a coordinator "review read-only, here's the ground truth" workaround. It structurally undermines the review gates — a reviewer that can't run a command that *might* fail can't do non-regression checking, and reviewers run lots of could-exit-nonzero Bash.
+- **Suggested action**: in the turn loop, catch the non-zero-exit tool error and feed it back as the tool's (failed) result so the model continues, rather than aborting the turn. Test: spawn a teammate, run `bash -c 'exit 1'`, assert it stays alive and the turn completes. Closes repo-reactor #45 fix-(b).
+
+---
+
+## [2026-06-04] Bug: SDK teammate `Read` serves committed HEAD, not the working-tree (uncommitted) state
+
+**HIGH — silently feeds reviewers stale, pre-change code; breaks the slice-review gate's core assumption.**
+
+- **What**: Inside an SDK teammate, `Read` returns the **committed `HEAD`** version of a file, not the working-tree contents. Verified live: the lead's `Read` on `tests/dashboard/test_dashboard_artifact_xss.py` showed the new test at line 291 (321-line working tree); a teammate in the same worktree `Read` the same path and got the **274-line committed version** (no new test). The teammate got the truth only by switching to `git diff`. Likely cause: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` (set for teammates in the agent-SDK `subprocess_cli.py`) serving a checkpoint baseline instead of live disk.
+- **Where**: SDK file-checkpointing × `Read` for spawned teammates. Investigate whether the checkpoint baseline is captured at spawn and shadows later working-tree edits made by a different teammate.
+- **Why it matters**: in repo-react the implementor's changes are **uncommitted** during slice-review (committed only at MB1b, *after* PASS). A slice-reviewer trusting `Read` reviews the *pre-change* code — it literally cannot see the implementor's work. This run the local slice-reviewer returned REQUEST-CHANGES on phantom findings ("test missing / sanitizer intact" — both true of HEAD, false of the working tree) and recovered only by root-causing the staleness and using `git diff`.
+- **Suggested action**: (1) confirm/disable the checkpoint behavior for teammates (or make `Read` bypass it) so `Read` reflects live disk; (2) interim: reviewer skills must inspect changes via `git diff`/`git status`, never `Read`, for files an implementor just edited; (3) test: teammate A edits (uncommitted), teammate B `Read`s, assert B sees the edit.
+
+---
+
+## [2026-06-04] Perf/UX: the lead coordinator burns excessive context just orchestrating — `get_teammate_status` payload is the prime sink
+
+**MEDIUM — a pure-coordination session (no implementation by the lead) filled the lead's context to ~80%. The orchestrator must be context-cheap to run long / many features.**
+
+- **What**: Coordinating one feature (no hands-on coding by the lead) consumed ~80% of the lead's context window. The dominant avoidable sink is **`get_teammate_status`**, which returns, on *every* call: the teammate's **entire role `system_prompt`** (~80+ lines), the full `config` (tools/extra_tools/skills), AND the **complete `current_subagents` list** — which for the runaway local planner was **150+ entries** in a single response. A handful of status checks dumped thousands of tokens of mostly-static, mostly-irrelevant data into the lead.
+- **Where**: `server.py::get_teammate_status` response shape; secondary sinks: large rendered-prompt round-trips (read + re-send verbatim), verbose teammate message drains, and the project `CLAUDE.md` re-injected on every in-worktree file Read.
+- **Why it matters**: the lead is the persistent, long-lived process; if one feature costs 80% of its window, it can't drive multi-feature sessions or long runs without compaction. Coordinator context-efficiency is a first-class constraint, not a nicety.
+- **Suggested action**: (a) add a **lean status** mode / default to `get_teammate_status` — return only `alive`, `is_processing`, `current_tool`, `idle_seconds`, `last_tool_completed`, token counts; **omit `system_prompt`, `config`, and cap/omit `current_subagents`** (or return just a count). Make the full dump opt-in (`verbose=true`). (b) Consider a lighter `/slots`-style liveness probe the coordinator can poll without the full envelope. (c) Coordinator-discipline note (repo-react SKILL): prefer the non-blocking wait + `is_processing` checks over repeated full status dumps. *Source: Jerome, 2026-06-04 — observed the lead at ~80% after pure coordination.*
+
+---
+
+## [2026-06-04] Polish: wide left-to-right mermaid diagrams render cramped in the narrow artifact drawer
+
+- **What**: The mermaid render pass works, but a `graph LR` (wide) diagram with many nodes scales down to fit the ~450px drawer → tiny/illegible labels. Tall `graph TD` diagrams render crisply; wide ones don't.
+- **Where**: `claude_crew/ui/dashboard.html` — `.artifact-md svg` sizing / artifact drawer width / `renderMermaidBlocks`.
+- **Why it matters**: cosmetic, not correctness — but wide diagrams (pipelines, swimlanes) are common and currently hard to read.
+- **Suggested action**: give the rendered SVG `max-width: 100%` + horizontal scroll (wide diagrams stay full-size, scroll), or widen the drawer. Cheap follow-up to the mermaid-artifact-viewer feature (shipped `6023fa5`).
+
+---
+
 ## [2026-06-03] Bug: teammate subprocess inherits the server's `VIRTUAL_ENV`, breaking `uv run` in the teammate's own project
 
 Surfaced while driving a local-model teammate (`role=nathan`, `model="local"`, `cwd=/home/jerome/dev/note-nest`) that runs project tooling via `uv run`.
