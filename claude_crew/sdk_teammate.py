@@ -1544,6 +1544,12 @@ class SdkTeammate(Teammate):
                     or "CLIConnectionError" in exc_name
                     or "BrokenPipe" in exc_name
                 ):
+                    logger.warning(
+                        "sdk-death: teammate=%s exc_class=%s exit_code=%s"
+                        " last_tool=%s stderr_tail=%s",
+                        self.id, exc_name, getattr(exc, "exit_code", None),
+                        self._last_tool_completed, self._stderr_tail_redacted(),
+                    )
                     self._death_in_flight_envelope = env
                     self._death_suspected = True
                     return  # poll task tombstones; no envelope sent here

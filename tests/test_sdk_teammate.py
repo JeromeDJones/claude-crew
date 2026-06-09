@@ -3698,3 +3698,70 @@ class TestStderrRingBuffer:
         tm._on_stderr_line("ok")
 
         assert "ok" in tm._stderr_ring
+
+
+# ---------- death-site WARNING (teammate-death-diagnostics AT 7) ----------
+
+
+class TestDeathSiteWarning:
+    """BDD scenario for the death-site WARNING emit (AT 7)."""
+
+    def _make_teammate(self) -> SdkTeammate:
+        return SdkTeammate(id="tm-death7", name="Builder", role="builder")
+
+    @pytest.mark.asyncio
+    async def test_death_site_warning_emitted(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """AT7: ProcessError in _handle_one_turn emits WARNING with exc_class,
+        exit_code, last_tool, and stderr_tail before unchanged death control flow."""
+
+        class ProcessError(Exception):
+            def __init__(self, exit_code: int) -> None:
+                super().__init__(f"process exited {exit_code}")
+                self.exit_code = exit_code
+
+        class _FakeClient:
+            async def query(self, prompt: str, **kwargs: Any) -> None:
+                raise ProcessError(1)
+
+            async def receive_response(self):  # type: ignore[override]
+                return  # unreachable — query raises before drain
+                yield  # make this an async generator
+
+        tm = self._make_teammate()
+        # Inject last_tool_completed and stub _stderr_tail_redacted
+        tm._last_tool_completed = {"tool_name": "Bash", "outcome": "error"}
+        tm._stderr_tail_redacted = lambda: "tail-marker"  # type: ignore[method-assign]
+
+        # Minimal broker stub — only crew_id is needed by _handle_one_turn
+        class _StubBroker:
+            crew_id = "crew-at7"
+
+        tm._broker = _StubBroker()  # type: ignore[assignment]
+
+        env = Envelope(
+            id="e-at7", seq=1, sender=LEAD_ID, recipient="tm-death7",
+            timestamp=0.0, payload="test-prompt",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            await tm._handle_one_turn(_FakeClient(), env)
+
+        warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("ProcessError" in m for m in warn_msgs), (
+            f"expected 'ProcessError' in WARNING; got {warn_msgs}"
+        )
+        assert any("exit_code=1" in m for m in warn_msgs), (
+            f"expected 'exit_code=1' in WARNING; got {warn_msgs}"
+        )
+        assert any("tail-marker" in m for m in warn_msgs), (
+            f"expected 'tail-marker' in WARNING; got {warn_msgs}"
+        )
+        assert any("Bash" in m for m in warn_msgs), (
+            f"expected 'Bash' in WARNING; got {warn_msgs}"
+        )
+
+        # Control flow must be unchanged — death handoff vars set
+        assert tm._death_suspected is True
+        assert tm._death_in_flight_envelope is env
