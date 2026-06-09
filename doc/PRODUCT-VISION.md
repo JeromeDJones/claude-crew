@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-05-31
-**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush
+**Last Updated**: 2026-06-09
+**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush + teammate-death-diagnostics
 **Next up**: TBD — #20 peer messaging backlogged 2026-05-17 (coordinator-in-the-loop is the moat; see row 20 for rationale)
 
 ---
@@ -236,6 +236,21 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-06-09 — teammate-death-diagnostics — Shipped
+
+Teammate deaths were previously opaque: a `ProcessError` would tombstone the teammate but leave the operator with no signal about *why* it died — no stderr output, no in-flight tool context, no diagnostics beyond the exception class. The `rr-slice-reviewer` dying 3 times in the `agent-pack-refresh` run without a diagnosable root cause was the original motivating incident.
+
+What shipped: bounded stderr ring buffer on `SdkTeammate` (50-line / 64 KB cap, never-raising `_on_stderr_line` callback registered via SDK `opts.stderr` at `sdk_teammate.py:1432`); two `TeammateInfo` death-record fields (`stderr_tail_at_death`, `in_flight_tools_at_death`) populated in `_tombstone_teammate` from the teammate's pre-death snapshot; `logging.WARNING` at the `ProcessError`/`CLIConnectionError`/`BrokenPipe` catch arm in `_handle_one_turn` carrying `exc_class`, `exit_code`, `last_tool`, and `stderr_tail`; gated live test (`CLAUDE_CREW_LIVE_TESTS=1 uv run pytest tests/test_live_stderr.py`) confirming end-to-end SDK callback registration via `client.options.stderr` introspection. Purely additive: +84 production lines, +340 test lines.
+
+Producer/consumer seam verified end-to-end: `status_snapshot()` keys `stderr_tail`/`in_flight_tools` match broker read-side byte-for-byte. `None`-vs-`[]` semantics correct throughout (`None` = snapshot unavailable; `[]` = snapshot readable but no tool in flight at death). Redaction (`_stderr_tail_redacted()`) runs before the ring contents are stored anywhere — the raw ring never leaves `SdkTeammate`.
+
+Verified SDK behavior: Claude CLI emits no bytes to stderr during normal turns. All output routes to stdout as a JSON stream. The ring buffer therefore only populates during error/crash scenarios; the live test injects via `_on_stderr_line` directly rather than relying on CLI stderr output.
+
+Full suite: 1322 passed, 34 skipped, 1 xfailed, 42 warnings in 136s (exit 0). Two pre-existing `test_shutdown_signals.py` failures reproduced identically on master (server-self-registration timing flake; disjoint from this feature's telemetry surface).
+
+- Vision shift: none — reinforces the teammate lifecycle observability narrative.
+- Pipeline impact: teammate-death-diagnostics → done.
 
 ### 2026-05-07 — #26 Plugin Agent Config Visibility — Shipped
 

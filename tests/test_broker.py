@@ -2174,3 +2174,101 @@ class TestBrokerEnvPassthrough:
             f"got env={env_value!r}"
         )
 
+
+# ---------- death-record fields (AT-5, AT-6 from teammate-death-diagnostics) ----------
+
+
+class TestDeathRecordFields:
+    """AT-5 and AT-6: broker populates stderr_tail_at_death and in_flight_tools_at_death."""
+
+    async def test_death_record_attaches_stderr_tail_and_in_flight_tools(
+        self, broker: Broker,
+    ) -> None:
+        """AT-5: snapshot-reported stderr_tail and in_flight_tools propagate to status payload.
+
+        Injects a custom status_snapshot on the spawned teammate so the tombstone
+        path reads the injected values without needing a live SdkTeammate.
+        """
+        in_flight = [{"tool_name": "Bash", "args_summary": "command=pytest tests/"}]
+        stderr_tail = "line A\n<redacted-key>"
+
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        # Monkeypatch status_snapshot to return death-diagnostics keys.
+        original_snap = teammate.status_snapshot
+
+        def patched_snap():
+            base = original_snap()
+            base["stderr_tail"] = stderr_tail
+            base["in_flight_tools"] = in_flight
+            return base
+
+        teammate.status_snapshot = patched_snap  # type: ignore[method-assign]
+
+        await broker._handle_teammate_death(tid, exit_code=1)  # type: ignore[attr-defined]
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False, "tombstone must mark alive=False"
+        assert status["exit_code"] == 1, f"exit_code mismatch: {status['exit_code']!r}"
+        assert status["stderr_tail_at_death"] == stderr_tail, (
+            f"stderr_tail_at_death mismatch: {status['stderr_tail_at_death']!r}"
+        )
+        assert status["in_flight_tools_at_death"] == in_flight, (
+            f"in_flight_tools_at_death mismatch: {status['in_flight_tools_at_death']!r}"
+        )
+
+    async def test_death_record_graceful_no_stderr_no_in_flight(
+        self, broker: Broker,
+    ) -> None:
+        """AT-6a: snapshot with stderr_tail=None and missing in_flight_tools key → defaults."""
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        original_snap = teammate.status_snapshot
+
+        def patched_snap():
+            base = original_snap()
+            base["stderr_tail"] = None
+            # in_flight_tools key intentionally absent
+            base.pop("in_flight_tools", None)
+            return base
+
+        teammate.status_snapshot = patched_snap  # type: ignore[method-assign]
+
+        await broker._handle_teammate_death(tid, exit_code=0)  # type: ignore[attr-defined]
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False
+        assert status["stderr_tail_at_death"] is None, (
+            f"expected None, got {status['stderr_tail_at_death']!r}"
+        )
+        assert status["in_flight_tools_at_death"] == [], (
+            f"expected [], got {status['in_flight_tools_at_death']!r}"
+        )
+
+    async def test_death_record_attribute_error_in_snapshot_gives_none(
+        self, broker: Broker,
+    ) -> None:
+        """AT-6b: if status_snapshot() raises AttributeError, both fields are None
+        and tombstone completes (alive=False).
+        """
+        tid = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+        teammate = broker._teammates[tid]  # type: ignore[attr-defined]
+
+        def raises_attr_error():
+            raise AttributeError("simulated old fixture / bare mock")
+
+        teammate.status_snapshot = raises_attr_error  # type: ignore[method-assign]
+
+        await broker._handle_teammate_death(tid, exit_code=2)  # type: ignore[attr-defined]
+
+        status = broker.get_teammate_status(tid)
+        assert status["alive"] is False, "tombstone must complete even when snapshot raises"
+        assert status["stderr_tail_at_death"] is None, (
+            f"expected None on AttributeError path, got {status['stderr_tail_at_death']!r}"
+        )
+        assert status["in_flight_tools_at_death"] is None, (
+            f"expected None on AttributeError path, got {status['in_flight_tools_at_death']!r}"
+        )
+
