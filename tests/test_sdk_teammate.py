@@ -38,6 +38,8 @@ from claude_crew.sdk_teammate import (
     _collect_response_text,
     _payload_to_prompt,
     RateLimitedError,
+    _STDERR_RING_MAXLEN,
+    _STDERR_RING_BYTE_CAP,
 )
 from tests.fakes.sdk import FakeSDKClient, text_response, text_response_with_usage
 from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
@@ -3623,3 +3625,76 @@ class TestSdkTeammateMemoryWriteGuard:
         )
 
         assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
+# ---------- stderr ring buffer (teammate-death-diagnostics ATs 1-4) ----------
+
+
+class TestStderrRingBuffer:
+    """BDD scenarios for the bounded stderr ring buffer (ATs 1-4)."""
+
+    def _make_teammate(self) -> SdkTeammate:
+        return SdkTeammate(id="tm-stderr", name="Stderr", role="builder")
+
+    # AT1: Ring buffer bounded by line count and byte cap.
+    def test_ring_bounded_by_line_count(self) -> None:
+        """AT1a: After 120 calls with short lines, ring holds exactly the last 50."""
+        tm = self._make_teammate()
+        for i in range(1, 121):
+            tm._on_stderr_line(f"line {i}")
+
+        assert len(tm._stderr_ring) == _STDERR_RING_MAXLEN
+        # Last line present
+        assert "line 120" in tm._stderr_ring
+        # Lines 1-70 are evicted; only lines 71-120 are retained (maxlen=50).
+        assert "line 70" not in tm._stderr_ring
+
+    def test_ring_bounded_by_byte_cap(self) -> None:
+        """AT1b: After feeding lines whose total exceeds _STDERR_RING_BYTE_CAP,
+        byte total stays <= cap and ring retains at least one line."""
+        tm = self._make_teammate()
+        # Each chunk is 4096 bytes; 20 chunks = 80 KiB > 64 KiB cap.
+        chunk = "x" * 4096
+        for _ in range(20):
+            tm._on_stderr_line(chunk)
+
+        assert tm._stderr_ring_bytes <= _STDERR_RING_BYTE_CAP
+        assert len(tm._stderr_ring) >= 1
+
+    # AT2: Ring tail is redacted in status_snapshot.
+    def test_ring_tail_redacted_in_snapshot(self) -> None:
+        """AT2: A secret in a stderr line is redacted in snap['stderr_tail']."""
+        tm = self._make_teammate()
+        secret = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG1234"
+        tm._on_stderr_line(f"Authorization: Bearer {secret}")
+
+        snap = tm.status_snapshot()
+        stderr_tail = snap["stderr_tail"]
+
+        assert stderr_tail is not None
+        assert len(stderr_tail) > 0
+        assert secret not in stderr_tail
+        assert "<redacted" in stderr_tail
+
+    # AT3: Empty stderr → stderr_tail is None and in_flight_tools is [].
+    def test_empty_stderr_graceful(self) -> None:
+        """AT3: No stderr lines → snap['stderr_tail'] is None; snap['in_flight_tools'] == []."""
+        tm = self._make_teammate()
+        snap = tm.status_snapshot()
+
+        assert snap["stderr_tail"] is None
+        assert snap["in_flight_tools"] == []
+
+    # AT4: Callback never raises on non-str / None inputs.
+    def test_callback_never_raises(self) -> None:
+        """AT4: _on_stderr_line(None), _on_stderr_line(12345), and _on_stderr_line('ok') never raise."""
+        tm = self._make_teammate()
+
+        # None input — must not raise
+        tm._on_stderr_line(None)  # type: ignore[arg-type]
+        # Non-str int — must not raise
+        tm._on_stderr_line(12345)  # type: ignore[arg-type]
+        # Normal string — must not raise and must appear in ring
+        tm._on_stderr_line("ok")
+
+        assert "ok" in tm._stderr_ring

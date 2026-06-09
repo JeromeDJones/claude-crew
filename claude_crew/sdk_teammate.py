@@ -79,6 +79,10 @@ TURN_BACKSTOP_SECONDS_DEFAULT: float = 3600.0
 # D8: Max concurrent tools before soft overflow guard (logged but accepted).
 MAX_CONCURRENT_TOOLS: int = 64
 
+# Stderr ring buffer tunables (teammate-death-diagnostics).
+_STDERR_RING_MAXLEN: int = 50        # max lines retained
+_STDERR_RING_BYTE_CAP: int = 65536   # 64 KiB hard byte ceiling
+
 _SHUTDOWN_SENTINEL: object = object()
 
 # Graceful flush constants (Feature: graceful-termination-memory-flush).
@@ -692,6 +696,54 @@ class SdkTeammate(Teammate):
         self._flush_complete: asyncio.Event = asyncio.Event()
         self._client: Any | None = None
 
+        # Stderr ring buffer (teammate-death-diagnostics).
+        self._stderr_ring: collections.deque[str] = collections.deque(maxlen=_STDERR_RING_MAXLEN)
+        self._stderr_ring_bytes: int = 0  # running UTF-8 byte total
+
+    def _on_stderr_line(self, line: str) -> None:
+        """SDK stderr callback. Appends one CLI stderr line to the ring buffer.
+
+        Registered as ClaudeAgentOptions.stderr. Runs inside the SDK's stderr
+        reader task — must never raise (a raising callback destabilizes that
+        task) and must be cheap. Bounded by maxlen (line count) AND
+        _STDERR_RING_BYTE_CAP (byte total): oldest lines are evicted when either
+        bound is exceeded.
+        """
+        try:
+            if line is None:
+                return
+            s = line if isinstance(line, str) else str(line)
+            nbytes = len(s.encode("utf-8", errors="ignore"))
+            # If deque is full, appending will evict the oldest — adjust byte total first.
+            if len(self._stderr_ring) == self._stderr_ring.maxlen and self._stderr_ring:
+                self._stderr_ring_bytes -= len(
+                    self._stderr_ring[0].encode("utf-8", errors="ignore")
+                )
+            self._stderr_ring.append(s)
+            self._stderr_ring_bytes += nbytes
+            # Byte-cap trim: evict oldest until under cap (keep at least one line).
+            while self._stderr_ring_bytes > _STDERR_RING_BYTE_CAP and len(self._stderr_ring) > 1:
+                evicted = self._stderr_ring.popleft()
+                self._stderr_ring_bytes -= len(evicted.encode("utf-8", errors="ignore"))
+        except Exception:
+            return
+
+    def _stderr_tail_redacted(self) -> str | None:
+        """Return the redacted, joined ring contents, or None if empty.
+
+        Joins ring lines with "\\n" and runs them through redact_output (V1
+        patterns + output-only patterns + 32 KiB cap). Returns None when the
+        ring is empty. Never raises: on redaction failure returns a sentinel so
+        the death path stays diagnosable and bounded.
+        """
+        if not self._stderr_ring:
+            return None
+        joined = "\n".join(self._stderr_ring)
+        try:
+            return redact_output(joined)
+        except Exception:
+            return "[stderr-redaction-failed]"
+
     async def start(self, broker: Broker, inbox: asyncio.Queue) -> None:
         self._broker = broker
         self._inbox = inbox
@@ -1160,6 +1212,9 @@ class SdkTeammate(Teammate):
         snap["current_subagents"] = subagent_entries
         snap["last_subagent_completed"] = self._last_subagent_completed
         snap["in_flight_subagents_at_death"] = None
+        # Stderr ring buffer fields (teammate-death-diagnostics).
+        snap["stderr_tail"] = self._stderr_tail_redacted()
+        snap["in_flight_tools"] = list(snap.get("current_tools", []))
         return snap
 
     async def _liveness_poll_loop(self, client: Any) -> None:
@@ -1372,6 +1427,9 @@ class SdkTeammate(Teammate):
         # cwd: spawn-time only.
         if self._cwd is not None:
             opts_kwargs["cwd"] = self._cwd
+
+        # Register stderr ring-buffer callback (teammate-death-diagnostics).
+        opts_kwargs["stderr"] = self._on_stderr_line
 
         options = ClaudeAgentOptions(**opts_kwargs)
         try:
