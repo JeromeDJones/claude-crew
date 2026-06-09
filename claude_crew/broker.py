@@ -81,6 +81,13 @@ class TeammateInfo:
     # teammate during that window (E-3, intentional). Empty tuple is a possible
     # final value (teammate ran no tools before death).
     tool_events_at_death: "tuple[ToolEvent, ...] | None" = None
+    # Diagnostic death-record fields (teammate-death-diagnostics). None for alive.
+    stderr_tail_at_death: str | None = None
+    # Snapshot of in-flight tools (current_tools) captured at tombstone time,
+    # BEFORE _close_open_tools abandons them. Each entry carries redacted
+    # args_summary (so the last in-flight Bash command is visible). None if the
+    # teammate's snapshot could not be read; [] if no tool was in flight.
+    in_flight_tools_at_death: "list[dict[str, Any]] | None" = None
 
 
 @dataclass(frozen=True)
@@ -440,6 +447,10 @@ class Broker:
                     "last_turn_peak_invocation_input_tokens", 0
                 )
                 active_model_at_death: str | None = snap.get("active_model")
+                stderr_tail_at_death: str | None = snap.get("stderr_tail")
+                in_flight_tools_at_death: list[dict[str, Any]] = list(
+                    snap.get("in_flight_tools", [])
+                )
             except AttributeError:
                 last_activity = None
                 idle_at_death = None
@@ -453,6 +464,8 @@ class Broker:
                 last_turn_output_tokens_at_death = None
                 last_turn_peak_invocation_input_tokens_at_death = None
                 active_model_at_death = None
+                stderr_tail_at_death = None
+                in_flight_tools_at_death = None
         else:
             last_activity = None
             idle_at_death = None
@@ -466,6 +479,8 @@ class Broker:
             last_turn_output_tokens_at_death = None
             last_turn_peak_invocation_input_tokens_at_death = None
             active_model_at_death = None
+            stderr_tail_at_death = None
+            in_flight_tools_at_death = None
 
         # 5. Write frozen tombstone BEFORE pop (D2 tombstone-before-pop ordering)
         self._info[teammate_id] = dataclasses.replace(
@@ -485,6 +500,8 @@ class Broker:
             last_turn_output_tokens_at_death=last_turn_output_tokens_at_death,
             last_turn_peak_invocation_input_tokens_at_death=last_turn_peak_invocation_input_tokens_at_death,
             active_model_at_death=active_model_at_death,
+            stderr_tail_at_death=stderr_tail_at_death,
+            in_flight_tools_at_death=in_flight_tools_at_death,
         )
 
         # 6. Pop from active set; stash the object in _dead_teammates so
@@ -955,6 +972,9 @@ class Broker:
                 "last_turn_output_tokens": info.last_turn_output_tokens_at_death if info.last_turn_output_tokens_at_death is not None else 0,
                 "last_turn_peak_invocation_input_tokens": info.last_turn_peak_invocation_input_tokens_at_death if info.last_turn_peak_invocation_input_tokens_at_death is not None else 0,
                 "active_model": info.active_model_at_death,
+                # teammate-death-diagnostics: death-record fields
+                "stderr_tail_at_death": info.stderr_tail_at_death,
+                "in_flight_tools_at_death": info.in_flight_tools_at_death,
             }
             # Config snapshot retained from spawn (omit key when no AgentDef resolved).
             config = self._configs.get(teammate_id)
