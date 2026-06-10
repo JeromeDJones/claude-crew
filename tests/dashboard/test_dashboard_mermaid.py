@@ -259,6 +259,34 @@ def test_single_mermaid_block_renders_svg(page):
 
 
 @pytest.mark.dashboard
+def test_drawer_resizes_by_dragging_left_handle(page):
+    """The artifact drawer widens when its left-edge handle is dragged left, and the
+    chosen width persists to localStorage (so wide diagrams have room to breathe)."""
+    url, server, t, artifact_id = _make_mermaid_server(_PAYLOAD_SINGLE)
+    try:
+        _open_artifact_drawer(page, url, artifact_id)
+        handle = page.locator(".drawer-resize-handle")
+        handle.wait_for(state="visible", timeout=5_000)
+        panel = handle.locator("xpath=..")  # the drawer panel is the handle's parent
+        start_w = panel.bounding_box()["width"]
+        hb = handle.bounding_box()
+        cy = hb["y"] + hb["height"] / 2
+        # Right-anchored drawer: dragging the left-edge handle leftwards widens it.
+        page.mouse.move(hb["x"] + hb["width"] / 2, cy)
+        page.mouse.down()
+        page.mouse.move(hb["x"] - 250, cy, steps=12)
+        page.mouse.up()
+        end_w = panel.bounding_box()["width"]
+        assert end_w > start_w + 100, f"expected widen by >100px; start={start_w} end={end_w}"
+        # Width persisted for next session.
+        saved = page.evaluate("() => localStorage.getItem('artifactDrawerWidth')")
+        assert saved is not None and float(saved) > start_w, f"width not persisted: {saved!r}"
+    finally:
+        server.should_exit = True
+        t.join(timeout=3)
+
+
+@pytest.mark.dashboard
 def test_no_mermaid_blocks_no_regression(page):
     """AT 3: An artifact with no mermaid blocks renders identically to today."""
     url, server, t, artifact_id = _make_mermaid_server(_PAYLOAD_NO_MERMAID)

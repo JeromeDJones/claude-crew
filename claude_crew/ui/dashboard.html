@@ -448,6 +448,14 @@
     .artifact-md table { border-collapse: collapse; font-size: 12px; }
     .artifact-md th, .artifact-md td { border: 1px solid var(--line); padding: 4px 8px; }
     .artifact-md th { background: var(--bg-2); font-weight: 600; }
+    /* Mermaid artifact diagrams: thicken edges so links read clearly on the light drawer.
+       (.flowchart-link / .messageLineN are Mermaid v10/v11 SVG edge classes.) */
+    .artifact-md svg .flowchart-link { stroke-width: 2.25px; }
+    .artifact-md svg .messageLine0, .artifact-md svg .messageLine1 { stroke-width: 1.75px; }
+    /* Artifact drawer left-edge resize handle. Straddles the border (left:-3px) so it
+       sits over the panel edge rather than covering left-aligned content. */
+    .drawer-resize-handle { position: absolute; left: -3px; top: 0; height: 100%; width: 8px; cursor: ew-resize; z-index: 2; }
+    .drawer-resize-handle:hover, .drawer-resize-handle.dragging { background: var(--accent-soft); }
   </style>
 </head>
 <body>
@@ -468,7 +476,32 @@
   <script src="https://unpkg.com/dompurify@3.0.11/dist/purify.min.js" integrity="sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
   <script>
-    mermaid.initialize({ securityLevel: 'strict', theme: 'dark', startOnLoad: false });
+    // High-contrast default theme for surfaced diagrams: dark edges + dark label
+    // text on light-blue nodes, readable on the dark drawer background. securityLevel
+    // stays 'strict' (XSS guard). Per-document %%{init}%% blocks still override this.
+    mermaid.initialize({
+      securityLevel: 'strict',
+      theme: 'base',
+      startOnLoad: false,
+      themeVariables: {
+        lineColor: '#0f172a',
+        primaryColor: '#cfe2ff',
+        primaryTextColor: '#0b1324',
+        primaryBorderColor: '#1d4ed8',
+        clusterBkg: '#eef2ff',
+        clusterBorder: '#4f46e5',
+        edgeLabelBackground: '#ffffff',
+        actorBkg: '#cfe2ff',
+        actorBorder: '#1d4ed8',
+        actorTextColor: '#0b1324',
+        signalColor: '#0f172a',
+        signalTextColor: '#0b1324',
+        noteBkgColor: '#fff3bf',
+        noteBorderColor: '#b45309',
+        noteTextColor: '#0b1324',
+        fontSize: '14px',
+      },
+    });
   </script>
   <script type="text/babel" data-presets="env,react">
     const { useState, useEffect, useMemo, useRef } = React;
@@ -1076,6 +1109,41 @@
     function OverlayPanel({ mode, size, onClose, children }) {
       const panelRef = useRef(null);
 
+      // Drawer-only: drag the left edge to resize. Persisted across reloads.
+      const clampWidth = (w) => Math.min(Math.max(w, 360), Math.round(window.innerWidth * 0.95));
+      const [drawerWidth, setDrawerWidth] = useState(() => {
+        const saved = parseInt(localStorage.getItem('artifactDrawerWidth') || '', 10);
+        // Re-clamp on hydration: a width saved on a larger viewport must not overflow this one.
+        return Number.isFinite(saved) ? clampWidth(saved) : null;
+      });
+      const [resizing, setResizing] = useState(false);
+      const draggingRef = useRef(false);
+
+      const startResize = (e) => {
+        e.preventDefault();
+        if (draggingRef.current) return;  // guard: ignore overlapping drags (double mousedown)
+        draggingRef.current = true;
+        setResizing(true);
+        const prevUserSelect = document.body.style.userSelect;
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'ew-resize';
+        const onMove = (ev) => {
+          // Right-anchored drawer: width grows as the cursor moves left.
+          setDrawerWidth(clampWidth(window.innerWidth - ev.clientX));
+        };
+        const onUp = () => {
+          draggingRef.current = false;
+          setResizing(false);
+          document.body.style.userSelect = prevUserSelect;
+          document.body.style.cursor = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          setDrawerWidth((w) => { if (w) localStorage.setItem('artifactDrawerWidth', String(w)); return w; });
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      };
+
       useEffect(() => {
         const handler = (e) => { if (e.key === 'Escape') onClose(); };
         document.addEventListener('keydown', handler);
@@ -1094,13 +1162,15 @@
       };
 
       const panelStyle = mode === 'drawer' ? {
-        width: size || 'min(720px, 55vw)',
+        position: 'relative',
+        width: drawerWidth ? drawerWidth + 'px' : (size || 'min(720px, 55vw)'),
         height: '100vh',
         background: 'var(--bg-1)',
         borderLeft: '1px solid var(--line)',
         display: 'flex', flexDirection: 'column',
         transform: 'translateX(0)',
-        transition: 'transform 180ms ease-out',
+        // Animate only the slide-in transform, never width (avoids a snap when a drag ends).
+        transition: resizing ? 'none' : 'transform 180ms ease-out, width 0ms',
         outline: 'none',
         overflow: 'hidden',
       } : {
@@ -1117,6 +1187,16 @@
       return ReactDOM.createPortal(
         <div style={backdropStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
           <div ref={panelRef} tabIndex={-1} style={panelStyle} onClick={e => e.stopPropagation()}>
+            {mode === 'drawer' && (
+              <div
+                className={'drawer-resize-handle' + (resizing ? ' dragging' : '')}
+                onMouseDown={startResize}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize artifact panel"
+                title="Drag to resize"
+              />
+            )}
             {children}
           </div>
         </div>,
