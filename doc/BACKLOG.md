@@ -6,6 +6,13 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-10] Feature: transcript retention — the JSONL sink grows unbounded, never pruned
+
+- **What**: `transcript.py` writes one `{UTC-stamp}-{crew_id}.jsonl` per crew session to the transcript dir and **never cleans up**. There is no rotation, age-based prune, count cap, or GC anywhere in the codebase (`grep` for `unlink/remove/prune/rotat/cleanup/retention/rmtree` over `claude_crew/` hits nothing on transcripts; `Transcript.close()` only closes the handle). Files accumulate indefinitely. Observed 2026-06-10: **2965 files / 30 MB** in the default `~/.local/state/claude-crew/transcripts/`, oldest from Apr 25 (~6 weeks unpruned). Size is small per-file (~10 KB avg) but growth is monotonic and the inode count climbs without bound.
+- **Where**: `claude_crew/transcript.py` — `resolve_transcript_dir()` (path), `Transcript.__init__` (per-crew file create), `close()` (no prune). No caller reclaims old files.
+- **Why it matters**: slow resource leak — unbounded files + inodes in the user's XDG state dir on long-running installs. Also a usability drag: finding a recent transcript among thousands is painful.
+- **Suggested action**: add a retention sweep at server startup (and/or a `claude-crew gc` subcommand): prune transcripts older than N days (default ~15–30) and/or keep the most recent K. Make it configurable (e.g. `CLAUDE_CREW_TRANSCRIPT_RETENTION_DAYS`); no-op when `CLAUDE_CREW_TRANSCRIPT_DISABLED=1`. Test: seed old+new fixtures in a tmp dir, run the sweep, assert old removed / recent kept / non-`.jsonl` untouched. **Interim manual cleanup applied 2026-06-10** (`find … -mtime +15 -delete` → 2059 removed, 2965→906 files, 30M→8.1M).
+
 ## [2026-06-04] Bug: SDK teammate dies on a non-zero Bash exit (turn aborts with `internal: Command failed exit 1` instead of returning the tool result)
 
 **HIGH — recurred 3× in a single all-local repo-react run; this is the upstream root of repo-reactor BACKLOG #45.**
