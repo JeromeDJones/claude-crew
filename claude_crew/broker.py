@@ -1155,6 +1155,16 @@ class Broker:
         proposal.status = "approved" if decision == "approve" else "declined"
         async with self._proposal_condition:
             self._proposal_condition.notify_all()
+        # Notify the lead inbox so get_messages wakes without polling.
+        # Guard fires above, so only one notify per successful resolution.
+        await self.send(Envelope(
+            id=new_message_id(),
+            seq=0,
+            sender="broker",
+            recipient=LEAD_ID,
+            timestamp=time.time(),
+            payload={"type": "shape_resolved", "shape_id": shape_id, "status": proposal.status},
+        ))
         return proposal
 
     def get_proposal(self, shape_id: str) -> "ShapeProposal | None":
