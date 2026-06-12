@@ -145,6 +145,11 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
     try:
         page.goto(url)
 
+        # M1.5: ShapeGatePanel is resurfaceable — click the gate pill to open it.
+        pill = page.locator('[data-testid="pending-gate-pill"]')
+        pill.wait_for(state="visible", timeout=15_000)
+        pill.click()
+
         # Wait for the shape-gate panel (content root inside the modal).
         panel = page.locator(".shape-gate-panel")
         panel.wait_for(state="visible", timeout=15_000)
@@ -245,6 +250,11 @@ def test_shape_gate_xss_guard(page):
     url, server, t = _start_server(broker)
     try:
         page.goto(url)
+
+        # M1.5: ShapeGatePanel is resurfaceable — click the gate pill to open it.
+        pill = page.locator('[data-testid="pending-gate-pill"]')
+        pill.wait_for(state="visible", timeout=15_000)
+        pill.click()
 
         # Wait for the shape-gate panel (inside the modal).
         panel = page.locator(".shape-gate-panel")
@@ -392,8 +402,13 @@ def test_shape_gate_modal_shows_follower_proposal(page, tmp_path, monkeypatch):
     try:
         page.goto(url_a)
 
-        # Modal should appear because the leader aggregates the follower's
-        # pending proposal into the instances list for ShapeGatePanel.
+        # M1.5: gate pill must be visible first — leader aggregated the
+        # follower's pending proposal into shape_proposals via flatMap.
+        pill = page.locator('[data-testid="pending-gate-pill"]')
+        pill.wait_for(state="visible", timeout=20_000)
+        pill.click()
+
+        # Modal should open; it includes proposals from all instances (flatMap).
         panel = page.locator(".shape-gate-panel")
         panel.wait_for(state="visible", timeout=15_000)
 
