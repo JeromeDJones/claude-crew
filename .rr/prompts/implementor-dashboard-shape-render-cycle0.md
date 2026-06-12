@@ -1,0 +1,103 @@
+## Task
+
+Implement task `dashboard-shape-render` (index 4) of the breakout against
+the spec at `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/specs/workflow-shape-composition-m0.md`. Iterate until the spec's declared test command
+passes.
+
+Do not commit, push, or stage any files — the user owns merge and signoff.
+
+## Prior Slice-Review Findings
+
+Deduplicated findings from prior tasks' slice-review reports (informational —
+address Mediums+ before writing new code; Infos are cross-slice observations
+for awareness only):
+
+_None._
+
+## Task Slice
+
+Task name: `dashboard-shape-render`
+Task index: `4`
+Description: Front-end half of the shape-gate. In claude_crew/ui/dashboard.html render a
+shape-gate panel that draws each pending proposal's mermaid source (from
+/api/state) as a graphical DAG by reusing the shipped mermaid.render() +
+DOMPurify/foreignObject XSS-hardening pipeline (the renderMermaidBlocks pattern),
+with Approve/Decline controls that POST to /shape-approval. Add a Playwright test
+asserting the DAG renders with visible node labels (not black boxes) and that a
+malicious-mermaid payload in slot/role text is neutralized while the diagram
+still renders.
+
+Acceptance tests this task owns (1-based indices into spec's `## Acceptance
+Tests`): 13 (see spec ## Acceptance Tests)
+
+The breakout artifact at `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/specs/workflow-shape-composition-m0.md` has the full DAG. Read your
+task's entry to see the precise scope. The acceptance tests above are *your*
+responsibility; other tasks own the rest. The spec's full test command runs
+the entire suite — your task is done when the tests in your slice pass and
+no other slice's tests regress.
+
+## Read Before Editing
+
+claude_crew/ui/dashboard.html (the file you modify — reuse the existing renderMermaidBlocks() + mermaid.render() + DOMPurify/foreignObject XSS-hardening pipeline, ~lines 451,477,482,1052-1095,1363); the shape_proposals entries (with .mermaid source) now surfaced in /api/state by task 3
+
+## Slice Test Command
+
+The per-task test command for this slice. Run this as your **only PASS gate**.
+When empty, fall back to the spec's suite-level `## Test Command` and write a
+one-line note in the build report:
+`note: testCommand absent for task <name> — fell back to suite-level command`
+
+```
+uv run pytest tests/test_shape_render.py
+```
+
+## Artifacts
+
+Spec: `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/specs/workflow-shape-composition-m0.md`
+Acceptance tests: `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/specs/workflow-shape-composition-m0.md`
+Breakout: `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/specs/workflow-shape-composition-m0.md`
+Build report (write here): `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/reports/workflow-shape-composition-m0-task-dashboard-shape-render-build-0.md`
+
+Prior build report (empty on cycle 0): 
+
+Failing tests from prior cycle (empty on cycle 0 — run the full suite):
+
+
+## Cycle
+
+0
+
+## Working Directory
+
+`/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr-worktrees/dashboard-shape-render`
+
+Run `cd "/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr-worktrees/dashboard-shape-render"` before any file operation. Treat this path as binding.
+
+## Instructions
+
+Follow this seven-step workflow:
+
+1. Read the spec and the breakout entry for your task in full. Identify your
+   slice of the acceptance tests by index.
+2. Run the spec's test command. On cycle 0 expect failures (especially in
+   your slice's tests). On cycle ≥ 1, focus first on the failing tests
+   listed above before re-running the full suite.
+3. Implement the change for your task's slice using available tools. Do not
+   touch concerns claimed by other tasks unless your slice genuinely cannot
+   reach green without it — in that case, prefer the smallest cross-slice
+   edit possible and note it in the build report's scope-creep section.
+4. Run the test command again. Iterate until your slice's tests pass and the
+   suite as a whole stays green.
+5. Capture remaining failing tests (if any) and the final exit code.
+6. Write the build report to `/home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/reports/workflow-shape-composition-m0-task-dashboard-shape-render-build-0.md` using the build-report
+   template (in the plugin install at `doc/templates/build-report-template.md`).
+   Include `git diff --name-status HEAD` output as the files-changed list.
+7. Emit this as the **final line** of your response — no trailing text after it:
+   `RR-VERDICT: PASS|FAIL|BLOCKED <slug> <cycle> /home/jerome/dev/claude-crew/.rr-worktrees/workflow-shape-composition-m0/.rr/reports/workflow-shape-composition-m0-task-dashboard-shape-render-build-0.md`
+   On BLOCKED, append a one-line reason after the path.
+
+**Hard constraints:**
+- NO `git commit`, NO `git push`, NO `git stage` — forbidden without exception.
+- Per-run wallclock cap: 600 seconds. On timeout return `BLOCKED` with reason `test-command-timeout`.
+- Do not narrate files changed inline — the build report captures that.
+- Do not implement other tasks' slices. Stay scoped.

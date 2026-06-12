@@ -547,6 +547,14 @@ def default_factory(
         # Frozen startup diagnostics tuple; consumed by make_server() when it
         # constructs the default Broker (Broker(startup_diagnostics=...)).
         factory.startup_diagnostics = startup_diagnostics  # type: ignore[attr-defined]
+        # Live enumeration of known roles for instantiate_shape pre-flight.
+        # Reads holder.pack LIVE so post-refresh state is always current.
+        # Mirrors the startup_diagnostics accessor idiom above.
+        factory.known_roles = lambda: tuple(holder.pack.keys())  # type: ignore[attr-defined]
+        # Expose the role resolver so instantiate_shape pre-flight can share the
+        # exact same promotion logic rather than re-implementing it.  Same idiom
+        # as factory.known_roles above.
+        factory.resolve_role = _resolve_role  # type: ignore[attr-defined]
         # Expose the holder so tests (and future refresh() wiring) can reach it.
         factory._holder = holder  # type: ignore[attr-defined]
         return factory

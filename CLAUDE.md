@@ -33,9 +33,11 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### Core components
 
-**`server.py`** — FastMCP server. Exposes 12 tools to the lead: `spawn_teammate`, `send_to`, `broadcast`, `get_messages` (long-poll via `wait_seconds`), `get_wait_endpoint` (non-blocking message-wait URL), `list_crew`, `kill_teammate`, `get_teammate_status`, `get_transcript_path`, `list_available_tools`, `refresh_agents` (reload agent definitions from disk into the in-memory pack; future-spawns-only), `surface_document` (push a markdown artifact to Mission Control). This is the only surface the lead touches.
+**`server.py`** — FastMCP server. Exposes 14 tools to the lead: `spawn_teammate`, `send_to`, `broadcast`, `get_messages` (long-poll via `wait_seconds`), `get_wait_endpoint` (non-blocking message-wait URL), `list_crew`, `kill_teammate`, `get_teammate_status`, `get_transcript_path`, `list_available_tools`, `refresh_agents` (reload agent definitions from disk into the in-memory pack; future-spawns-only), `surface_document` (push a markdown artifact to Mission Control), `propose_shape` (register a shape as a pending human-approval gate; blocks on `await_proposal` until approved/declined/timed_out), `instantiate_shape` (spawn exactly the approved crew; pre-flight role resolution all-or-nothing; records a `Topology`). This is the only surface the lead touches.
 
-**`broker.py`** — Single source of truth for team state. Owns the teammate registry, append-only message log, per-inbox queues, monotonic sequence counter, and dedup set. Tombstones dead teammates (marks dead, preserves in registry for status queries). Writes lifecycle and envelope records to the transcript sink.
+**`shapes.py`** — Shape schema (NEW in `workflow-shape-composition-m0`). `Shape`, `ShapeNode`, `ShapeEdge` frozen dataclasses + `ShapeValidationError` + `parse_shape(data, *, source)` (validates loudly; accepts dict or YAML string) + `shape_to_mermaid(shape)` (emits `graph TD` source for the dashboard renderer). Pure data — no broker/SDK dependency.
+
+**`broker.py`** — Single source of truth for team state. Owns the teammate registry, append-only message log, per-inbox queues, monotonic sequence counter, and dedup set. Tombstones dead teammates (marks dead, preserves in registry for status queries). Writes lifecycle and envelope records to the transcript sink. Also owns the shape proposal registry (`ShapeProposal` state machine: `pending` → `approved`/`declined`/`timed_out` → `instantiated`, gated by an `asyncio.Condition` long-poll) and recorded topologies (`Topology`: edges + per-edge mode + slot→teammate map). Both are surfaced on `BrokerSnapshot`.
 
 **`teammate.py`** — Abstract base class. Defines the inbox-consumption loop, activity tracking (`_begin_turn` / `_end_turn` / `_stamp_activity`), and tool tracking (`_tool_uses` in-flight dict, `_last_tool_completed`). `StubTeammate` is the echo implementation used in tests.
 
@@ -43,7 +45,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 **`envelope.py`** — Wire format. Fields: `id` (caller-provided UUID for retry safety), `seq` (broker-stamped monotonic), `sender`, `recipient`, `timestamp`, `payload`.
 
-**`factories.py`** — Selects teammate implementation. `CLAUDE_CREW_TEAMMATE_MODE=stub` → `StubTeammate` (default in tests). `sdk` (default in production) → `SdkTeammate`. SDK mode merges the default subagent pack with `~/.claude/agents/` and project `.claude/agents/`.
+**`factories.py`** — Selects teammate implementation. `CLAUDE_CREW_TEAMMATE_MODE=stub` → `StubTeammate` (default in tests). `sdk` (default in production) → `SdkTeammate`. SDK mode merges the default subagent pack with `~/.claude/agents/` and project `.claude/agents/`. The SDK factory exposes `factory.known_roles` — a zero-arg callable returning `tuple(holder.pack.keys())` read live off the merged pack holder — used by `instantiate_shape`'s pre-flight role resolution. The stub factory does not set this attribute by default (tests inject it to exercise the pre-flight).
 
 **`transcript.py`** — Best-effort JSONL sink. Path resolves via `CLAUDE_CREW_TRANSCRIPT_DIR` → `$XDG_STATE_HOME/claude-crew/transcripts/` → `~/.local/state/claude-crew/transcripts/`. Disabled in tests via `CLAUDE_CREW_TRANSCRIPT_DISABLED=1`.
 

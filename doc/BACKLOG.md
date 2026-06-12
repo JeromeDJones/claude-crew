@@ -6,6 +6,69 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-11] Feature: workflow-shape-composition-m0
+
+Out-of-scope findings from the `workflow-shape-composition-m0` feature (validation PASS, 1424 tests). Six code findings (Low/Info, non-blocking) and four infra/process observations from the repo-reactor coordinator run.
+
+### [Low] `resolve_proposal` has no source-state guard
+
+- **What**: `broker.resolve_proposal(shape_id, decision)` enforces only the *value* of `decision` (approve/decline), not that the proposal's current status is `pending`. It will silently flip `timed_out`→`approved` or `declined`→`approved`.
+- **Where**: `claude_crew/broker.py::Broker.resolve_proposal`
+- **Why it matters**: Loose approval-gate state machine. Practical exposure is small (lead has already received `timed_out` and re-proposes), but a future fast-path or test shortcut could mis-transition silently.
+- **Suggested action**: Add a `pending`-only precondition guard (`raise ValueError` on non-pending status). Add a test for the re-resolve path. XS.
+
+### [Info] Pre-flight ↔ `_resolve_role` logic duplication
+
+- **What**: `server.instantiate_shape` re-implements the `*:role` suffix-promotion rule (exact match OR unique `k.endswith(f":{role}")`), mirroring `factories._resolve_role` (a nested closure at ~line 380). Pre-flight is strictly more conservative and safe. Risk: future changes to `_resolve_role` semantics don't propagate to pre-flight.
+- **Where**: `claude_crew/server.py::instantiate_shape` pre-flight; `claude_crew/factories.py::_resolve_role`
+- **Suggested action**: Hoist `_resolve_role` to module scope and have pre-flight call it (or expose `factory.resolve_role` accessor). Defer to M2 when the routing layer expands.
+
+### [Info] `Topology` frozen-but-mutable `slot_to_teammate` dict
+
+- **What**: `Topology` is `@dataclass(frozen=True)` but its `slot_to_teammate` is a plain `dict`. `frozen=True` guards rebinding, not in-place mutation. No live mutation path today; harmless in M0.
+- **Where**: `claude_crew/broker.py::Topology`
+- **Suggested action**: Wrap in `types.MappingProxyType`, or add a caller-contract docstring. XS.
+
+### [Info] Partial-spawn window outside role-resolution scope
+
+- **What**: `instantiate_shape`'s all-or-nothing guarantee (AT#14) applies to the pre-flight role-resolution check. A `spawn_teammate` exception mid-loop for an unrelated reason would leave already-spawned nodes. Out of M0 scope.
+- **Where**: `claude_crew/server.py::instantiate_shape` spawn loop
+- **Suggested action**: Defer. If partial crews surface in M2+, add try/except in the spawn loop and tombstone already-spawned nodes on failure.
+
+### [Info] Direct `proposal.status = "instantiated"` mutation
+
+- **What**: `instantiate_shape` sets the proposal status directly rather than via a broker method. Minor encapsulation breach; functional and test-covered.
+- **Where**: `claude_crew/server.py::instantiate_shape`
+- **Suggested action**: Add `broker.mark_instantiated(shape_id)` in a future broker-encapsulation pass.
+
+### [Info] Shape-gate panel renders active-instance proposals only
+
+- **What**: `ShapeGatePanel` reads `cli.shape_proposals` (selected instance only). A follower's pending gate surfaces only when the operator selects that instance. The multi-instance approval *proxy* (AT#12) works correctly regardless.
+- **Where**: `claude_crew/ui/dashboard.html::ShapeGatePanel`
+- **Suggested action**: Product/UX decision: aggregate pending gates across all instances in the leader's panel (with per-crew crew_id labels)? If yes, size S.
+
+---
+
+> **#45 SDK-crash recurrence (was a separate [2026-06-11] entry) — MERGED into the canonical [2026-06-04] entry below** (see its "Recurred 2026-06-11/12" bullet). Deduped 2026-06-12.
+
+### [Medium, tooling — coordinator infra] context-mode tools wedge reviewer roles
+
+- **What**: The first `rr-plan-reviewer` in this run hung ~10min inside a `ctx_execute` call (flatlined `last_activity`, tool never returned). Re-spawning without context-mode (CRG-only) fixed it immediately.
+- **Suggested action**: Do not grant context-mode MCP to reviewer roles by default. Reviewer roles need structural code navigation (CRG), not data-transformation sandboxes (context-mode).
+- **Cross-ref**: likely a **shared root cause with the [2026-06-04] #45 SDK-crash** — that entry's "suspect lead" names context-mode-loaded-in-the-subprocess as a plausible destabilizer. Closing this (context-mode off for reviewers) may also reduce the crash surface. Coordinator already adopted context-mode-off-for-reviewers as standing practice 2026-06-12.
+
+### [Medium, skill/coordinator] persistent reviewer anchors on stale cycle-0 verdict on re-review — ✅ FIXED 2026-06-12 (FDE source)
+
+- **What**: On cycle-1 re-review (spec revised), the reused `rr-plan-reviewer` re-emitted its cycle-0 verdict verbatim, twice, without re-reading the disk. Re-spawning fresh fixed it.
+- **Resolution (Jerome's call)**: keep reusing the same reviewer (retains context), but force the re-read. **Applied to the three FDE reviewer prompt templates** (`plan-reviewer`/`review-slice`/`review-feature`) — cycle-≥1 now says "the artifact has CHANGED — re-read from disk, do not re-emit your prior verdict." Goes live on next FDE reinstall/version-bump. Coordinator also adopted the explicit re-read prompt as practice immediately.
+
+### [Low, prompt] planner surveyed only Python server files for UI presence claims — ✅ FIXED 2026-06-12 (FDE source)
+
+- **What**: Planner grepped `ui_server.py` and concluded "no mermaid/diagram-viz layer exists." The mermaid renderer was in `dashboard.html`. (Contributing cause: the idea text mis-pointed at `ui_server.py`. Causality correction: this did NOT cause the cycle-1 re-plan — that was the role-resolution H1; the mermaid mis-survey was caught pre-review by the coordinator.)
+- **Resolution**: **Applied to the FDE `planner-prompt.md.tmpl`** — added "before claiming any UI capability absent, survey BOTH backend modules AND frontend assets (`*.html`/`*.js`/templates) explicitly." Goes live on next FDE reinstall/version-bump.
+
+---
+
 ## [2026-06-10] Feature: transcript retention — the JSONL sink grows unbounded, never pruned
 
 - **What**: `transcript.py` writes one `{UTC-stamp}-{crew_id}.jsonl` per crew session to the transcript dir and **never cleans up**. There is no rotation, age-based prune, count cap, or GC anywhere in the codebase (`grep` for `unlink/remove/prune/rotat/cleanup/retention/rmtree` over `claude_crew/` hits nothing on transcripts; `Transcript.close()` only closes the handle). Files accumulate indefinitely. Observed 2026-06-10: **2965 files / 30 MB** in the default `~/.local/state/claude-crew/transcripts/`, oldest from Apr 25 (~6 weeks unpruned). Size is small per-file (~10 KB avg) but growth is monotonic and the inode count climbs without bound.
@@ -23,6 +86,7 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 - **Suggested action**: in the turn loop, catch the non-zero-exit tool error and feed it back as the tool's (failed) result so the model continues, rather than aborting the turn. Test: spawn a teammate, run `bash -c 'exit 1'`, assert it stays alive and the turn completes. Closes repo-reactor #45 fix-(b). **NOTE (2026-06-09): the framing above is a partial misdiagnosis — claude-crew never intercepts individual tool results; the `ProcessError("Command failed with exit code N")` is raised when the *node CLI subprocess itself* exits non-zero (`subprocess_cli.py:673-676`), surfacing during the `receive_response()` drain and matched at `sdk_teammate.py`'s death arm. By the time we catch it the subprocess is already dead, so "feed the tool result back" is not implementable as written. The remaining open work is to determine *why* the CLI exits non-zero (now diagnosable — see below) and decide on resilience (e.g. session-resume retry).**
 - **Diagnosed by `teammate-death-diagnostics` (2026-06-09, shipped)**: the next occurrence is now self-explaining — `SdkTeammate` captures a redacted stderr-ring tail, the death-site arm emits a WARNING (exc class, exit_code, last tool, stderr tail), and the tombstone record carries `stderr_tail_at_death` + `in_flight_tools_at_death`. So a future ProcessError death surfaces *why* the CLI exited and *what tool was in flight* — the missing evidence that made root-causing impossible before.
 - **Known trigger observed (2026-06-09)**: reusing a **persistent** SDK teammate whose cwd was a git worktree that was later **torn down** (`git worktree remove`) crashes it on its next tool call — the subprocess's deleted cwd makes the node CLI exit non-zero → same ProcessError tombstone. Hit live this run on a slice-reviewer rooted at a per-task worktree that MB4 removed. **Mitigation (coordinator-discipline)**: root long-lived teammates at a *stable* cwd (the slice worktree, never a per-task worktree). **Possible claude-crew hardening**: broker/teammate could detect a vanished cwd and surface a clean diagnostic instead of an opaque ProcessError.
+- **Recurred 2026-06-11/12 (`workflow-shape-composition-m0` run) — 5th+ incident; merged here from the retro's [2026-06-11] dup.** Two slice-reviewers crashed (exit 1) on `uv run pytest` (flaky-test non-zero exit) and `grep` with no match. **Re-confirmed the deleted-cwd trigger live:** one crash was a reused persistent slice-reviewer rooted at a per-task worktree that MB4 had already torn down — exactly the 2026-06-09 path above. **Diagnostics-deployment gap (new, actionable):** the *running* claude-crew MCP server predates the 2026-06-09 `teammate-death-diagnostics` ship, so these crashes produced only the bare `{event:"died",exit_code:1}` lifecycle record — **no `stderr_tail_at_death`, no `in_flight_tools_at_death`.** The "next occurrence is self-explaining" promise can't fire until the running server is reinstalled/restarted onto a diagnostics-enabled build. **ACTION: reinstall+restart the live claude-crew MCP server so the next crash is actually captured.** **Mitigations now standard coordinator practice** (verified this run): reviewers run **Read-only + coordinator-supplied ground-truth file** (no Bash); root reviewers at the **stable slice worktree**; **context-mode off for reviewers** (see the related context-mode-wedge entry — a suspected shared root cause).
 
 ---
 
