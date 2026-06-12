@@ -27,7 +27,7 @@ from claude_crew.broker import (
     Topology,
     UnknownTeammateError,
 )
-from claude_crew.shapes import ShapeValidationError, parse_shape
+from claude_crew.shapes import ShapeValidationError, parse_shape, shape_to_mermaid
 from claude_crew.artifact_registry import (
     ArtifactNotText,
     ArtifactRegistry,
@@ -736,15 +736,15 @@ def make_server(
     async def propose_shape(
         shape: dict,
         adaptation_diff: str | None = None,
+        wait: bool = False,
         timeout_seconds: float = 600,
     ) -> dict[str, Any]:
         """Propose a multi-agent topology shape for human approval before instantiation.
 
         Parses and validates the shape, registers a pending proposal in the
-        broker's shape-gate queue, and blocks until the operator approves,
-        declines, or the timeout expires.  Approve or decline via the Mission
-        Control dashboard (shape-gate panel) or by calling the dashboard's
-        POST /shape-approval/{crew_id}/{shape_id} route directly.
+        broker's shape-gate queue, then returns immediately by default.
+        Approve or decline via ``resolve_shape`` (chat channel) or the
+        Mission Control dashboard (POST /shape-approval/{crew_id}/{shape_id}).
 
         Args:
             shape: Shape definition dict. Required keys: name, description,
@@ -752,13 +752,17 @@ def make_server(
                 {from_slot, to_slot, mode}), phases.
             adaptation_diff: Optional diff / notes describing changes from a
                 base shape. Surfaced in the dashboard for operator context.
-            timeout_seconds: Seconds to block waiting for a decision
-                (default 600). Returns status "timed_out" on expiry.
+            wait: If True, block until the proposal is resolved (M0 back-compat
+                path). Default False: return immediately with status "pending".
+            timeout_seconds: Seconds to block when wait=True (default 600).
+                Returns status "timed_out" on expiry. Ignored when wait=False.
 
         Returns:
-            ok: True (parse succeeded and gate returned a decision).
-            shape_id: Opaque proposal identifier; pass to instantiate_shape.
-            status: "approved" | "declined" | "timed_out".
+            ok: True (parse succeeded).
+            shape_id: Opaque proposal identifier; pass to resolve_shape /
+                instantiate_shape.
+            status: "pending" (default wait=False) | "approved" | "declined" |
+                "timed_out" (wait=True only).
             shape: Serialized summary of the parsed shape.
 
             On parse failure:
@@ -772,18 +776,92 @@ def make_server(
             return {"ok": False, "stage": "parse", "error": str(exc)}
 
         shape_id = broker.register_proposal(parsed, adaptation_diff=adaptation_diff)
-        proposal = await broker.await_proposal(shape_id, timeout=timeout_seconds)
+        shape_summary = {
+            "name": parsed.name,
+            "description": parsed.description,
+            "nodes": [{"slot": n.slot, "role": n.role} for n in parsed.nodes],
+        }
+
+        if wait:
+            proposal = await broker.await_proposal(shape_id, timeout=timeout_seconds)
+            return {
+                "ok": True,
+                "shape_id": shape_id,
+                "status": proposal.status,
+                "shape": shape_summary,
+            }
 
         return {
             "ok": True,
             "shape_id": shape_id,
-            "status": proposal.status,
-            "shape": {
-                "name": parsed.name,
-                "description": parsed.description,
-                "nodes": [{"slot": n.slot, "role": n.role} for n in parsed.nodes],
-            },
+            "status": "pending",
+            "shape": shape_summary,
         }
+
+    @mcp.tool()
+    async def resolve_shape(shape_id: str, decision: str) -> dict[str, Any]:
+        """Resolve a pending shape proposal via the chat channel (approve or decline).
+
+        This is the chat-channel counterpart to the dashboard's shape-approval
+        button.  The coordinator calls this tool on behalf of the operator once
+        the operator has reviewed the proposed topology.
+
+        Args:
+            shape_id: The proposal id returned by propose_shape.
+            decision: "approve" to allow instantiation, "decline" to block it.
+
+        Returns:
+            ok: True on success.
+            shape_id: The proposal id.
+            status: "approved" | "declined".
+
+            On failure:
+            ok: False.
+            error: Human-readable reason (unknown id / already-resolved /
+                invalid decision).
+        """
+        if decision not in ("approve", "decline"):
+            return {"ok": False, "error": "decision must be 'approve' or 'decline'"}
+
+        proposal = broker.get_proposal(shape_id)
+        if proposal is None:
+            return {"ok": False, "error": f"unknown shape_id: {shape_id}"}
+        if proposal.status != "pending":
+            return {
+                "ok": False,
+                "error": f"{shape_id} is not pending (status={proposal.status})",
+            }
+
+        await broker.resolve_proposal(shape_id, decision)
+        return {"ok": True, "shape_id": shape_id, "status": proposal.status}
+
+    @mcp.tool()
+    async def list_pending_shapes() -> dict[str, Any]:
+        """List all pending shape proposals.
+
+        Returns enough detail for the coordinator to describe the pending gate
+        over text (e.g. to an operator approving via phone/text).
+
+        Returns:
+            ok: True.
+            pending: List of pending proposals, each carrying:
+                shape_id, name, crew_id, mermaid (Mermaid graph source),
+                summary (shape description).
+            Returns an empty list when no proposals are pending.
+        """
+        snap = broker.snapshot()
+        pending = [
+            {
+                "shape_id": p.shape_id,
+                "name": p.shape.name,
+                "crew_id": snap.crew_id,
+                "mermaid": shape_to_mermaid(p.shape),
+                "summary": p.shape.description,
+            }
+            for p in snap.shape_proposals
+            if p.status == "pending"
+        ]
+        return {"ok": True, "pending": pending}
 
     @mcp.tool()
     async def instantiate_shape(shape_id: str) -> dict[str, Any]:
