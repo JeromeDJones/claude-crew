@@ -17,7 +17,7 @@ import asyncio
 
 import pytest
 
-from claude_crew.broker import Broker, ShapeProposal, Topology
+from claude_crew.broker import LEAD_ID, Broker, ShapeProposal, Topology
 from claude_crew.shapes import Shape, ShapeEdge, ShapeNode
 
 
@@ -389,3 +389,75 @@ async def test_mark_instantiated_on_already_instantiated_raises(broker: Broker) 
 
     with pytest.raises(ValueError, match="cannot instantiate proposal"):
         broker.mark_instantiated(shape_id)
+
+
+# ---------------------------------------------------------------------------
+# AT3 — Notify-on-resolve: shape_resolved envelope in lead inbox
+# ---------------------------------------------------------------------------
+
+
+async def test_notify_on_resolve_approve_sends_lead_message(broker: Broker) -> None:
+    """AT3 (happy path, approve): resolve_proposal sends shape_resolved to lead."""
+    shape_id = broker.register_proposal(_make_shape("notify-approve"))
+    await broker.resolve_proposal(shape_id, "approve")
+
+    messages = broker.get_messages(LEAD_ID, since_seq=0)
+    shape_resolved = [
+        m for m in messages
+        if isinstance(m.payload, dict)
+        and m.payload.get("type") == "shape_resolved"
+        and m.payload.get("shape_id") == shape_id
+    ]
+    assert len(shape_resolved) == 1
+    assert shape_resolved[0].payload["status"] == "approved"
+
+
+async def test_notify_on_resolve_decline_sends_lead_message(broker: Broker) -> None:
+    """AT3 (happy path, decline): resolve_proposal sends shape_resolved to lead."""
+    shape_id = broker.register_proposal(_make_shape("notify-decline"))
+    await broker.resolve_proposal(shape_id, "decline")
+
+    messages = broker.get_messages(LEAD_ID, since_seq=0)
+    shape_resolved = [
+        m for m in messages
+        if isinstance(m.payload, dict)
+        and m.payload.get("type") == "shape_resolved"
+        and m.payload.get("shape_id") == shape_id
+    ]
+    assert len(shape_resolved) == 1
+    assert shape_resolved[0].payload["status"] == "declined"
+
+
+async def test_no_notify_before_resolve(broker: Broker) -> None:
+    """AT3 (sad path): no shape_resolved message in lead inbox before resolution."""
+    shape_id = broker.register_proposal(_make_shape("pending-no-notify"))
+
+    # Proposal is pending — no shape_resolved envelope should exist yet.
+    messages = broker.get_messages(LEAD_ID, since_seq=0)
+    shape_resolved = [
+        m for m in messages
+        if isinstance(m.payload, dict)
+        and m.payload.get("type") == "shape_resolved"
+        and m.payload.get("shape_id") == shape_id
+    ]
+    assert len(shape_resolved) == 0
+
+
+async def test_second_resolve_produces_no_extra_notify(broker: Broker) -> None:
+    """AT3: guard fires before notify so double-resolve raises, not second message."""
+    shape_id = broker.register_proposal(_make_shape("no-double-notify"))
+    await broker.resolve_proposal(shape_id, "approve")
+
+    # Attempt a second resolve — must raise, must not emit a second notification.
+    with pytest.raises(ValueError, match="cannot resolve proposal"):
+        await broker.resolve_proposal(shape_id, "approve")
+
+    messages = broker.get_messages(LEAD_ID, since_seq=0)
+    shape_resolved = [
+        m for m in messages
+        if isinstance(m.payload, dict)
+        and m.payload.get("type") == "shape_resolved"
+        and m.payload.get("shape_id") == shape_id
+    ]
+    # Exactly one message — from the first (successful) resolution only.
+    assert len(shape_resolved) == 1
