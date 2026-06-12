@@ -2,8 +2,8 @@
 
 **Created**: 2026-04-25
 **Last Updated**: 2026-06-09
-**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush + teammate-death-diagnostics
-**Next up**: TBD — #20 peer messaging backlogged 2026-05-17 (coordinator-in-the-loop is the moat; see row 20 for rationale)
+**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush + teammate-death-diagnostics + workflow-shape-composition-m0
+**Next up**: workflow-shape-composition-m2 (edge routing enforcement + scoped `send_to` + neighbor injection + circuit breaker; agreed ordering: M0 done → M2 next → M1 later — Jerome, 2026-06-11)
 
 ---
 
@@ -203,6 +203,19 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 | msam | **Multi-scope agent memory.** Finishes the deferred `project` and `local` scope stub from the teammate-memory-persistence feature. All three `memory:` frontmatter values now resolve to a real directory (`user` unchanged; `project` → `<cwd>/.claude/agent-memory/<role>/`; `local` → `<cwd>/.claude/agent-memory.local/<role>/`), carry scope-appropriate write guidance, and auto-attach the `Write` tool via `ensure_write_tool`. Non-collision with the lead write guard verified by regression test. | 1 | 1 | S | **done (2026-05-19)** | Shipped via RepoReactor. 5 tasks, 12 ATs, 184/184 tests. Four Info-tier follow-ups surfaced at review; 3 resolved 2026-05-20 in `fix/memory-scope-typing` (`a0f1f7b`: Scope Literal type alias, scope-fallthrough tighten, cwd=None integration test), inline-import hoist deferred. See `doc/features/FEATURE-multi-scope-agent-memory.md`. |
 | pmi | **Plugin-MCP isolation.** `--strict-mcp-config` added unconditionally via SDK `extra_args` — closes the plugin-MCP leak documented in `doc/sdk-teammate-wiring.md §4` (packs declaring `skills:` triggered `setting_sources=["user","project"]` which auto-loaded plugin manifests past the deny-by-default `--mcp-config` allowlist). | 1, 4 | 4 | S | **done (2026-05-26)** | Shipped via RepoReactor — cycle-0-clean on every gate (plan-review, 5 × build, 5 × slice-review, feature-review, validation). 9 ATs / 5 tasks; 1278 passed / 0 failed validation. Three deferred follow-ups handled directly post-merge: peak-invocation `AssistantMessage` log parity, tautological 3rd test in `test_sdk_teammate_strict_mcp.py`, `test_shutdown_signals.py` stability under concurrent implementor dispatch. Workflow-retro surfaced 4 high-leverage SKILL/template changes (proven-not-asserted non-regression, structured failure-attribution build-report fields + `bin/rr-flake-check`, call-site verification in plan-review, surface-audit planner step) — captured in this slice's workflow-retro report. Originally shipped under the "local-model-attribution" label that also added OpenAI-shape token extraction; that path was removed 2026-05-29 (backends now translate to Anthropic-shape upstream — see `doc/features/FEATURE-per-teammate-model-routing.md`). |
 
+### Workflow Shape Composition
+
+Makes crew shapes first-class, declarative, and human-gated. M0 shipped 2026-06-11. Agreed execution order: **M0 done → M2 next → M1 later** (Jerome, 2026-06-11). Rationale: M2 makes the approved graph *execute*; M1 (shape templates, classifier) is independent and higher-value after the graph runs.
+
+| # | Feature | Capability | Crit | Size | Status | Notes |
+|---|---|---|---|---|---|---|
+| wsc-m0 | **Workflow Shape Composition M0.** `propose_shape` + `instantiate_shape` MCP tools (12→14 tools). `Shape` / `ShapeNode` / `ShapeEdge` frozen dataclasses + `parse_shape` + `shape_to_mermaid`. Human approval gate via `asyncio.Condition` long-poll (`pending`→`approved`/`declined`/`timed_out`→`instantiated`). Mermaid DAG rendered in Mission Control via the shipped `renderMermaidBlocks` + DOMPurify/XSS pipeline with Approve/Decline controls. All-or-nothing pre-flight role resolution (`factory.known_roles`). `Topology` (edges + slot→teammate map) recorded on `BrokerSnapshot`. Multi-instance approval proxy (`POST /shape-approval/{crew_id}/{shape_id}`). Zero new inter-teammate communication; routing unchanged. | 1, 4 | 1 | M | **done (2026-06-11)** | 5 tasks. 14 ATs; 101 feature-suite tests + 1424 full-suite green. Playwright graphical-DAG render + XSS guard (AT#13); multi-instance proxy test (AT#12). `shapes.py` (NEW), `broker.py` (+6 methods, 2 dataclasses), `factories.py` (`known_roles` accessor), `server.py` (+2 tools), `ui_server.py` (+1 route), `dashboard.html` (+2 React components). |
+| wsc-m2 | **Workflow Shape Composition M2 (NEXT).** Edge routing enforcement: `tee`/`direct`/`gated` modes actually constrain message flow. Scoped teammate `send_to` — messages only traverse declared edges. Neighbor adjacency injection — each spawned teammate's context includes its declared neighbors. Circuit breaker. Makes the approved graph execute; M0's `Topology` becomes the live routing rail. Edge animation/promotion in the dashboard also M2. | 1, 4 | 1 | L | **next** | Agreed next after M0 (Jerome, 2026-06-11). Plugs directly into `BrokerSnapshot.topologies` + `Topology.edges` rail M0 laid. |
+| wsc-m1 | **Workflow Shape Composition M1 (deferred until after M2).** Blessed shape library + lead router/classifier: `micro-fix`, `standard-feature`, `heavy-feature` template shapes in a `shapes/` dir; `propose_shape` accepts a file path; lead classifies a problem and selects a shape. Independent of M2 — no routing logic involved. Higher-value after the graph runs. | 1 | 1 | M | **deferred (after M2)** | Spec §Out-of-scope listed M1 before M2 (creation order); execution order revised 2026-06-11. |
+| wsc-m3 | **Adaptation algebra (deferred).** `add_node` / `swap` / `augment` / `set_gate` / `drop` verbs + structured `adaptation_diff`. M0's `adaptation_diff` is opaque free-text; M3 makes it computable. Overlaps M3 operator in-gate editing. | 1 | 1 | L | **deferred** | |
+| wsc-m4 | **RepoReactor as `heavy-feature` shape (deferred).** Re-author the RR workflow as a declared shape using M1 templates + M2 routing enforcement. | 1 | 1 | L | **deferred** | |
+| wsc-m5 | **Memory-informed / lead-autonomous adaptation (deferred).** | 1 | 1 | L | **deferred** | |
+
 ### Deferred (v2+)
 
 | Feature | Capability | Notes |
@@ -236,6 +249,32 @@ Routed from Feature #5's retro substrate findings, plus #8 added during Feature 
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-06-11 — Workflow Shape Composition M0 — Shipped
+
+M0 delivers the keystone of Workflow Shape Composition: a crew **shape** becomes a first-class, declarative, legible data structure, and **human approval of the proposed shape is the primary gate** before any teammate spawns. Five existing modules extended (additive only) plus one new pure-data module.
+
+**What shipped:**
+- **`claude_crew/shapes.py`** (NEW) — `Shape` / `ShapeNode` / `ShapeEdge` frozen dataclasses, `ShapeValidationError`, `parse_shape(data, *, source)` (validates loudly; accepts dict or YAML; rejects empty shapes, dangling edges, duplicate slots, invalid modes, unknown keys, self-loops, duplicate edges; `phases` recorded verbatim and exempt from the unknown-key guard), `shape_to_mermaid(shape)` (emits `graph TD` source).
+- **`broker.py`** — `ShapeProposal` state machine (`pending` → `approved`/`declined`/`timed_out` → `instantiated`) gated by an `asyncio.Condition` long-poll mirroring `_lead_message_condition`. Six new methods: `register_proposal`, `await_proposal`, `resolve_proposal`, `get_proposal`, `record_topology`, `get_topologies`. `Topology` (edges + per-edge mode + slot→teammate map) recorded post-instantiation. `BrokerSnapshot` gains `shape_proposals` and `topologies` (same `startup_diagnostics` threading precedent).
+- **`factories.py`** — `factory.known_roles` accessor (`lambda: tuple(holder.pack.keys())`, read live; same idiom as `factory.startup_diagnostics`). Stub factory leaves it unset by default; tests inject it to exercise pre-flight.
+- **`server.py`** — Two new MCP tools (12→14): `propose_shape` (parse shape, register proposal, block on `await_proposal`) and `instantiate_shape` (refuse non-approved; pre-flight all-or-nothing role resolution via `factory.known_roles`; spawn N teammates; record `Topology`; single-use per `shape_id`).
+- **`ui_server.py`** — `_build_local_instance` emits `shape_proposals` (each with `crew_id`, `status`, `adaptation_diff`, pre-rendered `mermaid` source). `POST /shape-approval/{crew_id}/{shape_id}` route: resolves locally when `crew_id` matches the instance, proxies leader→follower otherwise (`_proxy_shape_approval`).
+- **`dashboard.html`** — `ShapeProposalCard` feeds the proposal's `mermaid` source through the existing `renderMermaidBlocks` + `mermaid.render()` + DOMPurify/foreignObject XSS-hardening pipeline. `ShapeGatePanel` shows graphical DAG + Approve/Decline controls. Panel hidden when no pending proposals.
+
+**Architecture decisions that stand:**
+- Shape files are YAML documents (not md+frontmatter) — a shape is a multi-node graph; YAML matches that naturally. `pyyaml` already present.
+- `gated` is the default edge mode — coordinator stays on every edge; loosening is explicit.
+- `tee`/`direct` modes accepted and RECORDED but not enforced in M0 — routing is unchanged from today. Enforcement is M2.
+- Approval is approve-or-decline as-is; no in-gate editing. M0 tweak path: decline + re-`propose_shape`. In-gate editing overlaps M3 adaptation algebra and ships untested in M0.
+- Pre-flight all-or-nothing: accumulate all unresolved roles, refuse before any spawn. AT#14: the resolvable node is NOT spawned either.
+
+**Test coverage:** 101 feature-specific tests (schema / broker state machine / MCP tools / httpx approval routes / Playwright graphical-DAG render + XSS guard) + 1424 full-suite green (exit 0). All 14 ATs satisfied. Playwright prereq: `uv run playwright install chromium` (AT#13).
+
+**Roadmap clarification (Jerome, 2026-06-11):** M2 (edge routing enforcement + scoped `send_to` + circuit breaker) is next, before M1 (blessed shape library + classifier). M2 makes the approved graph *execute*; M1 is independent and higher-value after the graph runs. Agreed ordering: M0 done → M2 next → M1 later.
+
+- Vision shift: Workflow Shape Composition is a new capability pillar alongside the existing MCP-supervised crew primitives. Making crew shapes first-class, human-supervised, and right-sized is the substrate's next evolution layer, building on M0's declarative `Topology` rail.
+- Pipeline impact: wsc-m0 → done. Next: wsc-m2.
 
 ### 2026-06-09 — teammate-death-diagnostics — Shipped
 

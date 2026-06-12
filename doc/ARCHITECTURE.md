@@ -1,7 +1,7 @@
 # Architecture: claude-crew
 
 **Created**: 2026-06-09 (harvested from project `CLAUDE.md` + `teammate-death-diagnostics` feature retro)
-**Last Updated**: 2026-06-09
+**Last Updated**: 2026-06-11
 
 claude-crew is a local multi-agent orchestrator. A Claude Code session (the **lead**) drives a crew of Agent-SDK teammates through an MCP server that acts as supervisor, message bus, and observability surface. Teammates can recursively spawn their own subagents.
 
@@ -11,7 +11,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### `claude_crew/server.py`
 
-FastMCP server. The only surface the lead touches. Exposes 12 MCP tools:
+FastMCP server. The only surface the lead touches. Exposes 14 MCP tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -27,10 +27,38 @@ FastMCP server. The only surface the lead touches. Exposes 12 MCP tools:
 | `list_available_tools` | Available tool names for a teammate |
 | `refresh_agents` | Reload agent definitions from disk; future-spawns-only |
 | `surface_document` | Push a markdown artifact to Mission Control |
+| `propose_shape` | Register a `Shape` as a pending human-approval gate; blocks on `await_proposal` (default 600s timeout); returns `approved`/`declined`/`timed_out` |
+| `instantiate_shape` | Spawn exactly the approved crew; pre-flight role resolution all-or-nothing via `factory.known_roles`; records a `Topology`; single-use per `shape_id` |
+
+### `claude_crew/shapes.py`
+
+Shape schema. Added in `workflow-shape-composition-m0` (2026-06-11). Pure data module — no broker or SDK dependency.
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `Shape` | frozen dataclass | `name`, `description`, `nodes: tuple[ShapeNode, ...]`, `edges: tuple[ShapeEdge, ...]`, `phases: tuple[dict, ...]` |
+| `ShapeNode` | frozen dataclass | `slot`, `role`, `model`, `extra_tools`, `extra_skills`, `cwd` |
+| `ShapeEdge` | frozen dataclass | `from_slot`, `to_slot`, `mode="gated"` (`gated`/`tee`/`direct`), `reverse_mode` |
+| `ShapeValidationError` | `ValueError` subclass | Raised on any malformation — no partial `Shape` returned |
+| `parse_shape(data, *, source)` | function | Accepts dict or YAML string; validates loudly (empty shape, dangling edges, duplicate slots, invalid mode, unknown keys at shape/node/edge level, self-loops, duplicate edges); `phases` recorded verbatim and exempt from the unknown-key guard |
+| `shape_to_mermaid(shape)` | function | Emits a `graph TD` source string (one node per slot labeled `slot\nrole`, one edge per `ShapeEdge` labeled by mode) for the dashboard's `mermaid.render()` pipeline |
 
 ### `claude_crew/broker.py`
 
-Single source of truth for team state. Owns the teammate registry, append-only message log, per-inbox queues, monotonic sequence counter, and dedup set. Tombstones dead teammates (marks dead, preserves in registry for status queries). Writes lifecycle and envelope records to the transcript sink.
+Single source of truth for team state. Owns the teammate registry, append-only message log, per-inbox queues, monotonic sequence counter, and dedup set. Tombstones dead teammates (marks dead, preserves in registry for status queries). Writes lifecycle and envelope records to the transcript sink. Also holds the **shape proposal registry** and **recorded topologies** (added in `workflow-shape-composition-m0`).
+
+**Shape proposal state machine** (new in `workflow-shape-composition-m0`):
+
+| Method | Notes |
+|--------|-------|
+| `register_proposal(shape, adaptation_diff?)` | Returns a `shape_id`; proposal status = `"pending"` |
+| `await_proposal(shape_id, timeout)` | `asyncio.Condition` long-poll (mirrors `_lead_message_condition`); `pending` → `approved`/`declined`/`timed_out` |
+| `resolve_proposal(shape_id, decision)` | `decision ∈ {"approve","decline"}`; notifies condition; no `edited_shape` param (M0 is approve/decline only) |
+| `get_proposal(shape_id)` | Returns `ShapeProposal \| None` |
+| `record_topology(topology)` | Stores a `Topology` (edges + slot→teammate map) post-instantiation |
+| `get_topologies()` | Returns `tuple[Topology, ...]` |
+
+`BrokerSnapshot` gains `shape_proposals: tuple[ShapeProposal, ...] = ()` and `topologies: tuple[Topology, ...] = ()` (same threading precedent as `startup_diagnostics`).
 
 Key method: `_tombstone_teammate` — called when a teammate dies. Reads the teammate's final snapshot (step 4), populates death-record fields, calls `_close_open_tools` to abandon in-flight tools (step 6), and serializes the result to the transcript.
 
@@ -51,6 +79,8 @@ Wire format. Fields: `id` (caller-provided UUID for retry safety), `seq` (broker
 ### `claude_crew/factories.py`
 
 Selects teammate implementation. `CLAUDE_CREW_TEAMMATE_MODE=stub` → `StubTeammate` (default in tests). `sdk` (default in production) → `SdkTeammate`. SDK mode merges the default subagent pack with `~/.claude/agents/` and project `.claude/agents/`.
+
+The SDK factory attaches read-accessors to itself at build time (same pattern as `factory.startup_diagnostics`). Added in `workflow-shape-composition-m0`: **`factory.known_roles`** — a zero-arg callable returning `tuple(holder.pack.keys())` read live off the merged pack holder. Used by `server.instantiate_shape` pre-flight to enumerate resolvable roles. The stub factory does not set this attribute by default (tests inject it to exercise the all-or-nothing refusal path).
 
 ### `claude_crew/transcript.py`
 
@@ -140,6 +170,47 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 ### Redaction-before-persist invariant
 
 **Invariant**: the raw stderr ring never leaves `SdkTeammate`. Every code path that reads the ring for external consumption (`_stderr_tail_redacted()`, called by `status_snapshot()`, the death-site WARNING, and transitively by the broker death-record population) passes the joined content through `redact_output` first. The raw ring exists only inside `SdkTeammate` and is garbage-collected with the object after death.
+
+---
+
+## Workflow Shape Composition (M0)
+
+Added in `workflow-shape-composition-m0` (2026-06-11). Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
+
+### Data flow
+
+```
+propose_shape(shape_dict)
+  → parse_shape()          shapes.py       validates; raises ShapeValidationError on malformation
+  → register_proposal()    broker.py       status="pending"; asyncio.Condition long-poll begins
+  → /api/state             ui_server.py    shape_proposals[].{crew_id, status, mermaid} emitted
+  → ShapeGatePanel         dashboard.html  mermaid source → renderMermaidBlocks → graphical DAG
+  → POST /shape-approval   ui_server.py    local resolve OR proxy leader→follower (_proxy_shape_approval)
+  → resolve_proposal()     broker.py       status="approved"/"declined"; notifies Condition
+  → propose_shape returns  server.py       {ok, shape_id, status, shape}
+
+instantiate_shape(shape_id)
+  → get_proposal()         broker.py       refuse if status != "approved"
+  → pre-flight             server.py       enumerate factory.known_roles(); any unresolvable → ok:False, zero spawns
+  → spawn_teammate() ×N    broker.py       one per ShapeNode; name=slot
+  → record_topology()      broker.py       Topology{edges, slot_to_teammate} on BrokerSnapshot
+  → proposal.status = "instantiated"        single-use guard
+```
+
+### Edge modes: recorded, not enforced in M0
+
+`ShapeEdge.mode` ∈ `{"gated", "tee", "direct"}` (omitted → `"gated"`). `Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. No routing behavior changes in M0 — `tee`/`direct` enforcement, scoped `send_to`, neighbor injection, and circuit breaker are **M2** (next milestone).
+
+### Multi-instance shape approval
+
+The `POST /shape-approval/{crew_id}/{shape_id}` route follows the same multi-instance rule as all per-instance dashboard endpoints: carry `crew_id`, resolve locally when `crew_id == self._own_crew_id()`, proxy to the follower otherwise (`_proxy_shape_approval` mirrors `_proxy_artifact`). `_PATH_PARAM_RE` guards both path params (400). Unknown `crew_id` → 404.
+
+### Invariants
+
+- **Shape is the gate**: `instantiate_shape` refuses every non-`approved` status before touching the spawn path. Nothing spawns without a human (or stubbed) approval.
+- **All-or-nothing pre-flight**: full node loop accumulates `unresolved` before any `spawn_teammate` call. One bad role → zero teammates spawned.
+- **Single-use**: `status="instantiated"` after a successful spawn; a second `instantiate_shape` call sees `instantiated` and refuses.
+- **XSS-hardened DAG**: mermaid source flows through `mermaid.initialize({securityLevel:'strict'})` + DOMPurify/foreignObject output sanitization already present in `dashboard.html`. No new renderer added.
 
 ---
 
