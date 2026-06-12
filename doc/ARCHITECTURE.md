@@ -193,13 +193,22 @@ instantiate_shape(shape_id)
   → get_proposal()         broker.py       refuse if status != "approved"
   → pre-flight             server.py       enumerate factory.known_roles(); any unresolvable → ok:False, zero spawns
   → spawn_teammate() ×N    broker.py       one per ShapeNode; name=slot
-  → record_topology()      broker.py       Topology{edges, slot_to_teammate} on BrokerSnapshot
-  → proposal.status = "instantiated"        single-use guard
+  → (transactional)        server.py       on any spawn failure: kill already-spawned, ok:False, proposal stays "approved"
+  → record_topology()      broker.py       Topology{edges, slot_to_teammate (immutable)} on BrokerSnapshot
+  → broker.mark_instantiated()  broker.py  approved→instantiated under the broker boundary; single-use guard
 ```
 
 ### Edge modes: recorded, not enforced in M0
 
-`ShapeEdge.mode` ∈ `{"gated", "tee", "direct"}` (omitted → `"gated"`). `Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. No routing behavior changes in M0 — `tee`/`direct` enforcement, scoped `send_to`, neighbor injection, and circuit breaker are **M2** (next milestone).
+Every `ShapeEdge` carries a `mode` ∈ `{"gated", "tee", "direct"}` (omitted → `"gated"`) describing **how messages will flow along that edge between two teammates** once routing goes live in M2:
+
+- **`gated`** — the message lands in the **lead/coordinator's inbox first**; the lead approves/forwards. The coordinator is on the wire. *(This is today's behavior and the M0 default — every edge is `gated`.)*
+- **`tee`** — the message goes **A→B directly**, but the lead gets a **copy** and can interrupt. Coordinator watches, blocks nothing.
+- **`direct`** — the message goes **A→B directly** with no lead turn; the broker still logs / sequences / surfaces it (observable), but the coordinator is not in the loop.
+
+`Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. **In M0 the mode is recorded only — no routing behavior changes.** Enforcement of `tee`/`direct`, scoped teammate `send_to`, neighbor injection, and the circuit breaker are **M2** (the next milestone).
+
+> **Naming note — two unrelated "gate" concepts.** The **shape-gate** is the *human-approval checkpoint*: `propose_shape` blocks until a human approves the proposed shape (the dashboard modal is its UI). A **`gated` edge** is a *per-edge routing mode*: messages on it route through the coordinator. Same word, different mechanisms — the shape-gate is a *moment of human approval*; a gated edge is a *property of a connection* between two teammates.
 
 ### Multi-instance shape approval
 
