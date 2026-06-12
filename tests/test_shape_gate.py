@@ -1,9 +1,13 @@
-"""Integration tests for propose_shape and instantiate_shape MCP tools — ATs 8, 9, 10, 14.
+"""Integration tests for propose_shape, resolve_shape, list_pending_shapes,
+and instantiate_shape MCP tools — ATs 1, 2, 6, 8, 9, 10, 14.
 
+AT1:  non-blocking propose — propose_shape returns status:"pending" immediately.
+AT2:  chat-channel approval — resolve_shape approve/decline + sad paths.
+AT6:  list_pending_shapes — lists pending proposals; empty when none.
 AT8:  happy path — propose → approve → instantiate spawns exactly 2 teammates
        and records the topology in broker.snapshot().
 AT9:  instantiate on a pending proposal returns ok:False, no spawn.
-AT10: declined proposal — propose_shape returns "declined", instantiate ok:False.
+AT10: declined proposal — resolve → "declined", instantiate ok:False.
 AT14: pre-flight role resolution — unresolvable role → ok:False + unresolved_roles,
        zero spawn; also exercises unique-suffix promotion and no-known_roles skip.
 
@@ -86,6 +90,225 @@ _SHAPE_UNRESOLVABLE: dict = {
 
 
 # ---------------------------------------------------------------------------
+# AT1 — non-blocking propose
+# ---------------------------------------------------------------------------
+
+
+class TestNonBlockingPropose:
+    """AT1: propose_shape returns pending immediately without awaiting resolution."""
+
+    async def test_propose_shape_returns_pending_immediately(self) -> None:
+        """AT1: default wait=False → returns {ok:True, status:'pending', shape_id} at once."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+
+            assert result["ok"] is True, result
+            assert result["status"] == "pending", result
+            assert "shape_id" in result
+
+            shape_id = result["shape_id"]
+            # Proposal is still pending in the broker immediately after the call.
+            proposal = broker.get_proposal(shape_id)
+            assert proposal is not None
+            assert proposal.status == "pending"
+
+    async def test_propose_shape_parse_error_returns_ok_false(self) -> None:
+        """AT1 guard: a malformed shape dict → {ok:False, stage:'parse'}."""
+        async with _client() as s:
+            await s.initialize()
+            result = _content_json(
+                await s.call_tool("propose_shape", {"shape": {"name": "x"}})
+            )
+            assert result["ok"] is False
+            assert result["stage"] == "parse"
+            assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# AT2 — chat-channel approval
+# ---------------------------------------------------------------------------
+
+
+class TestChatChannelApproval:
+    """AT2: resolve_shape approve/decline + sad paths."""
+
+    async def test_resolve_approve(self) -> None:
+        """AT2 happy: resolve_shape approve → status approved, instantiate works."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            assert propose_result["ok"] is True
+            shape_id = propose_result["shape_id"]
+
+            resolve_result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+                )
+            )
+            assert resolve_result["ok"] is True, resolve_result
+            assert resolve_result["status"] == "approved"
+            assert broker.get_proposal(shape_id).status == "approved"
+
+            inst_result = _content_json(
+                await s.call_tool("instantiate_shape", {"shape_id": shape_id})
+            )
+            assert inst_result["ok"] is True, inst_result
+
+    async def test_resolve_decline(self) -> None:
+        """AT2 happy: resolve_shape decline → status declined, instantiate fails."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            shape_id = propose_result["shape_id"]
+
+            resolve_result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "decline"}
+                )
+            )
+            assert resolve_result["ok"] is True, resolve_result
+            assert resolve_result["status"] == "declined"
+            assert broker.get_proposal(shape_id).status == "declined"
+
+            inst_result = _content_json(
+                await s.call_tool("instantiate_shape", {"shape_id": shape_id})
+            )
+            assert inst_result["ok"] is False
+
+    async def test_resolve_unknown_shape_id(self) -> None:
+        """AT2 sad: resolve_shape on unknown shape_id → {ok:False, error}."""
+        async with _client() as s:
+            await s.initialize()
+            result = _content_json(
+                await s.call_tool(
+                    "resolve_shape",
+                    {"shape_id": "does-not-exist", "decision": "approve"},
+                )
+            )
+            assert result["ok"] is False
+            assert "error" in result
+            assert "unknown shape_id" in result["error"]
+
+    async def test_resolve_already_resolved(self) -> None:
+        """AT2 sad: resolve_shape on already-resolved shape_id → {ok:False, error}."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
+
+            # Second resolve on now-approved proposal → pending-only guard.
+            result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+                )
+            )
+            assert result["ok"] is False
+            assert "error" in result
+            assert "not pending" in result["error"]
+
+    async def test_resolve_invalid_decision(self) -> None:
+        """AT2 sad: resolve_shape with invalid decision → {ok:False, error}."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            shape_id = propose_result["shape_id"]
+
+            result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "maybe"}
+                )
+            )
+            assert result["ok"] is False
+            assert "error" in result
+            assert "approve" in result["error"] or "decline" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# AT6 — list_pending_shapes
+# ---------------------------------------------------------------------------
+
+
+class TestListPendingShapes:
+    """AT6: list_pending_shapes returns pending proposals; empty when none."""
+
+    async def test_two_pending_proposals(self) -> None:
+        """AT6: two pending proposals → list returns both with required fields."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            r1 = _content_json(await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE}))
+            r2 = _content_json(await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE}))
+            assert r1["ok"] and r2["ok"]
+
+            list_result = _content_json(await s.call_tool("list_pending_shapes", {}))
+            assert list_result["ok"] is True
+            pending = list_result["pending"]
+            assert len(pending) == 2, pending
+
+            shape_ids = {p["shape_id"] for p in pending}
+            assert r1["shape_id"] in shape_ids
+            assert r2["shape_id"] in shape_ids
+
+            for entry in pending:
+                assert "shape_id" in entry
+                assert "name" in entry
+                assert "crew_id" in entry
+                assert "mermaid" in entry
+                assert "summary" in entry
+                assert entry["name"] == "test-crew"
+
+    async def test_no_pending_proposals(self) -> None:
+        """AT6: no proposals → list returns empty list."""
+        async with _client() as s:
+            await s.initialize()
+            result = _content_json(await s.call_tool("list_pending_shapes", {}))
+            assert result["ok"] is True
+            assert result["pending"] == []
+
+    async def test_resolved_not_in_list(self) -> None:
+        """AT6: resolved proposal is not listed as pending."""
+        broker = Broker()
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            r = _content_json(await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE}))
+            shape_id = r["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
+
+            result = _content_json(await s.call_tool("list_pending_shapes", {}))
+            assert result["ok"] is True
+            pending_ids = {p["shape_id"] for p in result["pending"]}
+            assert shape_id not in pending_ids
+
+
+# ---------------------------------------------------------------------------
 # AT8 — happy path: propose → approve → instantiate
 # ---------------------------------------------------------------------------
 
@@ -94,25 +317,27 @@ class TestProposeApproveInstantiate:
     """AT8: full happy path through the shape gate."""
 
     async def test_propose_approve_instantiate_spawns_two_teammates(self) -> None:
-        """propose → approve (direct broker call) → instantiate → 2 teammates + topology."""
+        """propose → approve (via resolve_shape) → instantiate → 2 teammates + topology."""
         broker = Broker()
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            # Start propose_shape as a background task — it blocks until a decision.
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            # propose_shape returns pending immediately (non-blocking).
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-
-            # Wait for the proposal to appear in the broker, then approve it.
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-
-            # propose_shape should unblock and return "approved".
-            propose_result = _content_json(await propose_task)
             assert propose_result["ok"] is True, propose_result
-            assert propose_result["status"] == "approved"
-            assert propose_result["shape_id"] == shape_id
+            assert propose_result["status"] == "pending"
+            shape_id = propose_result["shape_id"]
+
+            # Approve via resolve_shape (chat channel).
+            resolve_result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+                )
+            )
+            assert resolve_result["ok"] is True, resolve_result
+            assert resolve_result["status"] == "approved"
 
             # Instantiate the approved shape.
             inst_result = _content_json(
@@ -169,12 +394,13 @@ class TestProposeApproveInstantiate:
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             await s.call_tool("instantiate_shape", {"shape_id": shape_id})
 
@@ -200,13 +426,12 @@ class TestInstantiateBeforeApproval:
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            # Start propose_shape with a long timeout so it stays pending.
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE, "timeout_seconds": 600.0})
+            # propose_shape returns pending immediately.
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-
-            # Wait for proposal to register, then immediately try to instantiate.
-            shape_id = await _poll_proposal(broker)
+            assert propose_result["ok"] is True
+            shape_id = propose_result["shape_id"]
             assert broker.get_proposal(shape_id).status == "pending"
 
             inst_result = _content_json(
@@ -219,9 +444,10 @@ class TestInstantiateBeforeApproval:
             list_result = _content_json(await s.call_tool("list_crew", {}))
             assert list_result["teammates"] == []
 
-            # Clean up: decline the proposal so the background task can finish.
-            await broker.resolve_proposal(shape_id, "decline")
-            await propose_task
+            # Clean up: decline so broker state is tidy.
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "decline"}
+            )
 
     async def test_unknown_shape_id_refused(self) -> None:
         """Instantiate with a completely unknown shape_id → ok:False."""
@@ -235,29 +461,32 @@ class TestInstantiateBeforeApproval:
 
 
 # ---------------------------------------------------------------------------
-# AT10 — declined proposal → propose returns declined; instantiate refused
+# AT10 — declined proposal → instantiate refused
 # ---------------------------------------------------------------------------
 
 
 class TestDeclinedProposal:
-    """AT10: propose → decline → propose_shape returns 'declined'; instantiate ok:False."""
+    """AT10: propose → decline → instantiate ok:False."""
 
     async def test_decline_aborts_spawn(self) -> None:
         broker = Broker()
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "decline")
-
-            # propose_shape should unblock with "declined".
-            propose_result = _content_json(await propose_task)
             assert propose_result["ok"] is True
-            assert propose_result["status"] == "declined"
+            shape_id = propose_result["shape_id"]
+
+            # Decline via resolve_shape.
+            resolve_result = _content_json(
+                await s.call_tool(
+                    "resolve_shape", {"shape_id": shape_id, "decision": "decline"}
+                )
+            )
+            assert resolve_result["ok"] is True
+            assert resolve_result["status"] == "declined"
 
             # Subsequent instantiate must refuse.
             inst_result = _content_json(
@@ -276,10 +505,11 @@ class TestDeclinedProposal:
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            # Use a very short timeout so it times out quickly.
+            # Use wait=True with a very short timeout so it times out quickly.
             propose_result = _content_json(
                 await s.call_tool(
-                    "propose_shape", {"shape": _SHAPE_2NODE, "timeout_seconds": 0.05}
+                    "propose_shape",
+                    {"shape": _SHAPE_2NODE, "wait": True, "timeout_seconds": 0.05},
                 )
             )
             assert propose_result["ok"] is True
@@ -346,12 +576,13 @@ class TestPreflightRoleResolution:
         async with _client(broker=broker, factory=stub_factory) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_UNRESOLVABLE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_UNRESOLVABLE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             inst_result = _content_json(
                 await s.call_tool("instantiate_shape", {"shape_id": shape_id})
@@ -376,12 +607,13 @@ class TestPreflightRoleResolution:
         async with _client(broker=broker, factory=stub_factory) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             # Unique suffix promotion → pre-flight passes → spawn succeeds.
             inst_result = _content_json(
@@ -404,12 +636,13 @@ class TestPreflightRoleResolution:
             await s.initialize()
 
             # Use _SHAPE_UNRESOLVABLE — without pre-flight it should spawn fine.
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_UNRESOLVABLE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_UNRESOLVABLE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             # No pre-flight → spawn passes through to stub factory unconditionally.
             inst_result = _content_json(
@@ -430,12 +663,13 @@ class TestPreflightRoleResolution:
         async with _client(broker=broker, factory=stub_factory) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             inst_result = _content_json(
                 await s.call_tool("instantiate_shape", {"shape_id": shape_id})
@@ -482,12 +716,13 @@ class TestSharedResolveRoleAccessor:
         async with _client(broker=broker, factory=stub_factory) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             inst_result = _content_json(
                 await s.call_tool("instantiate_shape", {"shape_id": shape_id})
@@ -512,12 +747,13 @@ class TestSharedResolveRoleAccessor:
         async with _client(broker=broker, factory=stub_factory) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             inst_result = _content_json(
                 await s.call_tool("instantiate_shape", {"shape_id": shape_id})
@@ -559,12 +795,13 @@ class TestTransactionalSpawn:
         async with _client(broker=broker) as s:
             await s.initialize()
 
-            propose_task = asyncio.create_task(
-                s.call_tool("propose_shape", {"shape": _SHAPE_3NODE})
+            propose_result = _content_json(
+                await s.call_tool("propose_shape", {"shape": _SHAPE_3NODE})
             )
-            shape_id = await _poll_proposal(broker)
-            await broker.resolve_proposal(shape_id, "approve")
-            await propose_task
+            shape_id = propose_result["shape_id"]
+            await s.call_tool(
+                "resolve_shape", {"shape_id": shape_id, "decision": "approve"}
+            )
 
             inst_result = _content_json(
                 await s.call_tool("instantiate_shape", {"shape_id": shape_id})
