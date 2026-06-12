@@ -2260,6 +2260,9 @@
           {/* Metadata + controls */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
             <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+              crew: {proposal.crew_id}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
               shape_id: {proposal.shape_id}
             </div>
             {proposal.adaptation_diff && (
@@ -2300,32 +2303,57 @@
       );
     }
 
-    // ShapeGatePanel: shows all pending proposals for the active instance.
-    // Hidden when there are no pending proposals (returns null).
-    function ShapeGatePanel({ proposals }) {
-      const pending = (proposals || []).filter(p => p.status === 'pending');
-      if (!pending.length) return null;
+    // ShapeGatePanel: modal overlay for pending proposals across ALL instances.
+    // Aggregates from every instance (not just the active one) so cross-instance
+    // gates surface on the leader regardless of which instance is selected.
+    // Dismiss (Esc / backdrop / ✕) hides the modal; it re-asserts on the next
+    // /api/state poll when proposals are still pending (blocking gate by design).
+    function ShapeGatePanel({ instances }) {
+      const pending = (instances || []).flatMap(i => (i.shape_proposals || [])).filter(p => p.status === 'pending');
+      const pendingKey = pending.map(p => p.shape_id).sort().join(',');
+      const [dismissed, setDismissed] = React.useState(false);
+      const [lastKey, setLastKey] = React.useState(pendingKey);
+
+      // Re-assert when the pending set changes (new proposal arrived).
+      if (pendingKey !== lastKey) {
+        setLastKey(pendingKey);
+        if (pendingKey) setDismissed(false);
+      }
+
+      if (!pending.length || dismissed) return null;
 
       return (
-        <div
-          className="shape-gate-panel"
-          style={{
-            padding: '10px 16px',
-            background: 'var(--bg-0)',
-            borderBottom: '1px solid var(--line)',
-            display: 'flex', flexDirection: 'column', gap: 10,
-          }}
-        >
-          <div style={{
-            fontSize: 11, fontWeight: 700, textTransform: 'uppercase',
-            letterSpacing: '0.07em', color: 'var(--fg-2)',
-          }}>
-            Shape Gate — {pending.length} pending proposal{pending.length !== 1 ? 's' : ''}
+        <OverlayPanel mode="modal" onClose={() => setDismissed(true)}>
+          <div
+            className="shape-gate-panel"
+            style={{
+              padding: '16px 20px',
+              background: 'var(--bg-1)',
+              borderRadius: 8,
+              display: 'flex', flexDirection: 'column', gap: 12,
+              maxWidth: '80vw', maxHeight: '80vh', overflowY: 'auto',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{
+                fontSize: 11, fontWeight: 700, textTransform: 'uppercase',
+                letterSpacing: '0.07em', color: 'var(--fg-2)',
+              }}>
+                Shape Gate — {pending.length} pending proposal{pending.length !== 1 ? 's' : ''}
+              </div>
+              <button
+                onClick={() => setDismissed(true)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'var(--fg-3)', fontSize: 16, lineHeight: 1,
+                }}
+              >✕</button>
+            </div>
+            {pending.map(p => (
+              <ShapeProposalCard key={p.shape_id} proposal={p} />
+            ))}
           </div>
-          {pending.map(p => (
-            <ShapeProposalCard key={p.shape_id} proposal={p} />
-          ))}
-        </div>
+        </OverlayPanel>
       );
     }
 
@@ -2449,7 +2477,7 @@
             ) : null}
           />
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId} readState={readState}/>
-          <ShapeGatePanel proposals={cli.shape_proposals || []} />
+          <ShapeGatePanel instances={instances} />
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
             <RosterRail
               liveAgents={liveAgents}
