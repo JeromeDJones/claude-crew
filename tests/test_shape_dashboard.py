@@ -149,6 +149,20 @@ class TestStateShapeProposals:
 
         assert p["mermaid"] == shape_to_mermaid(shape)
 
+    async def test_proposal_carries_name_and_summary(self) -> None:
+        broker = Broker()
+        shape = _make_shape("named-shape")
+        broker.register_proposal(shape)
+
+        _, ui = _make_ui(broker)
+        async with _client(ui) as client:
+            resp = await client.get("/api/state")
+        state = resp.json()
+        p = state["instances"][0]["shape_proposals"][0]
+
+        assert p["name"] == "named-shape"
+        assert p["summary"] == "A test shape for dashboard tests"
+
     async def test_proposal_adaptation_diff_none_when_omitted(self) -> None:
         broker = Broker()
         shape = _make_shape("nodiff-shape")
