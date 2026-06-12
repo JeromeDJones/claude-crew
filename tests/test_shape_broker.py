@@ -4,6 +4,11 @@ AT5: register_proposal → resolve_proposal("approve"|"decline") updates status.
 AT6: await_proposal unblocks when resolve_proposal fires; times out otherwise.
 AT7: record_topology surfaces in broker.snapshot().topologies with edges + map intact.
 
+Hardening tests:
+- Fix 1: resolve_proposal source-state guard (cannot re-resolve a terminal proposal).
+- Fix 3: Topology.slot_to_teammate is a MappingProxyType (immutable).
+- Fix 5: mark_instantiated enforces 'approved'-only transition.
+
 asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
 """
 from __future__ import annotations
@@ -231,3 +236,156 @@ async def test_multiple_topologies_in_snapshot(broker: Broker) -> None:
     assert len(snap.topologies) == 3
     names = [t.shape_name for t in snap.topologies]
     assert names == ["shape-0", "shape-1", "shape-2"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — resolve_proposal source-state guard
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_approved_proposal_raises(broker: Broker) -> None:
+    """Fix 1: resolving an already-approved proposal raises ValueError."""
+    shape_id = broker.register_proposal(_make_shape("already-approved"))
+    await broker.resolve_proposal(shape_id, "approve")
+    assert broker.get_proposal(shape_id).status == "approved"
+
+    # Second resolve (approve or decline) must raise, not silently flip.
+    with pytest.raises(ValueError, match="cannot resolve proposal"):
+        await broker.resolve_proposal(shape_id, "approve")
+
+
+async def test_resolve_declined_proposal_raises(broker: Broker) -> None:
+    """Fix 1: resolving an already-declined proposal raises ValueError."""
+    shape_id = broker.register_proposal(_make_shape("already-declined"))
+    await broker.resolve_proposal(shape_id, "decline")
+
+    with pytest.raises(ValueError, match="cannot resolve proposal"):
+        await broker.resolve_proposal(shape_id, "decline")
+
+
+async def test_resolve_timed_out_proposal_raises(broker: Broker) -> None:
+    """Fix 1: resolving a timed_out proposal raises ValueError."""
+    shape_id = broker.register_proposal(_make_shape("timed-out-shape"))
+    # Force a very short timeout so the proposal transitions to timed_out.
+    proposal = await broker.await_proposal(shape_id, timeout=0.05)
+    assert proposal.status == "timed_out"
+
+    with pytest.raises(ValueError, match="cannot resolve proposal"):
+        await broker.resolve_proposal(shape_id, "approve")
+
+
+async def test_resolve_state_error_message_includes_state(broker: Broker) -> None:
+    """Fix 1: the ValueError message includes the current status."""
+    shape_id = broker.register_proposal(_make_shape("state-msg-shape"))
+    await broker.resolve_proposal(shape_id, "approve")
+
+    with pytest.raises(ValueError, match="approved"):
+        await broker.resolve_proposal(shape_id, "decline")
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — Topology.slot_to_teammate is a MappingProxyType (immutable)
+# ---------------------------------------------------------------------------
+
+
+async def test_topology_slot_to_teammate_is_immutable(broker: Broker) -> None:
+    """Fix 3: in-place write to slot_to_teammate raises TypeError."""
+    topology = Topology(
+        shape_name="immutable-shape",
+        edges=(("a", "b", "gated"),),
+        slot_to_teammate={"a": "t-001", "b": "t-002"},
+    )
+    with pytest.raises(TypeError):
+        topology.slot_to_teammate["x"] = "t-999"  # type: ignore[index]
+
+
+async def test_topology_slot_to_teammate_reads_work(broker: Broker) -> None:
+    """Fix 3: reads on the proxy still work correctly."""
+    topology = Topology(
+        shape_name="readable-shape",
+        edges=(),
+        slot_to_teammate={"impl": "t-abc", "rev": "t-def"},
+    )
+    assert topology.slot_to_teammate["impl"] == "t-abc"
+    assert topology.slot_to_teammate["rev"] == "t-def"
+    assert set(topology.slot_to_teammate.keys()) == {"impl", "rev"}
+
+
+async def test_topology_snapshot_round_trips_slot_map(broker: Broker) -> None:
+    """Fix 3: slot_to_teammate survives record_topology → snapshot() unchanged."""
+    original_map = {"p": "t-111", "q": "t-222"}
+    topology = Topology(
+        shape_name="roundtrip-shape",
+        edges=(("p", "q", "tee"),),
+        slot_to_teammate=original_map,
+    )
+    broker.record_topology(topology)
+
+    snap = broker.snapshot()
+    assert len(snap.topologies) == 1
+    recorded = snap.topologies[0]
+    # Content must match; type is MappingProxyType but compares equal to dict.
+    assert recorded.slot_to_teammate == original_map
+    # Mutation must still be refused on the snapshotted topology.
+    with pytest.raises(TypeError):
+        recorded.slot_to_teammate["z"] = "t-999"  # type: ignore[index]
+
+
+async def test_topology_caller_dict_mutation_does_not_affect_proxy(broker: Broker) -> None:
+    """Fix 3: mutating the caller's original dict after construction has no effect."""
+    caller_dict: dict[str, str] = {"slot1": "t-aaa"}
+    topology = Topology(
+        shape_name="isolated-shape",
+        edges=(),
+        slot_to_teammate=caller_dict,
+    )
+    caller_dict["slot2"] = "t-bbb"  # mutate original after construction
+    assert "slot2" not in topology.slot_to_teammate  # proxy owns its own copy
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — mark_instantiated enforces 'approved'-only transition
+# ---------------------------------------------------------------------------
+
+
+async def test_mark_instantiated_on_pending_raises(broker: Broker) -> None:
+    """Fix 5: mark_instantiated on a pending proposal raises ValueError."""
+    shape_id = broker.register_proposal(_make_shape("pending-for-instantiate"))
+    assert broker.get_proposal(shape_id).status == "pending"
+
+    with pytest.raises(ValueError, match="cannot instantiate proposal"):
+        broker.mark_instantiated(shape_id)
+
+
+async def test_mark_instantiated_on_declined_raises(broker: Broker) -> None:
+    """Fix 5: mark_instantiated on a declined proposal raises ValueError."""
+    shape_id = broker.register_proposal(_make_shape("declined-for-instantiate"))
+    await broker.resolve_proposal(shape_id, "decline")
+
+    with pytest.raises(ValueError, match="cannot instantiate proposal"):
+        broker.mark_instantiated(shape_id)
+
+
+async def test_mark_instantiated_on_unknown_raises(broker: Broker) -> None:
+    """Fix 5: mark_instantiated on an unknown shape_id raises KeyError."""
+    with pytest.raises(KeyError):
+        broker.mark_instantiated("no-such-id")
+
+
+async def test_mark_instantiated_on_approved_succeeds(broker: Broker) -> None:
+    """Fix 5 happy path: approved → instantiated via mark_instantiated."""
+    shape_id = broker.register_proposal(_make_shape("approved-for-instantiate"))
+    await broker.resolve_proposal(shape_id, "approve")
+
+    broker.mark_instantiated(shape_id)
+    assert broker.get_proposal(shape_id).status == "instantiated"
+
+
+async def test_mark_instantiated_on_already_instantiated_raises(broker: Broker) -> None:
+    """Fix 5: mark_instantiated cannot be called twice on the same proposal."""
+    shape_id = broker.register_proposal(_make_shape("double-instantiate"))
+    await broker.resolve_proposal(shape_id, "approve")
+    broker.mark_instantiated(shape_id)
+
+    with pytest.raises(ValueError, match="cannot instantiate proposal"):
+        broker.mark_instantiated(shape_id)

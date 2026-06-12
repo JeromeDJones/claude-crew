@@ -12,7 +12,9 @@ import copy
 import dataclasses
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
@@ -130,11 +132,23 @@ class Topology:
 
     ``edges`` is a tuple of (from_slot, to_slot, mode) triples. Frozen by
     construction — topology facts don't change once instantiation succeeds.
+    ``slot_to_teammate`` is wrapped in a MappingProxyType on construction so
+    callers cannot mutate it in place even though the field type is Mapping.
     """
 
     shape_name: str
     edges: "tuple[tuple[str, str, str], ...]"   # (from_slot, to_slot, mode)
-    slot_to_teammate: "dict[str, str]"           # slot -> teammate_id
+    slot_to_teammate: "Mapping[str, str]"         # slot -> teammate_id (read-only proxy)
+
+    def __post_init__(self) -> None:
+        # Wrap slot_to_teammate in a read-only proxy so in-place mutation raises
+        # TypeError.  dict() copy first so the proxy owns its own data and the
+        # caller's original dict cannot be mutated either.
+        object.__setattr__(
+            self,
+            "slot_to_teammate",
+            MappingProxyType(dict(self.slot_to_teammate)),
+        )
 
 
 @dataclass(frozen=True)
@@ -1121,6 +1135,9 @@ class Broker:
 
         decision must be 'approve' or 'decline'.
         Notifies _proposal_condition so any awaiting await_proposal unblocks.
+
+        Raises KeyError if shape_id is unknown.
+        Raises ValueError if decision is invalid or the proposal is not 'pending'.
         """
         if decision not in ("approve", "decline"):
             raise ValueError(
@@ -1129,6 +1146,11 @@ class Broker:
         proposal = self._proposals.get(shape_id)
         if proposal is None:
             raise KeyError(f"unknown shape_id: {shape_id!r}")
+        if proposal.status != "pending":
+            raise ValueError(
+                f"cannot resolve proposal {shape_id!r} in state {proposal.status!r}; "
+                "only 'pending' is resolvable"
+            )
 
         proposal.status = "approved" if decision == "approve" else "declined"
         async with self._proposal_condition:
@@ -1138,6 +1160,24 @@ class Broker:
     def get_proposal(self, shape_id: str) -> "ShapeProposal | None":
         """Return the ShapeProposal for the given shape_id, or None if unknown."""
         return self._proposals.get(shape_id)
+
+    def mark_instantiated(self, shape_id: str) -> None:
+        """Transition an approved proposal to 'instantiated'.
+
+        Raises KeyError if shape_id is unknown.
+        Raises ValueError if the proposal is not in 'approved' state — enforces
+        that instantiation is the sole path from 'approved' and cannot override
+        a pending/declined/timed_out/already-instantiated proposal.
+        """
+        proposal = self._proposals.get(shape_id)
+        if proposal is None:
+            raise KeyError(f"unknown shape_id: {shape_id!r}")
+        if proposal.status != "approved":
+            raise ValueError(
+                f"cannot instantiate proposal {shape_id!r} in state {proposal.status!r}; "
+                "only 'approved' is instantiable"
+            )
+        proposal.status = "instantiated"
 
     def record_topology(self, topology: Topology) -> None:
         """Record a topology after successful shape instantiation."""

@@ -7,6 +7,10 @@ AT10: declined proposal — propose_shape returns "declined", instantiate ok:Fal
 AT14: pre-flight role resolution — unresolvable role → ok:False + unresolved_roles,
        zero spawn; also exercises unique-suffix promotion and no-known_roles skip.
 
+Hardening tests:
+- Fix 2: shared resolve_role accessor drives pre-flight (unique suffix and ambiguous).
+- Fix 4: transactional spawn — partial crew rolled back on mid-loop failure.
+
 asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
 """
 from __future__ import annotations
@@ -298,10 +302,33 @@ class TestDeclinedProposal:
 
 @pytest.fixture(autouse=False)
 def clean_stub_known_roles():
-    """Ensure stub_factory.known_roles is removed after each AT14 test."""
+    """Ensure stub_factory.known_roles and resolve_role are removed after each AT14 test."""
     yield
     if hasattr(stub_factory, "known_roles"):
         del stub_factory.known_roles  # type: ignore[attr-defined]
+    if hasattr(stub_factory, "resolve_role"):
+        del stub_factory.resolve_role  # type: ignore[attr-defined]
+
+
+def _make_resolve_role(known: tuple[str, ...]):
+    """Build a standalone _resolve_role function for a given set of known roles.
+
+    Mirrors factories._resolve_role semantics exactly:
+    - Exact match → return as-is.
+    - Unique ':role' suffix → return promoted key.
+    - Multiple candidates or zero → return the original (which will not be in known).
+    """
+    known_set = set(known)
+
+    def resolve_role(requested: str) -> str:
+        if requested in known_set:
+            return requested
+        candidates = sorted(k for k in known_set if k.endswith(f":{requested}"))
+        if len(candidates) == 1:
+            return candidates[0]
+        return requested
+
+    return resolve_role
 
 
 class TestPreflightRoleResolution:
@@ -420,3 +447,141 @@ class TestPreflightRoleResolution:
 
             list_result = _content_json(await s.call_tool("list_crew", {}))
             assert list_result["teammates"] == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — shared resolve_role accessor drives pre-flight
+# ---------------------------------------------------------------------------
+
+# 3-node shape: allows testing partial-crew rollback (Fix 4)
+_SHAPE_3NODE: dict = {
+    "name": "three-node-crew",
+    "description": "A three-node shape for rollback testing",
+    "nodes": [
+        {"slot": "node-a", "role": "builder"},
+        {"slot": "node-b", "role": "sentinel"},
+        {"slot": "node-c", "role": "builder"},
+    ],
+    "edges": [],
+}
+
+
+class TestSharedResolveRoleAccessor:
+    """Fix 2: factory.resolve_role drives pre-flight when present."""
+
+    async def test_shared_resolver_unique_suffix_promotion_accepted(
+        self, clean_stub_known_roles: None
+    ) -> None:
+        """Fix 2: unique ':role' suffix promotion via shared factory.resolve_role succeeds."""
+        broker = Broker()
+
+        known = ("plugin:builder", "plugin:sentinel")
+        stub_factory.known_roles = lambda: known  # type: ignore[attr-defined]
+        stub_factory.resolve_role = _make_resolve_role(known)  # type: ignore[attr-defined]
+
+        async with _client(broker=broker, factory=stub_factory) as s:
+            await s.initialize()
+
+            propose_task = asyncio.create_task(
+                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            shape_id = await _poll_proposal(broker)
+            await broker.resolve_proposal(shape_id, "approve")
+            await propose_task
+
+            inst_result = _content_json(
+                await s.call_tool("instantiate_shape", {"shape_id": shape_id})
+            )
+            # Unique suffix promotion via shared resolver → pre-flight passes
+            assert inst_result["ok"] is True, inst_result
+            assert len(inst_result["crew"]) == 2
+
+    async def test_shared_resolver_ambiguous_role_refused(
+        self, clean_stub_known_roles: None
+    ) -> None:
+        """Fix 2: ambiguous promotion via shared factory.resolve_role → ok:False, no spawn."""
+        broker = Broker()
+
+        # Two plugins both export "builder" → resolve_role returns original "builder"
+        # which is NOT in known → pre-flight refuses.
+        known = ("a:builder", "b:builder")
+        stub_factory.known_roles = lambda: known  # type: ignore[attr-defined]
+        stub_factory.resolve_role = _make_resolve_role(known)  # type: ignore[attr-defined]
+
+        # _SHAPE_2NODE uses "builder" and "sentinel"; both ambiguous/absent here.
+        async with _client(broker=broker, factory=stub_factory) as s:
+            await s.initialize()
+
+            propose_task = asyncio.create_task(
+                s.call_tool("propose_shape", {"shape": _SHAPE_2NODE})
+            )
+            shape_id = await _poll_proposal(broker)
+            await broker.resolve_proposal(shape_id, "approve")
+            await propose_task
+
+            inst_result = _content_json(
+                await s.call_tool("instantiate_shape", {"shape_id": shape_id})
+            )
+            assert inst_result["ok"] is False
+            assert "unresolved_roles" in inst_result
+            assert "builder" in inst_result["unresolved_roles"]
+
+            # Zero teammates spawned.
+            list_result = _content_json(await s.call_tool("list_crew", {}))
+            assert list_result["teammates"] == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — transactional spawn: partial crew rolled back on failure
+# ---------------------------------------------------------------------------
+
+
+class TestTransactionalSpawn:
+    """Fix 4: mid-loop spawn failure rolls back already-spawned teammates."""
+
+    async def test_spawn_failure_rolls_back_partial_crew(self) -> None:
+        """Fix 4: broker.spawn_teammate raises on 2nd call → ok:False, 0 alive, proposal still approved."""
+        broker = Broker()
+
+        # Patch spawn_teammate to fail on the 2nd call.
+        call_count = 0
+        original_spawn = broker.spawn_teammate
+
+        async def failing_spawn(*args: object, **kwargs: object) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("injected spawn failure on call #2")
+            return await original_spawn(*args, **kwargs)
+
+        broker.spawn_teammate = failing_spawn  # type: ignore[method-assign]
+
+        async with _client(broker=broker) as s:
+            await s.initialize()
+
+            propose_task = asyncio.create_task(
+                s.call_tool("propose_shape", {"shape": _SHAPE_3NODE})
+            )
+            shape_id = await _poll_proposal(broker)
+            await broker.resolve_proposal(shape_id, "approve")
+            await propose_task
+
+            inst_result = _content_json(
+                await s.call_tool("instantiate_shape", {"shape_id": shape_id})
+            )
+
+            # The call must fail gracefully.
+            assert inst_result["ok"] is False, inst_result
+            assert "spawn failed mid-instantiation" in inst_result.get("error", "")
+
+            # Zero live teammates after rollback.
+            list_result = _content_json(await s.call_tool("list_crew", {}))
+            alive = [t for t in list_result["teammates"] if t["alive"]]
+            assert alive == [], f"expected no live teammates, got: {alive}"
+
+            # Proposal must remain 'approved' so a retry can re-attempt.
+            proposal = broker.get_proposal(shape_id)
+            assert proposal is not None
+            assert proposal.status == "approved", (
+                f"proposal should remain 'approved' after rollback, got: {proposal.status!r}"
+            )

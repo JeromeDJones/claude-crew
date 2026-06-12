@@ -836,19 +836,32 @@ def make_server(
 
         # Pre-flight role resolution (all-or-nothing).
         # Only runs when the factory exposes known_roles; stub default skips it.
+        # Fix 2: prefer factory.resolve_role (shared closure) when available so
+        # the promotion logic is never duplicated between factory and pre-flight.
         known_roles_fn = getattr(factory, "known_roles", None)
         if known_roles_fn is not None:
             known: set[str] = set(known_roles_fn())
+            resolve_role_fn = getattr(factory, "resolve_role", None)
             unresolved: list[str] = []
             for node in shape.nodes:
                 role = node.role
-                if role in known:
-                    continue
-                # Unique ':role' suffix promotion (mirrors factories._resolve_role)
-                candidates = [k for k in known if k.endswith(f":{role}")]
-                if len(candidates) == 1:
-                    continue  # uniquely promotable → accepted
-                unresolved.append(role)
+                if resolve_role_fn is not None:
+                    # Shared resolver: returns the promoted key when resolvable,
+                    # or the original role when not → only resolvable if the
+                    # result is actually in known.
+                    resolved = resolve_role_fn(role)
+                    if resolved not in known:
+                        unresolved.append(role)
+                else:
+                    # Fallback for factories that expose known_roles but not
+                    # resolve_role (e.g. stub-mode tests that inject known_roles
+                    # without also injecting resolve_role).
+                    if role in known:
+                        continue
+                    candidates = [k for k in known if k.endswith(f":{role}")]
+                    if len(candidates) == 1:
+                        continue  # uniquely promotable → accepted
+                    unresolved.append(role)
             if unresolved:
                 return {
                     "ok": False,
@@ -856,22 +869,40 @@ def make_server(
                     "unresolved_roles": unresolved,
                 }
 
-        # Spawn one teammate per node (pre-flight guarantees no partial spawn).
+        # Spawn one teammate per node.
+        # Fix 4: transactional — on any spawn failure, roll back already-spawned
+        # teammates so no partial crew is left alive.  The proposal stays
+        # 'approved' on failure so a corrected retry can re-attempt instantiation.
         crew: list[dict[str, str]] = []
         slot_to_teammate: dict[str, str] = {}
 
-        for node in shape.nodes:
-            tid = await broker.spawn_teammate(
-                role=node.role,
-                name=node.slot,
-                factory=factory,
-                model=node.model,
-                extra_tools=list(node.extra_tools or ()) or None,
-                extra_skills=list(node.extra_skills or ()) or None,
-                cwd=node.cwd,
-            )
-            crew.append({"slot": node.slot, "teammate_id": tid, "role": node.role})
-            slot_to_teammate[node.slot] = tid
+        try:
+            for node in shape.nodes:
+                tid = await broker.spawn_teammate(
+                    role=node.role,
+                    name=node.slot,
+                    factory=factory,
+                    model=node.model,
+                    extra_tools=list(node.extra_tools or ()) or None,
+                    extra_skills=list(node.extra_skills or ()) or None,
+                    cwd=node.cwd,
+                )
+                crew.append({"slot": node.slot, "teammate_id": tid, "role": node.role})
+                slot_to_teammate[node.slot] = tid
+        except Exception as exc:
+            # Roll back: kill every teammate that was already spawned.
+            rolled_back: list[str] = []
+            for entry in crew:
+                try:
+                    await broker.kill_teammate(entry["teammate_id"], reason="spawn-rollback", graceful=False)
+                    rolled_back.append(entry["slot"])
+                except Exception:
+                    pass  # best-effort; at minimum the teammate will die naturally
+            return {
+                "ok": False,
+                "error": f"spawn failed mid-instantiation: {exc}",
+                "partial_crew_rolled_back": rolled_back,
+            }
 
         # Record topology (immutable snapshot of edges + slot→teammate map).
         topology = Topology(
@@ -884,8 +915,8 @@ def make_server(
         )
         broker.record_topology(topology)
 
-        # Mark single-use: prevents double-spawn on a second instantiate call.
-        proposal.status = "instantiated"
+        # Fix 5: transition via broker method (enforces state guard).
+        broker.mark_instantiated(shape_id)
 
         return {
             "ok": True,
@@ -894,7 +925,7 @@ def make_server(
             "topology": {
                 "shape_name": topology.shape_name,
                 "edges": [list(e) for e in topology.edges],
-                "slot_to_teammate": slot_to_teammate,
+                "slot_to_teammate": dict(slot_to_teammate),
             },
         }
 
