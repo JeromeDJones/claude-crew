@@ -6,6 +6,13 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-12] Feature: workflow-shape-composition-m0 — live-verification findings
+
+Surfaced while verifying M0 live on Mission Control (propose → dashboard gate → approve), with two real Claude instances connected.
+
+- **[Medium, UX → fold into M2] The shape-gate should be a MODAL, not an inline panel.** A shape-gate is a *blocking, attention-demanding* checkpoint — `propose_shape` halts the lead until a human decides. The inline `ShapeGatePanel` is **missable** (operator had to hunt for it), and the skipped active-instance-only limitation (the [2026-06-11] §6 finding) makes it worse. A modal that fires for **any** pending proposal **across all instances** matches the blocking semantics, can't be overlooked, and **subsumes/​supersedes the §6 active-instance-only gap entirely** (no more "select the right instance to find the gate"). Reuse the existing `OverlayPanel` modal primitive (from the artifact-viewer work). **Suggested home: M2** — the gate UI is reworked there when edges go live anyway. *Source: live verification 2026-06-12 (Jerome).*
+- **[Medium, ops/tooling] Post-merge, a running claude-crew MCP server serves NEW `dashboard.html` from disk but runs OLD Python routes — a deceptive split.** `dashboard.html` is read from disk per request (reflects merged master immediately), but `ui_server.py`'s route table is built at server-process startup. So after merging a feature that adds a route (e.g. `POST /shape-approval`), a live pre-merge server **renders the new frontend** (buttons appear) **but 404s the new backend route** (buttons do nothing) — frontend-new / backend-stale. Hit live 2026-06-12: the leader instance served the shape-gate panel but 404'd approvals until its `uv run claude-crew` process was reconnected/restarted. **Sharpens the [2026-06-04] #45 "running server is stale" theme** — the static HTML masks the staleness. **Suggested action**: (a) surface the server's running code version/commit on the dashboard (or `/api/state`) so staleness is visible; (b) operational note (now in coordinator practice): after merging a claude-crew feature, **reconnect/restart EVERY connected instance's MCP**, not just one — multi-instance deployments have one stale process per lead. *Source: live verification 2026-06-12.*
+
 ## [2026-06-11] Feature: workflow-shape-composition-m0
 
 Out-of-scope findings from the `workflow-shape-composition-m0` feature (validation PASS, 1424 tests). Six code findings (Low/Info, non-blocking) and four infra/process observations from the repo-reactor coordinator run.
