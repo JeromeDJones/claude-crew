@@ -302,6 +302,7 @@ class Broker:
         extra_skills: list[str] | None = None,
         mcp_servers: list[str] | None = None,
         env: "dict[str, str] | None" = None,
+        neighbors: "list[dict] | None" = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
@@ -314,6 +315,8 @@ class Broker:
         }
         if env is not None:
             factory_kwargs["env"] = env
+        if neighbors is not None:
+            factory_kwargs["neighbors"] = neighbors
         teammate = factory(teammate_id, resolved_name, role, **factory_kwargs)
         await teammate.start(self, inbox)
 
