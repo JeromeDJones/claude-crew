@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 
 LEAD_ID = "lead"
 
+# M2: default per-directed-edge exchange budget for the circuit breaker.
+# Override via Broker._circuit_breaker_max_exchanges at construction time or
+# for targeted tests.  8 exchanges per edge is the M2 default; tune per-crew
+# by passing max_exchanges to Broker() once that kwarg is wired in.
+CIRCUIT_BREAKER_MAX_EXCHANGES: int = 8
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,6 +162,26 @@ class Topology:
 
 
 @dataclass(frozen=True)
+class EdgeStat:
+    """Per-directed-edge statistics snapshot for the dashboard and circuit breaker.
+
+    ``mode`` is the *effective* routing mode (honors ``_edge_overrides`` and
+    circuit-breaker trips); it may differ from the declared mode in
+    ``Topology.edges`` when the edge has been overridden or promoted.
+
+    ``tripped`` is True when the circuit breaker specifically tripped this edge
+    (as opposed to a manual ``promote_edge`` call, which also sets an override
+    but is operator-initiated rather than auto-triggered).
+    """
+
+    from_slot: str
+    to_slot: str
+    mode: str        # effective mode: "gated" | "tee" | "direct"
+    exchanges: int   # how many tee/direct messages were delivered on this edge
+    tripped: bool    # True when circuit breaker auto-tripped this edge
+
+
+@dataclass(frozen=True)
 class BrokerSnapshot:
     """Frozen, value-copied view of broker state for downstream consumers.
 
@@ -186,6 +212,11 @@ class BrokerSnapshot:
     shape_proposals: "tuple[ShapeProposal, ...]" = ()
     # M0: topologies recorded after successful shape instantiation.
     topologies: "tuple[Topology, ...]" = ()
+    # M2: per-edge exchange stats derived from the active topology/topologies.
+    # Each entry covers one directed (from_slot, to_slot) pair; mode reflects
+    # the effective routing (honoring overrides/trips); tripped=True when the
+    # circuit breaker auto-tripped that edge.
+    topology_edge_stats: "tuple[EdgeStat, ...]" = ()
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -232,6 +263,17 @@ class Broker:
         # circuit breaker or promote_edge. Checked before the topology's declared
         # mode in _edge_mode so overrides take precedence.
         self._edge_overrides: dict[tuple[str, str], str] = {}
+        # M2 circuit breaker: per-directed-edge exchange counter. Keyed by
+        # (from_slot, to_slot); incremented on every successful tee/direct
+        # delivery before the trip check. Counts the triggering message too.
+        self._edge_exchanges: dict[tuple[str, str], int] = {}
+        # M2 circuit breaker: subset of _edge_overrides that were auto-tripped
+        # by the circuit breaker (as opposed to manual promote_edge calls).
+        # Used to set EdgeStat.tripped=True in the snapshot.
+        self._edge_tripped: set[tuple[str, str]] = set()
+        # Per-edge exchange budget. Default from the module constant; tests may
+        # lower this directly (broker._circuit_breaker_max_exchanges = N).
+        self._circuit_breaker_max_exchanges: int = CIRCUIT_BREAKER_MAX_EXCHANGES
         # Tombstoned teammates: keyed by teammate_id, holds the Teammate object
         # after it's popped from _teammates so get_tool_output can still delegate
         # to it for evicted-but-recently-dead lookups.
@@ -839,6 +881,90 @@ class Broker:
             await self._inboxes[stamped.recipient].put(stamped)
         return stamped
 
+    async def _apply_circuit_breaker(
+        self,
+        env: Envelope,
+        routing_mode: str,
+        ts: float,
+    ) -> str:
+        """Update circuit-breaker state and trip the edge if necessary.
+
+        Called for tee/direct routing candidates only. Increments
+        ``_edge_exchanges`` for the (from_slot, to_slot) edge, then checks
+        whether the exchange count exceeds ``_circuit_breaker_max_exchanges``.
+
+        The per-edge exchange budget is the sole trip condition (no deadlock
+        detector — spec amendment, 2026-06-13). Reciprocal ping-pong traffic
+        (a→b→a→b) must stay off the lead while below the budget (AT#10
+        precondition); the budget alone force-inserts the lead on a runaway loop.
+
+        When the budget is exceeded:
+        - ``_edge_overrides[(f,t)]`` is set to ``"gated"`` (idempotent guard).
+        - ``_edge_tripped`` records the edge as auto-tripped.
+        - A control envelope ``{type:"circuit_breaker", edge:[f,t],
+          reason:"budget_exceeded"}`` is emitted to LEAD.
+        - Returns ``"gated"`` so the caller re-routes the triggering message.
+
+        When the budget is not exceeded, returns ``routing_mode`` unchanged.
+
+        Idempotency: if the edge is already in ``_edge_overrides`` (tripped or
+        manually promoted), ``_resolve_routing_mode`` would have returned "gated"
+        and this method would not be called.  The guard on ``_edge_overrides``
+        membership is a belt-and-suspenders defence against any bypass.
+        """
+        topo = self._active_topology_for(env.sender, env.recipient)
+        if topo is None:
+            return routing_mode
+
+        from_slot = self._id_to_slot(topo, env.sender)
+        to_slot = self._id_to_slot(topo, env.recipient)
+        if from_slot is None or to_slot is None:
+            return routing_mode
+
+        forward_key = (from_slot, to_slot)
+
+        # Increment exchange counter (counts the triggering message too).
+        count = self._edge_exchanges.get(forward_key, 0) + 1
+        self._edge_exchanges[forward_key] = count
+
+        # Belt-and-suspenders: edge already overridden by a previous trip or
+        # promote_edge — shouldn't reach here via _resolve_routing_mode but
+        # guard for any direct-call bypass.
+        if forward_key in self._edge_overrides:
+            return routing_mode
+
+        # Budget is the sole trip condition.
+        if count <= self._circuit_breaker_max_exchanges:
+            return routing_mode  # Within budget; normal delivery proceeds.
+
+        # ---- TRIP ----
+        self._edge_overrides[forward_key] = "gated"
+        self._edge_tripped.add(forward_key)
+
+        # Emit circuit-breaker control envelope to LEAD.
+        ctrl_seq = self._next_seq
+        self._next_seq += 1
+        ctrl = Envelope(
+            id=new_message_id(),
+            seq=ctrl_seq,
+            sender="broker",
+            recipient=LEAD_ID,
+            timestamp=ts,
+            payload={
+                "type": "circuit_breaker",
+                "edge": [from_slot, to_slot],
+                "reason": "budget_exceeded",
+            },
+        )
+        self._seen_ids.add(ctrl.id)
+        self._log.append(ctrl)
+        self._sink.write_envelope(ctrl.to_dict())
+        async with self._lead_message_condition:
+            self._lead_message_condition.notify_all()
+
+        # Signal to the caller to re-route the triggering message as "gated".
+        return "gated"
+
     async def _send_routed(self, env: Envelope) -> Envelope | None:
         """Apply per-edge routing for teammate→teammate sends (M2).
 
@@ -850,9 +976,19 @@ class Broker:
                     {cc_of, from, to, payload} to LEAD; both in _log.
           direct  → original delivered to recipient inbox; in _log; no LEAD notify.
           fallback (no edge / no topology) → same as gated.
+
+        Circuit breaker (M2): on tee/direct modes, ``_apply_circuit_breaker``
+        is called first.  If it trips the edge it returns ``"gated"`` and the
+        triggering message is re-routed to LEAD; a separate control envelope
+        is also emitted to LEAD by the helper.
         """
         routing_mode = self._resolve_routing_mode(env.sender, env.recipient)
         ts = env.timestamp if env.timestamp else time.time()
+
+        # Apply circuit breaker before tee/direct delivery.  A trip converts
+        # routing_mode to "gated" so the triggering message lands on LEAD.
+        if routing_mode in ("direct", "tee"):
+            routing_mode = await self._apply_circuit_breaker(env, routing_mode, ts)
 
         if routing_mode == "direct":
             seq = self._next_seq
@@ -1062,6 +1198,26 @@ class Broker:
                 if cfg is not None:
                     dead_configs[info.id] = cfg
 
+        # M2: build topology_edge_stats from all recorded topologies.
+        # Walk in reverse order so later topologies take precedence when the
+        # same (from_slot, to_slot) pair appears in multiple topologies.
+        edge_stats: list[EdgeStat] = []
+        seen_edge_keys: set[tuple[str, str]] = set()
+        for topo in reversed(self._topologies):
+            for f_slot, t_slot, _declared_mode in topo.edges:
+                key = (f_slot, t_slot)
+                if key in seen_edge_keys:
+                    continue
+                seen_edge_keys.add(key)
+                effective_mode = self._edge_mode(topo, f_slot, t_slot) or _declared_mode
+                edge_stats.append(EdgeStat(
+                    from_slot=f_slot,
+                    to_slot=t_slot,
+                    mode=effective_mode,
+                    exchanges=self._edge_exchanges.get(key, 0),
+                    tripped=key in self._edge_tripped,
+                ))
+
         return BrokerSnapshot(
             crew_id=self.crew_id,
             teammates=teammates_tuple,
@@ -1072,6 +1228,7 @@ class Broker:
             startup_diagnostics=self._startup_diagnostics,
             shape_proposals=tuple(self._proposals.values()),
             topologies=tuple(self._topologies),
+            topology_edge_stats=tuple(edge_stats),
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
