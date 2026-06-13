@@ -95,6 +95,17 @@ class TestAT1HappyPathAndMermaid:
         mermaid = shape_to_mermaid(shape)
         assert "gated" in mermaid
 
+    def test_mermaid_node_label_uses_br_not_literal_backslash_n(self):
+        """Regression: node labels must use ``<br/>`` for line breaks, not a
+        literal ``\\n`` (which mermaid renders verbatim as "slot\\nrole" in the
+        browser instead of a two-line label)."""
+        shape = parse_shape(_well_formed_dict())
+        mermaid = shape_to_mermaid(shape)
+        # The slot/role line break is present as <br/> ...
+        assert "planner<br/>planner-agent" in mermaid
+        # ... and no literal backslash-n leaks into any node label.
+        assert "\\n" not in mermaid
+
     def test_tee_mode_accepted_and_recorded(self):
         data = dict(_well_formed_dict())
         data["edges"] = [{"from_slot": "planner", "to_slot": "executor", "mode": "tee"}]

@@ -225,14 +225,17 @@ def parse_shape(data: dict | str, *, source: str = "<inline>") -> Shape:
 def shape_to_mermaid(shape: Shape) -> str:
     """Render a Shape to a mermaid ``graph TD`` source string.
 
-    One node per slot (label = slot\\nrole), one edge per ShapeEdge with the
+    One node per slot (label = slot<br/>role), one edge per ShapeEdge with the
     mode as the edge label. Consumed by the dashboard's existing
-    mermaid.render() pipeline.
+    mermaid.render() pipeline. Uses ``<br/>`` (not ``\\n``) for the in-label
+    line break — mermaid renders a literal backslash-n verbatim, whereas
+    ``<br/>`` is the supported line-break syntax inside an htmlLabels /
+    foreignObject node label (the dashboard's DOMPurify config already allows it).
     """
     lines = ["graph TD"]
 
     for node in shape.nodes:
-        label = f"{node.slot}\\n{node.role}"
+        label = f"{node.slot}<br/>{node.role}"
         lines.append(f'    {node.slot}["{label}"]')
 
     for edge in shape.edges:

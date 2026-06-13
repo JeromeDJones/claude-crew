@@ -10,13 +10,6 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 Post-retro findings from the `m1-5-async-shape-gate` feature (PASS, 1461 full-suite green, cycle 0).
 
-### [Low, tooling] `shape_to_mermaid` node labels render literal `\n` instead of `<br>`
-
-- **What**: `shape_to_mermaid` (in `claude_crew/shapes.py`) labels each node using a `\n` separator (e.g. `slot\nrole`). Mermaid renders this as a literal backslash-n in the browser ("planner\nrr-planner") rather than a line break. `<br>` is the correct Mermaid syntax for a line break within a node label.
-- **Where**: `claude_crew/shapes.py::shape_to_mermaid` — the node label string construction. Add a legibility assertion to `tests/test_shape_render.py` (or `tests/test_shape_dashboard.py`) confirming the rendered source contains `<br>` and not `\n`.
-- **Why it matters**: Confirmed in Jerome's live M1.5 UX verification (2026-06-12). The M1.5 resurfaceable modal makes the DAG more prominent, so the label defect is now more visible to operators. Pre-existing defect from M0 (commit 4e52c0b); non-blocking for M1.5 signoff.
-- **Suggested action**: In `shape_to_mermaid`, replace the `\n` separator in the node label string with `<br>`. Add a test asserting the rendered mermaid source contains `<br>` and not a literal `\n`. XS.
-
 ### [Low, process] `breakout.scope.under-declared` — `tests/test_shape_render.py` not in `dashboard-resurfaceable-gate` `taskTouches`
 
 - **What**: The `dashboard-resurfaceable-gate` task legitimately modified `tests/test_shape_render.py` (added a `pending-gate-pill` click step before each `.shape-gate-panel` wait in the AT13/AT14 Playwright tests, required by the controlled-component refactor) but did not declare it in `taskTouches`. The `slice-touches-check.sh` script flagged it; the reviewer adjudicated it as "required, minimal, non-weakening — planner annotation gap, not implementor drift." No collision: the file was not in any other slice's `taskTouches`.
