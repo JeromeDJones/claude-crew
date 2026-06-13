@@ -31,7 +31,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server
+from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk.types import (
     AssistantMessage,
     HookMatcher,
@@ -43,7 +44,7 @@ from claude_agent_sdk.types import (
 
 logger = logging.getLogger(__name__)
 
-from claude_crew.broker import LEAD_ID
+from claude_crew.broker import LEAD_ID, UnauthorizedEdgeError
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.redaction import REDACTION_VERSION, redact_error, redact_output, summarize_args
 from pathlib import Path
@@ -84,6 +85,12 @@ _STDERR_RING_MAXLEN: int = 50        # max lines retained
 _STDERR_RING_BYTE_CAP: int = 65536   # 64 KiB hard byte ceiling
 
 _SHUTDOWN_SENTINEL: object = object()
+
+# M2 edge-routing: in-process MCP server name and tool ID for scoped peer messaging.
+# The server is keyed as "crew-send" in opts_kwargs["mcp_servers"], which maps to
+# the MCP tool ID "mcp__crew-send__send_to" as advertised in the system prompt.
+_SEND_TO_MCP_SERVER_NAME: str = "crew-send"
+_SEND_TO_TOOL_ID: str = f"mcp__{_SEND_TO_MCP_SERVER_NAME}__send_to"
 
 # Graceful flush constants (Feature: graceful-termination-memory-flush).
 # Budget matches the codebase's established hang-detection budget (90s).
@@ -531,6 +538,7 @@ class SdkTeammate(Teammate):
         extra_tools: "list[str] | None" = None,
         mcp_servers_grant: "list[str] | None" = None,
         env: "dict[str, str] | None" = None,
+        neighbors: "list[dict] | None" = None,
     ) -> None:
         self.id = id
         self.name = name
@@ -599,7 +607,8 @@ class SdkTeammate(Teammate):
                             self.id, role,
                         )
                 self._system_prompt = build_teammate_prompt(
-                    role, _body, self._agents, memory_section=_memory_section
+                    role, _body, self._agents, memory_section=_memory_section,
+                    neighbors=neighbors,
                 )
             else:
                 # Fallback: role not in any loaded pack (D-7 legacy path)
@@ -624,6 +633,11 @@ class SdkTeammate(Teammate):
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
+        # M2: neighbors stored so _run() can conditionally inject send_to.
+        # None / empty → no out-edges declared → tool not injected.
+        self._neighbors: "list[dict] | None" = neighbors if neighbors else None
+        # Set by _build_send_to_mcp_server(); exposed for test introspection.
+        self._send_to_tool: Any = None
 
         # Base-class telemetry fields (Q5/D1). Mirror what StubTeammate does.
         self._last_activity_monotonic = time.monotonic()
@@ -1287,6 +1301,55 @@ class SdkTeammate(Teammate):
                 )
         return {**CREW_DEFAULTS, **self._venv_env_overrides(), **caller_env}
 
+    def _build_send_to_mcp_server(self) -> "dict[str, Any]":
+        """Build the in-process SDK MCP server that exposes `send_to` to the teammate.
+
+        The returned dict is an ``McpSdkServerConfig`` — suitable for insertion
+        into ``opts_kwargs["mcp_servers"]`` keyed as ``_SEND_TO_MCP_SERVER_NAME``.
+
+        The tool handler delegates to ``self._broker.send_scoped`` so the model
+        can message declared crew neighbors directly without routing through the
+        lead inbox.  ``UnauthorizedEdgeError`` is surfaced as ``is_error=True``
+        so the model sees a clear rejection rather than a Python traceback.
+
+        ``self._send_to_tool`` is set as a side-effect for test introspection.
+        """
+        self_ref = self
+
+        @sdk_tool(
+            "send_to",
+            (
+                "Send a message directly to a declared crew neighbor. "
+                "recipient may be the neighbor's slot name or teammate id. "
+                "Returns an error if the recipient is not a declared out-edge."
+            ),
+            {"recipient": str, "payload": dict},
+        )
+        async def send_to_impl(args: dict) -> dict:
+            broker = self_ref._broker
+            if broker is None:
+                return {
+                    "content": [{"type": "text", "text": "send_to: broker not available"}],
+                    "is_error": True,
+                }
+            try:
+                await broker.send_scoped(
+                    self_ref.id, args["recipient"], args.get("payload") or {}
+                )
+                return {
+                    "content": [
+                        {"type": "text", "text": f"Delivered to {args['recipient']!r}."}
+                    ]
+                }
+            except UnauthorizedEdgeError as exc:
+                return {
+                    "content": [{"type": "text", "text": f"send_to rejected: {exc}"}],
+                    "is_error": True,
+                }
+
+        self._send_to_tool = send_to_impl
+        return create_sdk_mcp_server(_SEND_TO_MCP_SERVER_NAME, tools=[send_to_impl])
+
     async def _run(self) -> None:
         # D6: Log env override for CLAUDE_CREW_TOOL_ARGS_FULL if set.
         if os.environ.get("CLAUDE_CREW_TOOL_ARGS_FULL") == "1":
@@ -1416,6 +1479,26 @@ class SdkTeammate(Teammate):
                 list(self._mcp_servers_grant), self.role, self.id, home_dir=None,
             )
         opts_kwargs["mcp_servers"] = {**pack_mcp_resolved, **spawn_mcp_resolved}
+
+        # M2: inject in-process send_to tool when this teammate has declared out-edges.
+        # Gated on self._neighbors so teammates without topology do not acquire a
+        # crew-send MCP entry (preserves existing mcp_servers contract for plain
+        # SdkTeammate usage, keeps the tool surface minimal for non-topology spawns).
+        _has_out_edges = any(
+            n.get("direction") == "out"
+            for n in (self._neighbors or [])
+        )
+        if _has_out_edges:
+            _send_to_cfg = self._build_send_to_mcp_server()
+            opts_kwargs["mcp_servers"][_SEND_TO_MCP_SERVER_NAME] = _send_to_cfg
+            _existing_allowed = list(opts_kwargs.get("allowed_tools") or [])
+            opts_kwargs["allowed_tools"] = list(
+                dict.fromkeys(_existing_allowed + [_SEND_TO_TOOL_ID])
+            )
+            if "tools" in opts_kwargs:
+                opts_kwargs["tools"] = list(
+                    dict.fromkeys(opts_kwargs["tools"] + [_SEND_TO_TOOL_ID])
+                )
 
         # Add unconditional --strict-mcp-config via extra_args pass-through.
         # Merge semantics: setdefault preserves any pre-existing extra_args; the
