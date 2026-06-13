@@ -25,8 +25,8 @@ The change is concentrated in four existing seams, no new orchestration runtime:
 - **`broker.py` — routing + authorization + circuit breaker.** `send` gains a routing
   resolver that consults the active `Topology` to pick a delivery target by edge mode.
   A new `authorize_send` / `send_scoped` path enforces out-edge scoping (loud rejection of
-  non-declared recipients). Per-edge exchange counters + a 2-node deadlock detector trip a
-  breaker that force-inserts the lead. All logic is broker-level and fully exercisable in
+  non-declared recipients). A per-edge exchange counter trips a breaker that force-inserts
+  the lead. All logic is broker-level and fully exercisable in
   stub mode — no live SDK needed for the core contract.
 - **`sdk_teammate.py` + `teammate_prompt.py` — scoped `send_to` + neighbor injection.**
   Teammates gain an in-process SDK MCP `send_to(recipient, payload)` tool whose handler
@@ -104,14 +104,13 @@ def authorize_send(self, sender_id: str, recipient_id: str) -> None:
 # --- circuit breaker state (per active topology, per directed edge) ---
 # _edge_exchanges: dict[tuple[str, str], int]      # (from_slot,to_slot) → count
 # _edge_overrides: dict[tuple[str, str], str]      # forced "gated" after a trip / promote
-# _edge_pending:   dict[tuple[str, str], bool]     # an unanswered direct/tee exchange in flight
 # CIRCUIT_BREAKER_MAX_EXCHANGES: int = 8           # default per-edge budget (configurable arg)
 #
 # On a tee/direct delivery: increment _edge_exchanges[(f,t)]. When it exceeds the budget,
-# OR a 2-node deadlock is detected (_edge_pending[(A,B)] and _edge_pending[(B,A)] both True),
 # set _edge_overrides[(f,t)]="gated", route the triggering message to LEAD, and deliver a
-# control envelope {type:"circuit_breaker", edge:[f,t], reason:"budget_exceeded"|"deadlock"}
-# to LEAD. The edge stays gated until promote_edge resets/confirms it.
+# control envelope {type:"circuit_breaker", edge:[f,t], reason:"budget_exceeded"} to LEAD.
+# The budget is the sole trip condition (no deadlock detector). The edge stays gated until
+# promote_edge resets/confirms it.
 
 def promote_edge(self, from_slot: str, to_slot: str) -> None:
     """Force an edge to 'gated' (operator steps back onto it). Sets _edge_overrides."""
@@ -187,10 +186,16 @@ POST /edge-promote/{crew_id}/{from_slot}/{to_slot}
 - **Circuit breaker is non-negotiable and ships with direct/tee** — *Rationale:* the
   autonomous-chatter guard is the precondition for peer comms existing at all. *Carried
   into:* `_edge_exchanges`, `CIRCUIT_BREAKER_MAX_EXCHANGES`, `promote_edge`, AT#6, AT#7.
-- **Breaker budget is measured in message exchanges (+ 2-node deadlock), not token counts**
-  — *Rationale:* the broker has no token visibility mid-exchange (tokens roll up at
-  end-of-turn per the verified SDK invariant); exchange count is the enforceable proxy.
-  *Carried into:* `_edge_exchanges` counter; Assumption #2.
+- **Breaker budget is measured in message exchanges only — no deadlock detector** —
+  *Rationale:* the per-edge exchange budget is the sole runaway guard; it force-inserts the
+  lead on a runaway loop. A 2-node "A waits B waits A" deadlock detector is dropped: it is
+  not well-defined at the message-bus level (the broker cannot tell a blocked peer from one
+  that simply has not sent yet), clearing the pending flag on the reverse reply makes the
+  both-pending state unreachable (dead code), and a non-clearing implementation contradicts
+  the reciprocal-peer-conversation contract (AT#10 — direct ping-pong must stay off the
+  lead). The broker also has no token visibility mid-exchange (tokens roll up at end-of-turn
+  per the verified SDK invariant), so exchange count is the enforceable proxy. *Carried
+  into:* `_edge_exchanges` counter; Assumption #2; AT#7.
 - **Scoped `send_to` is an in-process SDK MCP tool whose handler calls the broker** —
   *Rationale:* honors "every cross-teammate message routes through the broker" (no off-broker
   channel); the broker stays the single authorization + observability choke point. *Carried
@@ -236,8 +241,6 @@ POST /edge-promote/{crew_id}/{from_slot}/{to_slot}
 - **Breaker already tripped (edge overridden to gated):** further sends route gated; the
   exchange counter stops incrementing for tee/direct (it's gated now); a second trip emits
   no duplicate control envelope (idempotent on `_edge_overrides`).
-- **Deadlock false-positive:** a 2-node cycle where one side has actually replied →
-  `_edge_pending` for that direction is cleared on delivery of the reply, so no trip.
 - **`promote_edge` on an already-gated or unknown edge:** idempotent no-op for gated;
   unknown edge → recorded override is harmless (no edge ever matches it).
 
@@ -292,11 +295,13 @@ ids to slots.
    (N+1)-th routes to LEAD instead of `b`, a `{type:"circuit_breaker", edge:["a","b"],
    reason:"budget_exceeded"}` control envelope reaches `get_messages(LEAD)`, and the edge's
    effective mode is now `gated`.
-7. **deadlock detection force-inserts the lead.** Given reciprocal direct edges `a→b` and
-   `b→a`, when an `a`→`b` direct exchange is in flight unanswered AND a `b`→`a` direct
-   exchange is in flight unanswered simultaneously, then the breaker trips, a
-   `{type:"circuit_breaker", reason:"deadlock"}` control envelope reaches `get_messages(LEAD)`,
-   and the involved edge is forced to `gated`.
+7. **reciprocal exchanges below budget don't trip; above budget does.** Given reciprocal
+   direct edges `a→b` and `b→a` and `CIRCUIT_BREAKER_MAX_EXCHANGES=N`, when a sequence of
+   reciprocal direct exchanges runs BELOW the budget (e.g. `a→b→a→b`), then NONE of them trip
+   the breaker and none reach `get_messages(LEAD)` (no false deadlock); and when the
+   reciprocal exchange count EXCEEDS the budget, the breaker trips on
+   `reason:budget_exceeded`, force-inserts the lead, and the edge's effective mode becomes
+   `gated`. This guards AT#10's precondition at the broker level.
 8. **neighbor adjacency injected at spawn.** Given a shape with edges `planner→implementor`
    (gated) and `implementor→reviewer` (direct), when the crew is instantiated, then the
    `implementor` teammate's assembled system prompt (the `system_prompt_override` captured
@@ -358,7 +363,9 @@ uv run pytest
 - Re-authoring RepoReactor as a native heavy shape — that is M4.
 - Autonomous / memory-driven edge adaptation or widening lead latitude — that is M5.
 - Token-count-based edge budgets (exchange-count is the M2 proxy; see Assumption #2).
-- Deadlock cycles longer than 2 nodes (only the A⇄B 2-cycle is detected in M2).
+- Deadlock detection of ANY kind, 2-node included — the per-edge exchange budget is the sole
+  runaway guard; a stuck or looping peer pair is force-inserted to the lead by the budget,
+  not by a separate deadlock detector.
 - A live-SDK end-to-end test of the in-process `send_to` MCP tool firing inside a real
   teammate turn (the broker contract is covered in stub mode; live verification follows the
   existing `CLAUDE_CREW_LIVE_TESTS` gating and is not part of the default green suite).
@@ -379,10 +386,10 @@ uv run pytest
   `test_shape_broker` assertions; declaring both directed edges is the legible, additive way
   to express reciprocal traffic.
 - **Breaker budget unit = message exchanges** — *Default:* `CIRCUIT_BREAKER_MAX_EXCHANGES=8`
-  per directed edge, plus 2-node deadlock detection. *Rationale:* the broker cannot see token
-  counts mid-exchange (they roll up at end-of-turn per the verified SDK invariant); exchange
-  count is the enforceable, testable proxy. The constant is a `send`/spawn-time configurable
-  arg so it can be tuned without a contract change.
+  per directed edge; the budget is the sole runaway guard (no deadlock detector). *Rationale:*
+  the broker cannot see token counts mid-exchange (they roll up at end-of-turn per the verified
+  SDK invariant); exchange count is the enforceable, testable proxy. The constant is a
+  `send`/spawn-time configurable arg so it can be tuned without a contract change.
 - **Latest matching topology governs** — *Default:* when more than one recorded topology
   contains both endpoints, the most recently recorded one wins. *Rationale:* the common case
   is a single instantiated shape per crew; "latest" is deterministic and matches operator
@@ -451,11 +458,11 @@ tasks:
   - name: broker-circuit-breaker
     description: |
       In claude_crew/broker.py, add the per-edge circuit breaker on tee/direct edges:
-      _edge_exchanges counters with CIRCUIT_BREAKER_MAX_EXCHANGES budget, _edge_pending
-      2-node deadlock detection, force-insert-the-lead behavior (override edge to gated +
-      emit a {type:"circuit_breaker", edge, reason} control envelope to LEAD), and the
-      EdgeStat dataclass surfaced on BrokerSnapshot.topology_edge_stats. Consumes the
-      routing resolver and _edge_overrides from broker-edge-routing. Author
+      _edge_exchanges counters with CIRCUIT_BREAKER_MAX_EXCHANGES budget as the sole runaway
+      guard (no deadlock detector), force-insert-the-lead behavior (override edge to gated +
+      emit a {type:"circuit_breaker", edge, reason:"budget_exceeded"} control envelope to
+      LEAD), and the EdgeStat dataclass surfaced on BrokerSnapshot.topology_edge_stats.
+      Consumes the routing resolver and _edge_overrides from broker-edge-routing. Author
       tests/test_circuit_breaker.py covering ATs 6–7.
     dependsOn: [broker-edge-routing]
     acceptanceTests: [6, 7]
