@@ -449,6 +449,8 @@ class UIServer:
                     "status": p.status,
                     "adaptation_diff": p.adaptation_diff,
                     "mermaid": shape_to_mermaid(p.shape),
+                    "name": p.shape.name,
+                    "summary": p.shape.description,
                 }
                 for p in snapshot.shape_proposals
             ],

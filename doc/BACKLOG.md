@@ -6,6 +6,31 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-12] Feature: m1-5-async-shape-gate — retro findings
+
+Post-retro findings from the `m1-5-async-shape-gate` feature (PASS, 1461 full-suite green, cycle 0).
+
+### [Low, tooling] `shape_to_mermaid` node labels render literal `\n` instead of `<br>`
+
+- **What**: `shape_to_mermaid` (in `claude_crew/shapes.py`) labels each node using a `\n` separator (e.g. `slot\nrole`). Mermaid renders this as a literal backslash-n in the browser ("planner\nrr-planner") rather than a line break. `<br>` is the correct Mermaid syntax for a line break within a node label.
+- **Where**: `claude_crew/shapes.py::shape_to_mermaid` — the node label string construction. Add a legibility assertion to `tests/test_shape_render.py` (or `tests/test_shape_dashboard.py`) confirming the rendered source contains `<br>` and not `\n`.
+- **Why it matters**: Confirmed in Jerome's live M1.5 UX verification (2026-06-12). The M1.5 resurfaceable modal makes the DAG more prominent, so the label defect is now more visible to operators. Pre-existing defect from M0 (commit 4e52c0b); non-blocking for M1.5 signoff.
+- **Suggested action**: In `shape_to_mermaid`, replace the `\n` separator in the node label string with `<br>`. Add a test asserting the rendered mermaid source contains `<br>` and not a literal `\n`. XS.
+
+### [Low, process] `breakout.scope.under-declared` — `tests/test_shape_render.py` not in `dashboard-resurfaceable-gate` `taskTouches`
+
+- **What**: The `dashboard-resurfaceable-gate` task legitimately modified `tests/test_shape_render.py` (added a `pending-gate-pill` click step before each `.shape-gate-panel` wait in the AT13/AT14 Playwright tests, required by the controlled-component refactor) but did not declare it in `taskTouches`. The `slice-touches-check.sh` script flagged it; the reviewer adjudicated it as "required, minimal, non-weakening — planner annotation gap, not implementor drift." No collision: the file was not in any other slice's `taskTouches`.
+- **Where**: M1.5 spec `## Task Breakout` → `dashboard-resurfaceable-gate` task's `taskTouches` glob list. Coordinator should amend in retrospect.
+- **Why it matters**: Footprint-accuracy hygiene. The process gap: when a task refactors the open/trigger mechanism of a shared dashboard component (e.g. converting from auto-open to pill-click), sibling Playwright suites that exercise the same trigger should be listed in `taskTouches` upfront.
+- **Suggested action**: Add to the SDD breakout guidance or CLAUDE.md: "when a task changes the trigger mechanism of a component, list all sibling Playwright suites that exercise the same component trigger in `taskTouches`." XS process note.
+
+### [Low, process] Slice validation scope too narrow for widely-consumed default-behavior flip
+
+- **What**: The `server-async-tools` task's `testCommand` was scoped to `tests/test_shape_gate.py`, but its primary change — flipping `propose_shape` from blocking to non-blocking by default — is a widely-consumed API contract change. Scoped slice gates risk masking cross-cutting regressions. Risk was mitigated: the feature-level `uv run pytest` gate ran the full suite and confirmed 1461 green.
+- **Where**: M1.5 spec `## Task Breakout` → `server-async-tools` task's `testCommand`. Mirrors the CLAUDE.md `multi-scope-agent-memory` lesson.
+- **Why it matters**: No regression in this instance, but the process gap is worth documenting. The CLAUDE.md lesson applies at the slice breakout level too.
+- **Suggested action**: Add to the SDD breakout template or CLAUDE.md: "when a task's primary change flips the default behavior of a widely-consumed API, the task's `testCommand` must run `uv run pytest` (full suite), not a scoped subset." Process note only; co-locate with the existing `multi-scope-agent-memory` lesson entry.
+
 ## [2026-06-12] Feature: workflow-shape-composition-m0 — live-verification findings
 
 Surfaced while verifying M0 live on Mission Control (propose → dashboard gate → approve), with two real Claude instances connected.

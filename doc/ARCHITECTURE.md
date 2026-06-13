@@ -1,7 +1,7 @@
 # Architecture: claude-crew
 
 **Created**: 2026-06-09 (harvested from project `CLAUDE.md` + `teammate-death-diagnostics` feature retro)
-**Last Updated**: 2026-06-11
+**Last Updated**: 2026-06-12
 
 claude-crew is a local multi-agent orchestrator. A Claude Code session (the **lead**) drives a crew of Agent-SDK teammates through an MCP server that acts as supervisor, message bus, and observability surface. Teammates can recursively spawn their own subagents.
 
@@ -11,7 +11,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### `claude_crew/server.py`
 
-FastMCP server. The only surface the lead touches. Exposes 14 MCP tools:
+FastMCP server. The only surface the lead touches. Exposes **16** MCP tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -27,7 +27,9 @@ FastMCP server. The only surface the lead touches. Exposes 14 MCP tools:
 | `list_available_tools` | Available tool names for a teammate |
 | `refresh_agents` | Reload agent definitions from disk; future-spawns-only |
 | `surface_document` | Push a markdown artifact to Mission Control |
-| `propose_shape` | Register a `Shape` as a pending human-approval gate; blocks on `await_proposal` (default 600s timeout); returns `approved`/`declined`/`timed_out` |
+| `propose_shape` | Register a `Shape` as a pending human-approval gate; **non-blocking by default** (`wait=False`): parse → register → surface → return `{ok, shape_id, status:"pending", shape}` immediately; `wait=True` retains the M0 blocking path via `await_proposal` (600s default timeout) |
+| `resolve_shape` | Chat-channel approve/decline: `decision ∈ {"approve","decline"}` → `broker.resolve_proposal`; returns `{ok:True, shape_id, status}` or `{ok:False, error}` on unknown id / non-pending / invalid decision |
+| `list_pending_shapes` | Read pending proposals: returns `{ok:True, pending:[{shape_id, name, crew_id, mermaid, summary}]}`; empty list when none pending |
 | `instantiate_shape` | Spawn exactly the approved crew; pre-flight role resolution all-or-nothing via `factory.known_roles`; records a `Topology`; single-use per `shape_id` |
 
 ### `claude_crew/shapes.py`
@@ -41,7 +43,7 @@ Shape schema. Added in `workflow-shape-composition-m0` (2026-06-11). Pure data m
 | `ShapeEdge` | frozen dataclass | `from_slot`, `to_slot`, `mode="gated"` (`gated`/`tee`/`direct`), `reverse_mode` |
 | `ShapeValidationError` | `ValueError` subclass | Raised on any malformation — no partial `Shape` returned |
 | `parse_shape(data, *, source)` | function | Accepts dict or YAML string; validates loudly (empty shape, dangling edges, duplicate slots, invalid mode, unknown keys at shape/node/edge level, self-loops, duplicate edges); `phases` recorded verbatim and exempt from the unknown-key guard |
-| `shape_to_mermaid(shape)` | function | Emits a `graph TD` source string (one node per slot labeled `slot\nrole`, one edge per `ShapeEdge` labeled by mode) for the dashboard's `mermaid.render()` pipeline |
+| `shape_to_mermaid(shape)` | function | Emits a `graph TD` source string (one node per slot labeled `slot\nrole`, one edge per `ShapeEdge` labeled by mode) for the dashboard's `mermaid.render()` pipeline. **Note:** the `\n` separator renders as a literal backslash-n in the browser label rather than a line break; `<br>` is the correct Mermaid syntax — tracked in BACKLOG (pre-existing M0 defect, fast-follow fix) |
 
 ### `claude_crew/broker.py`
 
@@ -53,7 +55,7 @@ Single source of truth for team state. Owns the teammate registry, append-only m
 |--------|-------|
 | `register_proposal(shape, adaptation_diff?)` | Returns a `shape_id`; proposal status = `"pending"` |
 | `await_proposal(shape_id, timeout)` | `asyncio.Condition` long-poll (mirrors `_lead_message_condition`); `pending` → `approved`/`declined`/`timed_out` |
-| `resolve_proposal(shape_id, decision)` | `decision ∈ {"approve","decline"}`; notifies condition; no `edited_shape` param (M0 is approve/decline only) |
+| `resolve_proposal(shape_id, decision)` | `decision ∈ {"approve","decline"}`; enforces pending-only guard; notifies `_proposal_condition`; **also sends `{type:"shape_resolved", shape_id, status}` to `LEAD_ID`** via the lead-message channel — single choke point inherited by both the chat channel (`resolve_shape`) and the UI channel (`POST /shape-approval`); no `edited_shape` param (M0/M1.5 is approve/decline only) |
 | `get_proposal(shape_id)` | Returns `ShapeProposal \| None` |
 | `record_topology(topology)` | Stores a `Topology` (edges + slot→teammate map) post-instantiation |
 | `get_topologies()` | Returns `tuple[Topology, ...]` |
@@ -173,21 +175,38 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 
 ---
 
-## Workflow Shape Composition (M0)
+## Workflow Shape Composition (M0 + M1.5)
 
-Added in `workflow-shape-composition-m0` (2026-06-11). Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
+**M0** added in `workflow-shape-composition-m0` (2026-06-11) — Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
+
+**M1.5** added in `m1-5-async-shape-gate` (2026-06-12) — Makes the gate **async/non-blocking** (lead stays free during approval; `wait=True` retains the M0 blocking path), adds a **chat-channel approval path** (`resolve_shape` + `list_pending_shapes`, tool count 14→16), **notifies the lead on resolve** via a single choke point in `broker.resolve_proposal`, promotes the gate to a **resurfaceable** `MCTopBar` badge/tray surface in the dashboard (survives instance-switch), and intentionally softens the human-in-the-loop guarantee from *mechanical* to *trust-enforced* (the bridge to M1 trusted-shape auto-approval).
 
 ### Data flow
 
 ```
-propose_shape(shape_dict)
+# M1.5 default path (wait=False) — non-blocking
+propose_shape(shape_dict, wait=False)
   → parse_shape()          shapes.py       validates; raises ShapeValidationError on malformation
-  → register_proposal()    broker.py       status="pending"; asyncio.Condition long-poll begins
-  → /api/state             ui_server.py    shape_proposals[].{crew_id, status, mermaid} emitted
-  → ShapeGatePanel         dashboard.html  mermaid source → renderMermaidBlocks → graphical DAG
-  → POST /shape-approval   ui_server.py    local resolve OR proxy leader→follower (_proxy_shape_approval)
-  → resolve_proposal()     broker.py       status="approved"/"declined"; notifies Condition
-  → propose_shape returns  server.py       {ok, shape_id, status, shape}
+  → register_proposal()    broker.py       status="pending"
+  → propose_shape returns  server.py       {ok, shape_id, status:"pending", shape}  ← immediately
+
+  # Dashboard surface — resurfaceable (M1.5)
+  /api/state               ui_server.py    shape_proposals[].{crew_id, status, mermaid, name, summary} emitted
+  MCTopBar pending-gate-pill  dashboard.html  cross-instance flatMap count badge; click → ShapeGatePanel
+  ShapeGatePanel           dashboard.html  mermaid → renderMermaidBlocks → graphical DAG; survives instance-switch
+
+  # Resolution — either channel (both route through resolve_proposal choke point):
+  resolve_shape(id, dec)   server.py       NEW (M1.5) chat-channel: validate → broker.resolve_proposal()
+  POST /shape-approval     ui_server.py    dashboard path: local resolve OR leader→follower proxy
+
+  → resolve_proposal()     broker.py       pending-only guard → approved/declined; notifies _proposal_condition
+                                           + send({type:"shape_resolved", shape_id, status}) to LEAD_ID  ← M1.5
+  → get_messages() wakes   server.py       lead receives {type:"shape_resolved", shape_id, status}; no polling
+
+# M0-compat opt-in blocking path
+propose_shape(shape_dict, wait=True)
+  → (same parse+register as above)
+  → await_proposal()       broker.py       asyncio.Condition long-poll; returns resolved status
 
 instantiate_shape(shape_id)
   → get_proposal()         broker.py       refuse if status != "approved"
@@ -216,10 +235,13 @@ The `POST /shape-approval/{crew_id}/{shape_id}` route follows the same multi-ins
 
 ### Invariants
 
-- **Shape is the gate**: `instantiate_shape` refuses every non-`approved` status before touching the spawn path. Nothing spawns without a human (or stubbed) approval.
+- **Shape is the gate**: `instantiate_shape` refuses every non-`approved` status before touching the spawn path. Nothing spawns without a human (or stubbed) approval. *(Un-softened in M1.5.)*
 - **All-or-nothing pre-flight**: full node loop accumulates `unresolved` before any `spawn_teammate` call. One bad role → zero teammates spawned.
 - **Single-use**: `status="instantiated"` after a successful spawn; a second `instantiate_shape` call sees `instantiated` and refuses.
 - **XSS-hardened DAG**: mermaid source flows through `mermaid.initialize({securityLevel:'strict'})` + DOMPurify/foreignObject output sanitization already present in `dashboard.html`. No new renderer added.
+- **Single choke-point notify** *(M1.5)*: `broker.resolve_proposal` is the only path that resolves a proposal. It always sends `{type:"shape_resolved", shape_id, status}` to `LEAD_ID` before returning — regardless of which channel (chat or UI) triggered it. No resolution path can complete without waking the lead's `get_messages` loop.
+- **Non-blocking gate / trust-enforced guarantee** *(M1.5)*: `propose_shape(wait=False)` returns `pending` immediately; the lead is free throughout approval. `resolve_shape` is on the lead MCP surface, so the coordinator *can* resolve a gate (including one it proposed). This is an intentional softening from M0's mechanical barrier (UI-only, model can't click). The trust-enforced path is the bridge to M1's trusted/blessed-shape auto-approval.
+- **Resurfaceable gate** *(M1.5)*: pending-gate badge in `MCTopBar` is derived from a cross-instance `flatMap` over all `shape_proposals` filtered to `status === "pending"`; it persists across instance-switch and on modal close; it clears only when a proposal resolves.
 
 ---
 
