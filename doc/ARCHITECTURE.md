@@ -227,7 +227,7 @@ Every `ShapeEdge` carries a `mode` ∈ `{"gated", "tee", "direct"}` (omitted →
 
 `Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. **In M0 the mode is recorded only — no routing behavior changes.** Enforcement of `tee`/`direct`, scoped teammate `send_to`, neighbor injection, and the circuit breaker are **M2** (the next milestone).
 
-> **Naming note — two unrelated "gate" concepts.** The **shape-gate** is the *human-approval checkpoint*: `propose_shape` blocks until a human approves the proposed shape (the dashboard modal is its UI). A **`gated` edge** is a *per-edge routing mode*: messages on it route through the coordinator. Same word, different mechanisms — the shape-gate is a *moment of human approval*; a gated edge is a *property of a connection* between two teammates.
+> **Naming note — two unrelated "gate" concepts.** The **shape-gate** is the *human-approval checkpoint*: `propose_shape` registers a pending proposal that a human must approve — over chat (`resolve_shape`) or the dashboard modal — before the crew can be instantiated (non-blocking since M1.5; `wait=True` retains the M0 blocking path). A **`gated` edge** is a *per-edge routing mode*: messages on it route through the coordinator. Same word, different mechanisms — the shape-gate is a *moment of human approval*; a gated edge is a *property of a connection* between two teammates.
 
 ### Multi-instance shape approval
 
