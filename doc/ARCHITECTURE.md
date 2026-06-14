@@ -1,7 +1,7 @@
 # Architecture: claude-crew
 
 **Created**: 2026-06-09 (harvested from project `CLAUDE.md` + `teammate-death-diagnostics` feature retro)
-**Last Updated**: 2026-06-12
+**Last Updated**: 2026-06-13
 
 claude-crew is a local multi-agent orchestrator. A Claude Code session (the **lead**) drives a crew of Agent-SDK teammates through an MCP server that acts as supervisor, message bus, and observability surface. Teammates can recursively spawn their own subagents.
 
@@ -64,6 +64,20 @@ Single source of truth for team state. Owns the teammate registry, append-only m
 
 Key method: `_tombstone_teammate` — called when a teammate dies. Reads the teammate's final snapshot (step 4), populates death-record fields, calls `_close_open_tools` to abandon in-flight tools (step 6), and serializes the result to the transcript.
 
+**M2 additions** (edge routing + circuit breaker, `m2-edge-routing` 2026-06-13):
+
+| Symbol / Method | Notes |
+|-----------------|-------|
+| `UnauthorizedEdgeError` | Raised by `authorize_send` when no forward edge exists in the active topology for the sender→recipient pair |
+| `EdgeStat` | Frozen dataclass: `from_slot`, `to_slot`, `mode` (effective — honoring `_edge_overrides` and trips), `exchanges` (delivered `tee`/`direct` count), `tripped` (True when auto-tripped by budget, not by `promote_edge`) |
+| `CIRCUIT_BREAKER_MAX_EXCHANGES` | Module constant (`int = 8`): per-directed-edge exchange budget |
+| `BrokerSnapshot.topology_edge_stats` | `tuple[EdgeStat, ...]`; populated by walking `reversed(_topologies)`, one entry per unique `(from_slot, to_slot)` pair (latest topology wins) |
+| `_send_routed(env)` | Routes teammate→teammate messages by resolved mode. `direct` → recipient inbox only. `tee` → recipient inbox + CC envelope `{cc_of, from, to, payload}` to lead. `gated` / no-edge-fallback → wrapper `{gated_for, from, payload}` to lead; original id deduped so no replay on re-deliver. |
+| `_apply_circuit_breaker(env, routing_mode, ts)` | Called for `tee`/`direct` candidates. Increments `_edge_exchanges[(f,t)]`. On budget exceeded: writes `_edge_overrides[(f,t)]="gated"`, adds to `_edge_tripped`, emits `{type:"circuit_breaker", edge, reason:"budget_exceeded"}` to lead, returns `"gated"`. Idempotent. **No deadlock detector** — 2-node pending-flag check removed by coordinator adjudication: "A waits B waits A" is not well-defined at a message-bus level; the budget is the sole runaway guard. |
+| `authorize_send(sender_id, recipient_id)` | No-op for lead; raises `UnauthorizedEdgeError` if no forward edge in active topology |
+| `send_scoped(sender_id, recipient, payload, *, id=None)` | Resolves recipient (slot name / teammate-id / `LEAD_ID`), calls `authorize_send`, then `send()`. **Moat choke-point**: the only broker entry path for non-lead teammate sends |
+| `promote_edge(from_slot, to_slot)` | Sets `_edge_overrides[(from_slot, to_slot)] = "gated"`. Idempotent. Used by `POST /edge-promote` |
+
 ### `claude_crew/teammate.py`
 
 Abstract base class. Defines the inbox-consumption loop, activity tracking (`_begin_turn` / `_end_turn` / `_stamp_activity`), and tool tracking (`_tool_uses` in-flight dict, `_last_tool_completed`). `StubTeammate` is the echo implementation used in tests.
@@ -74,6 +88,8 @@ Production teammate backed by `claude-agent-sdk`. Per-turn loop: pull envelope �
 
 Also owns the **stderr ring buffer subsystem** and **death-site telemetry** — see below.
 
+Also owns the **scoped `send_to` in-process MCP server** (added in `m2-edge-routing` 2026-06-13): each spawned `SdkTeammate` runs a private FastMCP server (`_build_send_to_mcp_server()`) exposing a single `send_to(recipient, message)` tool whose handler calls `broker.send_scoped`. This is the sole channel by which a teammate can address the broker for non-lead sends — see [Edge Routing (M2)](#edge-routing-m2) below.
+
 ### `claude_crew/envelope.py`
 
 Wire format. Fields: `id` (caller-provided UUID for retry safety), `seq` (broker-stamped monotonic), `sender`, `recipient`, `timestamp`, `payload`.
@@ -83,6 +99,8 @@ Wire format. Fields: `id` (caller-provided UUID for retry safety), `seq` (broker
 Selects teammate implementation. `CLAUDE_CREW_TEAMMATE_MODE=stub` → `StubTeammate` (default in tests). `sdk` (default in production) → `SdkTeammate`. SDK mode merges the default subagent pack with `~/.claude/agents/` and project `.claude/agents/`.
 
 The SDK factory attaches read-accessors to itself at build time (same pattern as `factory.startup_diagnostics`). Added in `workflow-shape-composition-m0`: **`factory.known_roles`** — a zero-arg callable returning `tuple(holder.pack.keys())` read live off the merged pack holder. Used by `server.instantiate_shape` pre-flight to enumerate resolvable roles. The stub factory does not set this attribute by default (tests inject it to exercise the all-or-nothing refusal path).
+
+Added in `m2-edge-routing`: **`neighbors=` kwarg threading** — `spawn_teammate` now passes the declared out-neighbor list for a slot through both `stub_factory` and `sdk_factory` / `default_factory`'s inner closure. `StubTeammate` accepts and ignores it. `SdkTeammate` receives the neighbor list and passes it to `build_teammate_prompt` (a "Neighbors" section is injected into the system prompt). **Invariant**: the neighbor list given to each teammate is derived from the same `shape.edges` as the `_send_routed` authorization check — they cannot drift.
 
 ### `claude_crew/transcript.py`
 
@@ -175,11 +193,13 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 
 ---
 
-## Workflow Shape Composition (M0 + M1.5)
+## Workflow Shape Composition (M0 + M1.5 + M2)
 
 **M0** added in `workflow-shape-composition-m0` (2026-06-11) — Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
 
 **M1.5** added in `m1-5-async-shape-gate` (2026-06-12) — Makes the gate **async/non-blocking** (lead stays free during approval; `wait=True` retains the M0 blocking path), adds a **chat-channel approval path** (`resolve_shape` + `list_pending_shapes`, tool count 14→16), **notifies the lead on resolve** via a single choke point in `broker.resolve_proposal`, promotes the gate to a **resurfaceable** `MCTopBar` badge/tray surface in the dashboard (survives instance-switch), and intentionally softens the human-in-the-loop guarantee from *mechanical* to *trust-enforced* (the bridge to M1 trusted-shape auto-approval).
+
+**M2** added in `m2-edge-routing` (2026-06-13) — Makes the approved graph **execute**: edge modes enforced, scoped `send_to` in-process MCP tool, neighbor injection, budget-only circuit breaker, and on-graph dashboard overlay. See [Edge Routing (M2)](#edge-routing-m2) below for full detail.
 
 ### Data flow
 
@@ -217,15 +237,15 @@ instantiate_shape(shape_id)
   → broker.mark_instantiated()  broker.py  approved→instantiated under the broker boundary; single-use guard
 ```
 
-### Edge modes: recorded, not enforced in M0
+### Edge modes: recorded in M0, enforced from M2
 
-Every `ShapeEdge` carries a `mode` ∈ `{"gated", "tee", "direct"}` (omitted → `"gated"`) describing **how messages will flow along that edge between two teammates** once routing goes live in M2:
+Every `ShapeEdge` carries a `mode` ∈ `{"gated", "tee", "direct"}` (omitted → `"gated"`) describing **how messages flow along that edge between two teammates**:
 
-- **`gated`** — the message lands in the **lead/coordinator's inbox first**; the lead approves/forwards. The coordinator is on the wire. *(This is today's behavior and the M0 default — every edge is `gated`.)*
+- **`gated`** — the message lands in the **lead/coordinator's inbox first**; the lead approves/forwards. The coordinator is on the wire. *(M0/M1.5 default — every edge was effectively gated before M2.)*
 - **`tee`** — the message goes **A→B directly**, but the lead gets a **copy** and can interrupt. Coordinator watches, blocks nothing.
 - **`direct`** — the message goes **A→B directly** with no lead turn; the broker still logs / sequences / surfaces it (observable), but the coordinator is not in the loop.
 
-`Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. **In M0 the mode is recorded only — no routing behavior changes.** Enforcement of `tee`/`direct`, scoped teammate `send_to`, neighbor injection, and the circuit breaker are **M2** (the next milestone).
+`Topology.edges` records the mode as `(from_slot, to_slot, mode)` triples verbatim. In M0 the mode was recorded only; from **M2 onwards** `broker._send_routed()` resolves and enforces the mode on every teammate→teammate message. See [Edge Routing (M2)](#edge-routing-m2) below.
 
 > **Naming note — two unrelated "gate" concepts.** The **shape-gate** is the *human-approval checkpoint*: `propose_shape` registers a pending proposal that a human must approve — over chat (`resolve_shape`) or the dashboard modal — before the crew can be instantiated (non-blocking since M1.5; `wait=True` retains the M0 blocking path). A **`gated` edge** is a *per-edge routing mode*: messages on it route through the coordinator. Same word, different mechanisms — the shape-gate is a *moment of human approval*; a gated edge is a *property of a connection* between two teammates.
 
@@ -242,6 +262,72 @@ The `POST /shape-approval/{crew_id}/{shape_id}` route follows the same multi-ins
 - **Single choke-point notify** *(M1.5)*: `broker.resolve_proposal` is the only path that resolves a proposal. It always sends `{type:"shape_resolved", shape_id, status}` to `LEAD_ID` before returning — regardless of which channel (chat or UI) triggered it. No resolution path can complete without waking the lead's `get_messages` loop.
 - **Non-blocking gate / trust-enforced guarantee** *(M1.5)*: `propose_shape(wait=False)` returns `pending` immediately; the lead is free throughout approval. `resolve_shape` is on the lead MCP surface, so the coordinator *can* resolve a gate (including one it proposed). This is an intentional softening from M0's mechanical barrier (UI-only, model can't click). The trust-enforced path is the bridge to M1's trusted/blessed-shape auto-approval.
 - **Resurfaceable gate** *(M1.5)*: pending-gate badge in `MCTopBar` is derived from a cross-instance `flatMap` over all `shape_proposals` filtered to `status === "pending"`; it persists across instance-switch and on modal close; it clears only when a proposal resolves.
+
+---
+
+## Edge Routing (M2)
+
+Added in `m2-edge-routing` (2026-06-13). Makes the `Topology` recorded at `instantiate_shape` time the live **routing rail** for all teammate→teammate messages.
+
+### Routing model
+
+`broker._send_routed(env)` is invoked for every `send()` call where `env.recipient != LEAD_ID` and `env.sender` is a known teammate. It resolves the routing mode via private helpers and dispatches:
+
+| Resolved mode | Behavior |
+|---------------|----------|
+| `direct` | Stamp + log envelope to recipient's inbox. No lead notification. |
+| `tee` | Stamp + log to recipient's inbox; create CC envelope `{cc_of, from, to, payload}` stamped + logged to lead. |
+| `gated` | Deduplicate original id; create wrapper `{gated_for, from, payload}` stamped + logged to lead. Original NOT in recipient inbox, NOT in broker log. |
+| no-edge fallback | Same as `gated`. Applies when the sender has an active topology but no declared edge to the recipient, OR when no topology exists at all. |
+
+**Fallback is always gated**: a message to a non-neighbor (or sent before any topology is recorded) routes as gated — the coordinator stays on the wire until an edge is explicitly declared and approved.
+
+### Circuit breaker (budget-only)
+
+`broker._apply_circuit_breaker(env, routing_mode, ts)` is called for every `tee`/`direct` candidate before routing:
+
+- Increments `_edge_exchanges[(from_slot, to_slot)]`.
+- When the count exceeds `_circuit_breaker_max_exchanges` (default: `CIRCUIT_BREAKER_MAX_EXCHANGES = 8`): writes `_edge_overrides[(f,t)] = "gated"`, adds to `_edge_tripped`, emits `{type:"circuit_breaker", edge:[f,t], reason:"budget_exceeded"}` to lead, returns `"gated"` so the triggering message is rerouted as a gated wrapper.
+- Idempotent: if the edge is already overridden, returns the current mode unchanged.
+
+**No deadlock detector.** The spec-proposed 2-node "both-pending" flag (`_edge_pending`) was removed by coordinator adjudication (Jerome + Kael, 2026-06-13):
+
+> "A waits B waits A" is not well-defined at a message-bus level — the broker cannot distinguish a blocked peer from one that simply hasn't responded yet. Reply-clearing makes the both-pending state unreachable in practice (dead code). Any non-clearing implementation would contradict the reciprocal-peer-conversation contract. **The per-edge exchange budget is the sole runaway guard** — it already force-inserts the lead on a runaway loop.
+
+AT#7 was amended to assert: reciprocal direct exchanges below budget do NOT trip the breaker; only budget-exceeded trips.
+
+### Scoped `send_to` — sole teammate→broker entry
+
+Each `SdkTeammate` spawned with a non-empty `neighbors` list runs a private in-process FastMCP server exposing one tool:
+
+```
+send_to(recipient: str, message: str) → {ok, seq}
+```
+
+The handler calls `broker.send_scoped(sender_id, recipient, {"text": message})`. `send_scoped` resolves the recipient (slot name → teammate-id via active topology, or `LEAD_ID`), calls `authorize_send` (raises `UnauthorizedEdgeError` for non-neighbors), and routes via `send()`.
+
+**This is the moat choke-point**: the only way a teammate can address the broker for non-lead sends. There is no other API surface through which a running teammate can inject messages into the broker's routing engine. The `neighbors` parameter is injected into the teammate's system prompt by `teammate_prompt.build_teammate_prompt` so the model knows which recipients are valid.
+
+### Neighbor injection and authorization coupling
+
+`spawn_teammate` derives the `neighbors=` list for each slot from `shape.edges`: the list of `to_slot` values on edges whose `from_slot` matches the spawned slot. This list is passed through `factories.py` to `SdkTeammate.__init__` and also used to authorize `send_scoped`.
+
+**Invariant**: the neighbor list in the system prompt is derived from the same `shape.edges` record as the `authorize_send` check. They share a single source of truth and cannot drift.
+
+### Dashboard edge observability (M2)
+
+`/api/state` now carries `topology_edge_stats: list[EdgeStat]` per crew instance (sourced from `BrokerSnapshot.topology_edge_stats`; each entry includes `{from_slot, to_slot, mode, exchanges, tripped, crew_id}`).
+
+Two new per-instance endpoints (fully multi-instance proxied via `crew_id`):
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /edge-log/{crew_id}/{from}/{to}` | Returns `{ok, edge, messages}` — the routed-message log for one directed edge |
+| `POST /edge-promote/{crew_id}/{from}/{to}` | Promotes an edge to `gated` via `broker.promote_edge`; returns `{ok, edge, mode:"gated"}` |
+
+Both guarded by `_PATH_PARAM_RE` (`^[A-Za-z0-9_\-]+$`), return 400 on bad param, 502 on proxy failure. Slot→teammate-id resolution walks `reversed(topologies)` (latest topology governs — Assumption #3).
+
+`TopologyEdgePanel` in `dashboard.html` is an on-graph SVG-walk decoration (not a side table): after `mermaid.render()` it walks `svgEl.querySelectorAll('.flowchart-link, path.edge-path')` and decorates each link with per-mode color (direct=green, tee=blue, gated=amber, tripped=red), stroke-width pulse on traffic (widens when `exchanges > prev`, restores via `setTimeout`), and a selected-edge panel showing the message log and a promote-to-gated control. Re-applies after each `mermaid.render` (wired to `useEffect([mermaidSrc, crewId])`). Multi-instance correct: both `fetch` URLs carry `crewId`.
 
 ---
 
