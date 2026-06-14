@@ -54,6 +54,7 @@ def stub_factory(
     extra_skills: list[str] | None = None,
     mcp_servers: list[str] | None = None,
     env: "dict[str, str] | None" = None,
+    neighbors: "list[dict] | None" = None,
 ) -> Teammate:
     # Stub ignores all configuration kwargs — kept for signature uniformity
     # with sdk_factory.
@@ -94,6 +95,7 @@ def sdk_factory(
     extra_skills: list[str] | None = None,
     mcp_servers: list[str] | None = None,
     env: "dict[str, str] | None" = None,
+    neighbors: "list[dict] | None" = None,
 ) -> Teammate:
     from claude_crew.sdk_teammate import SdkTeammate
 
@@ -121,6 +123,8 @@ def sdk_factory(
         kwargs["mcp_servers_grant"] = mcp_servers
     if env is not None:
         kwargs["env"] = env
+    if neighbors is not None:
+        kwargs["neighbors"] = neighbors
     return SdkTeammate(id=id, name=name, role=role, **kwargs)
 
 
@@ -421,6 +425,7 @@ def default_factory(
             extra_skills: list[str] | None = None,
             mcp_servers: list[str] | None = None,
             env: "dict[str, str] | None" = None,
+            neighbors: "list[dict] | None" = None,
         ) -> Teammate:
             # Read holder fields live at call time (not captured at closure build).
             current_pack = holder.pack
@@ -516,6 +521,7 @@ def default_factory(
                 extra_tools=extra_tools,
                 mcp_servers=mcp_servers,
                 env=env,
+                neighbors=neighbors,
             )
 
         factory.requires_auth = True  # type: ignore[attr-defined]

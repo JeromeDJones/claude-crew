@@ -1552,6 +1552,220 @@
       );
     }
 
+    // --- TopologyEdgePanel (M2 on-graph edge overlay) ---
+    // Renders the active topology as a mermaid graph TD, then walks the
+    // SVG's .flowchart-link / edge-path elements post-render (mermaid v11
+    // edge classes, same as the artifact-md thickening rule) and decorates:
+    //   direct → green  |  tee → blue  |  gated → amber  |  tripped → red
+    //   pulse on exchanges increment  |  click → edge-log popup
+    //   promote control via POST /edge-promote (multi-instance crew_id aware)
+    // Re-applies on every edgeStats change: mermaid regenerates the SVG each
+    // render so decoration must re-run after every render (same contract as
+    // the foreignObject legibility fix in renderMermaidBlocks).
+    function TopologyEdgePanel({ edgeStats, crewId }) {
+      const containerRef = useRef(null);
+      const prevExchangesRef = useRef({});
+      const [selectedEdge, setSelectedEdge] = useState(null);
+      const [edgeLog, setEdgeLog] = useState(null);
+      const [promoteKey, setPromoteKey] = useState(null);
+
+      // Build deterministic mermaid source. Edges are ordered the same as
+      // edgeStats so that the i-th .flowchart-link in the rendered SVG maps
+      // to edgeStats[i] — no brittle ID parsing needed.
+      const edgeStatsKey = JSON.stringify(edgeStats);
+      const mermaidSrc = React.useMemo(() => {
+        if (!edgeStats || edgeStats.length === 0) return null;
+        const lines = ['graph TD'];
+        edgeStats.forEach(es => {
+          const badge = es.tripped ? '⚡' : es.exchanges > 0 ? String(es.exchanges) : '';
+          // Slot names are identifiers; label carries mode+count.
+          lines.push(`  ${es.from_slot}-->|"${es.mode}${badge}"|${es.to_slot}`);
+        });
+        return lines.join('\n');
+      }, [edgeStatsKey]);
+
+      // Re-render mermaid + apply decoration whenever edgeStats changes.
+      // Mirrors renderMermaidBlocks: mermaid.render → DOMPurify → insert SVG
+      // → walk .flowchart-link elements → apply style + onclick.
+      useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+        if (!mermaidSrc) { container.innerHTML = ''; return; }
+
+        let cancelled = false;
+        const uid = 'edge-topo-' + crypto.randomUUID().replace(/-/g, '');
+
+        mermaid.render(uid, mermaidSrc).then(({ svg }) => {
+          if (cancelled || !containerRef.current) return;
+
+          // Same DOMPurify config as renderMermaidBlocks — allow foreignObject
+          // for mermaid node labels; forbid script/event-handlers.
+          const holder = document.createElement('div');
+          holder.innerHTML = DOMPurify.sanitize(svg, {
+            USE_PROFILES: { svg: true, svgFilters: true },
+            ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br', 'style'],
+            ADD_ATTR: ['style', 'class', 'xmlns'],
+            FORBID_TAGS: ['script', 'image', 'a', 'iframe', 'object', 'embed'],
+            FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur'],
+          });
+          const svgEl = holder.querySelector('svg');
+          if (!svgEl) return;
+          svgEl.style.width = '100%';
+          svgEl.style.height = 'auto';
+          svgEl.style.overflow = 'visible';
+          containerRef.current.innerHTML = '';
+          containerRef.current.appendChild(svgEl);
+
+          // ── POST-RENDER SVG-WALK DECORATION LAYER ──
+          // Mermaid v11 assigns class .flowchart-link to each directed edge path.
+          // The same class is used for edge-thickening in .artifact-md SVGs (see CSS).
+          // Edge order in the SVG matches source order → edgeStats[i] maps to links[i].
+          const links = svgEl.querySelectorAll('.flowchart-link, path.edge-path');
+          links.forEach((path, i) => {
+            const es = (edgeStats || [])[i];
+            if (!es) return;
+            const key = `${es.from_slot}→${es.to_slot}`;
+            // 1. Per-mode stroke color.
+            const color = es.tripped   ? '#ef4444'   // red   — tripped/gated-by-CB
+              : es.mode === 'gated'    ? '#f59e0b'   // amber — manual gate
+              : es.mode === 'tee'      ? '#3b82f6'   // blue  — observe + deliver
+              : '#22c55e';                            // green — direct
+            path.style.stroke = color;
+            path.style.strokeWidth = es.tripped ? '3px' : '2.5px';
+            path.style.cursor = 'pointer';
+            path.style.transition = 'stroke-width 0.35s ease';
+            // 2. Animation pulse when exchange count increments since last render.
+            const prev = prevExchangesRef.current[key];
+            if (prev !== undefined && es.exchanges > prev) {
+              path.style.strokeWidth = '6px';
+              setTimeout(() => {
+                if (path.isConnected) path.style.strokeWidth = es.tripped ? '3px' : '2.5px';
+              }, 550);
+            }
+            // 3. Click hit-testing → fetch GET /edge-log (multi-instance: use crewId).
+            path.addEventListener('click', () => {
+              setSelectedEdge(es);
+              setEdgeLog({ loading: true, messages: null, error: null });
+              fetch(`/edge-log/${crewId}/${es.from_slot}/${es.to_slot}`)
+                .then(r => r.json())
+                .then(d => setEdgeLog({ loading: false, messages: d.messages, error: null }))
+                .catch(() => setEdgeLog({ loading: false, messages: null, error: 'fetch failed' }));
+            });
+          });
+
+          // Update prev-exchanges ref for next-cycle pulse detection.
+          const next = {};
+          (edgeStats || []).forEach(es => {
+            next[`${es.from_slot}→${es.to_slot}`] = es.exchanges;
+          });
+          prevExchangesRef.current = next;
+        }).catch(() => {});  // ignore mermaid parse errors (e.g. slot names with spaces)
+
+        return () => { cancelled = true; };
+      }, [mermaidSrc, crewId]);
+
+      // 4. Promote-to-gated control: POST /edge-promote (multi-instance aware).
+      const promoteEdge = (es) => {
+        const key = `${es.from_slot}→${es.to_slot}`;
+        setPromoteKey(key);
+        fetch(`/edge-promote/${crewId}/${es.from_slot}/${es.to_slot}`, { method: 'POST' })
+          .then(r => r.json())
+          .then(() => {
+            setPromoteKey(null);
+            // Refresh log after promote so the panel reflects the gated state.
+            fetch(`/edge-log/${crewId}/${es.from_slot}/${es.to_slot}`)
+              .then(r => r.json())
+              .then(d => setEdgeLog({ loading: false, messages: d.messages, error: null }))
+              .catch(() => {});
+          })
+          .catch(() => setPromoteKey(null));
+      };
+
+      if (!edgeStats || edgeStats.length === 0) return null;
+
+      const EDGE_COLORS = [
+        ['direct', '#22c55e'], ['tee', '#3b82f6'],
+        ['gated', '#f59e0b'], ['tripped', '#ef4444'],
+      ];
+
+      return (
+        <div style={{ padding: '10px 16px', borderTop: '1px solid var(--line)' }}>
+          <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase',
+            letterSpacing: '0.06em', color: 'var(--fg-2)', marginBottom: 6 }}>
+            Edge Routing
+          </div>
+          {/* Mermaid topology container — SVG-walk decoration applied post-render */}
+          <div ref={containerRef} />
+          {/* Mode legend */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+            {EDGE_COLORS.map(([lbl, clr]) => (
+              <span key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 3,
+                fontSize: 9.5, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>
+                <span style={{ width: 14, height: 2, background: clr,
+                  display: 'inline-block', borderRadius: 1 }}/>
+                {lbl}
+              </span>
+            ))}
+          </div>
+          {/* Selected-edge panel: edge-log messages + promote control */}
+          {selectedEdge && (
+            <div style={{ marginTop: 8, padding: '8px 10px', background: 'var(--bg-0)',
+              border: '1px solid var(--line)', borderRadius: 4, fontSize: 11 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between',
+                alignItems: 'flex-start', marginBottom: 5 }}>
+                <div>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 11.5 }}>
+                    {selectedEdge.from_slot} → {selectedEdge.to_slot}
+                  </span>
+                  <span style={{ color: 'var(--fg-3)', marginLeft: 6, fontSize: 10 }}>
+                    {selectedEdge.mode}{selectedEdge.tripped ? ' ⚡' : ''} · {selectedEdge.exchanges}x
+                  </span>
+                </div>
+                <button onClick={() => setSelectedEdge(null)} style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'var(--fg-3)', fontSize: 13, padding: '0 2px', lineHeight: 1 }}>✕</button>
+              </div>
+              {/* Promote control — visible for non-gated, non-tripped edges only */}
+              {selectedEdge.mode !== 'gated' && !selectedEdge.tripped && (
+                <button
+                  onClick={() => promoteEdge(selectedEdge)}
+                  disabled={promoteKey === `${selectedEdge.from_slot}→${selectedEdge.to_slot}`}
+                  style={{ padding: '3px 10px', fontSize: 10.5, marginBottom: 6,
+                    background: '#92400e', color: '#fff7ed', border: 'none',
+                    borderRadius: 3, cursor: 'pointer', fontWeight: 600,
+                    opacity: promoteKey ? 0.65 : 1 }}>
+                  {promoteKey === `${selectedEdge.from_slot}→${selectedEdge.to_slot}`
+                    ? 'Promoting…' : 'Promote to gated'}
+                </button>
+              )}
+              {/* Message log (last 10, newest last) */}
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10,
+                maxHeight: 130, overflowY: 'auto' }}>
+                {edgeLog?.loading && <div style={{ color: 'var(--fg-3)' }}>Loading…</div>}
+                {edgeLog?.error   && <div style={{ color: '#ef4444' }}>{edgeLog.error}</div>}
+                {edgeLog?.messages && edgeLog.messages.length === 0 && (
+                  <div style={{ color: 'var(--fg-3)' }}>No messages on this edge yet.</div>
+                )}
+                {edgeLog?.messages && edgeLog.messages.slice(-10).map((m, idx) => (
+                  <div key={idx} style={{ marginBottom: 3, lineHeight: 1.4 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>#{m.seq} </span>
+                    <span style={{ color: 'var(--fg-2)' }}>
+                      {(m.sender||'').slice(0,8)}→{(m.recipient||'').slice(0,8)}:{' '}
+                    </span>
+                    <span style={{ color: 'var(--fg-1)' }}>
+                      {typeof m.payload === 'object'
+                        ? JSON.stringify(m.payload).slice(0, 60)
+                        : String(m.payload||'').slice(0, 60)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // --- MiniGraph ---
     function MiniGraph({ cli, agents }) {
       const W = 290, H = 320;
@@ -1618,6 +1832,8 @@
               <span>uptime</span><span className="mono" style={{ color: "var(--fg-0)" }}>{fmtDuration(cli.uptime)}</span>
             </div>
           </div>
+          {/* M2: on-graph edge overlay — mermaid graph TD + SVG-walk decoration layer */}
+          <TopologyEdgePanel edgeStats={cli.topology_edge_stats} crewId={cli.id}/>
         </div>
       );
     }

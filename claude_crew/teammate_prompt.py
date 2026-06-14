@@ -41,6 +41,7 @@ NEGATIVE_PATTERNS: tuple[str, ...] = (
 SENTINEL_CONTEXT = "## Operating context"
 SENTINEL_DELEGATION = "## Delegation"
 SENTINEL_MEMORY = "## Memory from prior sessions"
+SENTINEL_NEIGHBORS = "## Crew neighbors"
 
 # Historical note (2026-05-17): SENTINEL_SUBAGENTS / _build_subagent_list
 # were removed. The framework-injected Agent tool description already
@@ -87,16 +88,18 @@ def build_teammate_prompt(
     pack_body: str,
     agents: dict[str, Any],
     memory_section: str | None = None,
+    neighbors: "list[dict] | None" = None,
 ) -> str:
     """Assemble the system prompt for a top-level teammate.
 
     Returns: pack_body + "\\n\\n" + addendum
 
     The addendum contains two ordered sections delimited by SENTINEL_*
-    constants, plus an optional third when memory_section is provided:
+    constants, plus optional sections when memory_section or neighbors provided:
       1. SENTINEL_CONTEXT    — corrects leaf-context language for teammate use
       2. SENTINEL_DELEGATION — delegation heuristic + conditional explorer hint
       3. SENTINEL_MEMORY     — injected when pack declares memory: user (optional)
+      4. SENTINEL_NEIGHBORS  — injected when neighbors is non-empty (M2 edge routing)
 
     The ``role`` argument is kept on the API for backward compatibility and
     future use (e.g., role-scoped memory selection); it is currently
@@ -109,12 +112,19 @@ def build_teammate_prompt(
                 explorer-hint conditional only. Defensive on absent ``explorer``.
         memory_section: pre-built memory section string from
                         teammate_memory.build_memory_section, or None.
+        neighbors: list of neighbor dicts with keys ``direction`` ("out"|"in"),
+                   ``slot``, ``role``, ``mode``.  When non-empty, a
+                   SENTINEL_NEIGHBORS section is appended describing the
+                   teammate's declared out-edges (who it may send_to + mode)
+                   and in-edges (who may message it + mode).
     """
     del role  # retained on the API; unused since subagent-list removal (2026-05-17)
     delegation = _DELEGATION_TEMPLATE.format(explorer_hint=_explorer_hint(agents))
     parts = [_CONTEXT_OVERRIDE, delegation]
     if memory_section is not None:
         parts.append(memory_section)
+    if neighbors:
+        parts.append(_build_neighbors_section(neighbors))
     addendum = "\n\n".join(parts)
     return f"{pack_body.rstrip()}\n\n{addendum}"
 
@@ -140,3 +150,30 @@ def _explorer_hint(agents: dict[str, Any]) -> str:
         "For routine file reads and codebase searches, prefer a read-only subagent"
         " over reading directly."
     )
+
+
+def _build_neighbors_section(neighbors: list[dict]) -> str:
+    """Build the SENTINEL_NEIGHBORS section for a teammate's system prompt.
+
+    Describes the teammate's declared out-edges (slots it may send_to and their
+    mode) and in-edges (slots that may message it and their mode).
+
+    Args:
+        neighbors: list of dicts with keys ``direction`` ("out"|"in"),
+                   ``slot``, ``role``, ``mode``.
+    """
+    out_edges = [n for n in neighbors if n.get("direction") == "out"]
+    in_edges = [n for n in neighbors if n.get("direction") == "in"]
+
+    lines: list[str] = [SENTINEL_NEIGHBORS, ""]
+    if out_edges:
+        lines.append("Out-edges (teammates you may message via `send_to`):")
+        for n in out_edges:
+            lines.append(f"  - `{n['slot']}` (role: {n['role']}, mode: {n['mode']})")
+    if in_edges:
+        if out_edges:
+            lines.append("")
+        lines.append("In-edges (teammates that may message you):")
+        for n in in_edges:
+            lines.append(f"  - `{n['slot']}` (role: {n['role']}, mode: {n['mode']})")
+    return "\n".join(lines)

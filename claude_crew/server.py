@@ -954,8 +954,28 @@ def make_server(
         crew: list[dict[str, str]] = []
         slot_to_teammate: dict[str, str] = {}
 
+        # Pre-compute per-node adjacency for neighbor injection into the system prompt.
+        # Maps slot → role for resolving neighbor roles from edge endpoints.
+        _slot_to_role: dict[str, str] = {node.slot: node.role for node in shape.nodes}
+        # Build per-slot neighbor lists: out-edges (this slot sends to neighbor)
+        # and in-edges (neighbor sends to this slot).
+        _node_neighbors: dict[str, list[dict]] = {node.slot: [] for node in shape.nodes}
+        for _edge in shape.edges:
+            _from, _to, _mode = _edge.from_slot, _edge.to_slot, _edge.mode
+            _to_role = _slot_to_role.get(_to, _to)
+            _from_role = _slot_to_role.get(_from, _from)
+            if _from in _node_neighbors:
+                _node_neighbors[_from].append(
+                    {"direction": "out", "slot": _to, "role": _to_role, "mode": _mode}
+                )
+            if _to in _node_neighbors:
+                _node_neighbors[_to].append(
+                    {"direction": "in", "slot": _from, "role": _from_role, "mode": _mode}
+                )
+
         try:
             for node in shape.nodes:
+                _neighbors = _node_neighbors.get(node.slot) or None
                 tid = await broker.spawn_teammate(
                     role=node.role,
                     name=node.slot,
@@ -964,6 +984,7 @@ def make_server(
                     extra_tools=list(node.extra_tools or ()) or None,
                     extra_skills=list(node.extra_skills or ()) or None,
                     cwd=node.cwd,
+                    neighbors=_neighbors,
                 )
                 crew.append({"slot": node.slot, "teammate_id": tid, "role": node.role})
                 slot_to_teammate[node.slot] = tid

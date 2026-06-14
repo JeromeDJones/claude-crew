@@ -454,6 +454,21 @@ class UIServer:
                 }
                 for p in snapshot.shape_proposals
             ],
+            # M2 edge observability: per-directed-edge stats for the on-graph
+            # overlay. crew_id is load-bearing (multi-instance rule): the leader
+            # must proxy /edge-log and /edge-promote to the owning follower when
+            # crew_id != self._own_crew_id().
+            "topology_edge_stats": [
+                {
+                    "from_slot": es.from_slot,
+                    "to_slot": es.to_slot,
+                    "mode": es.mode,
+                    "exchanges": es.exchanges,
+                    "tripped": es.tripped,
+                    "crew_id": snapshot.crew_id,
+                }
+                for es in snapshot.topology_edge_stats
+            ],
         }
         return instance, messages
 
@@ -917,6 +932,200 @@ class UIServer:
         except Exception:
             return JSONResponse({"error": "bad_gateway"}, status_code=502)
 
+    # ── M2 edge observability endpoints ──────────────────────────────────────
+
+    async def _handle_edge_log(self, request: Request) -> JSONResponse:
+        """GET /edge-log/{crew_id}/{from_slot}/{to_slot} — fetch message log for a directed edge.
+
+        Multi-instance aware: routes locally when crew_id == own crew, else
+        proxies leader→follower via _proxy_edge_log (mirrors _handle_artifact).
+
+        Returns:
+            200  {ok, edge:[from,to], messages:[...]}  — success
+            400  {error: "invalid_param"}              — bad path param
+            404  {error: "not_found"}                  — unknown crew_id (proxy path)
+            500  {error: "internal_error"}              — unexpected exception
+            502  {error: "bad_gateway"}                 — proxy failed
+        """
+        try:
+            crew_id = request.path_params["crew_id"]
+            from_slot = request.path_params["from_slot"]
+            to_slot = request.path_params["to_slot"]
+
+            for name, value in (
+                ("crew_id", crew_id),
+                ("from_slot", from_slot),
+                ("to_slot", to_slot),
+            ):
+                if not _PATH_PARAM_RE.match(value):
+                    return JSONResponse(
+                        {"error": "invalid_param", "param": name},
+                        status_code=400,
+                    )
+
+            if crew_id == self._own_crew_id():
+                return self._local_edge_log_response(from_slot, to_slot)
+
+            return await self._proxy_edge_log(crew_id, from_slot, to_slot)
+        except Exception:
+            _logger.exception("edge-log handler error")
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    def _local_edge_log_response(self, from_slot: str, to_slot: str) -> JSONResponse:
+        """Serve edge-log from the local broker snapshot.
+
+        Resolves slot names to teammate IDs via the recorded topologies, then
+        filters the broker log for envelopes on that directed edge (direct
+        delivery) and its gated wrappers / tee cc copies destined for LEAD.
+        """
+        snapshot = self._broker.snapshot(log_limit=0)
+        # Resolve slots → teammate IDs using the most-recent topology that
+        # includes both slots.
+        from_id: str | None = None
+        to_id: str | None = None
+        for topo in reversed(snapshot.topologies):
+            f = topo.slot_to_teammate.get(from_slot)
+            t = topo.slot_to_teammate.get(to_slot)
+            if f is not None and t is not None:
+                from_id = f
+                to_id = t
+                break
+
+        messages: list[dict[str, Any]] = []
+        if from_id is not None and to_id is not None:
+            for env in snapshot.log:
+                if env.sender == from_id and env.recipient == to_id:
+                    # Direct / tee original delivery to recipient.
+                    messages.append({
+                        "id": env.id,
+                        "seq": env.seq,
+                        "sender": env.sender,
+                        "recipient": env.recipient,
+                        "payload": env.payload,
+                    })
+                elif env.sender == from_id and env.recipient == LEAD_ID:
+                    # Gated wrappers (payload.gated_for == to_id) and tee cc
+                    # copies (payload.cc_of present) for this edge.
+                    p = env.payload if isinstance(env.payload, dict) else {}
+                    if p.get("gated_for") == to_id or "cc_of" in p:
+                        messages.append({
+                            "id": env.id,
+                            "seq": env.seq,
+                            "sender": env.sender,
+                            "recipient": env.recipient,
+                            "payload": env.payload,
+                        })
+
+        return JSONResponse({"ok": True, "edge": [from_slot, to_slot], "messages": messages})
+
+    async def _proxy_edge_log(
+        self, crew_id: str, from_slot: str, to_slot: str
+    ) -> JSONResponse:
+        """Proxy an edge-log GET to the instance that owns crew_id.
+
+        Mirror of _proxy_artifact. The follower receives crew_id == its own
+        broker's crew and serves locally (no re-proxy loop). 404 when unknown /
+        not in registry; 502 when registered but unreachable.
+        """
+        if self._registry is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        target = next(
+            (e for e in self._registry.read_all() if e.get("crew_id") == crew_id),
+            None,
+        )
+        if target is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        port = target.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        url = f"http://127.0.0.1:{port}/edge-log/{crew_id}/{from_slot}/{to_slot}"
+        try:
+            resp = await self._http_client.get(url)
+        except Exception:
+            _logger.warning(
+                "edge-log proxy to crew %s (port %s) failed",
+                crew_id, port, exc_info=True,
+            )
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+        try:
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception:
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+
+    async def _handle_edge_promote(self, request: Request) -> JSONResponse:
+        """POST /edge-promote/{crew_id}/{from_slot}/{to_slot} — promote edge to gated.
+
+        Multi-instance aware: routes locally when crew_id == own crew, else
+        proxies leader→follower via _proxy_edge_promote (mirrors _handle_shape_approval).
+
+        Returns:
+            200  {ok, edge:[from,to], mode:"gated"}  — success
+            400  {error: "invalid_param"}             — bad path param
+            404  {error: "not_found"}                 — unknown crew_id (proxy path)
+            500  {error: "internal_error"}             — unexpected exception
+            502  {error: "bad_gateway"}                — proxy failed
+        """
+        try:
+            crew_id = request.path_params["crew_id"]
+            from_slot = request.path_params["from_slot"]
+            to_slot = request.path_params["to_slot"]
+
+            for name, value in (
+                ("crew_id", crew_id),
+                ("from_slot", from_slot),
+                ("to_slot", to_slot),
+            ):
+                if not _PATH_PARAM_RE.match(value):
+                    return JSONResponse(
+                        {"error": "invalid_param", "param": name},
+                        status_code=400,
+                    )
+
+            if crew_id == self._own_crew_id():
+                self._broker.promote_edge(from_slot, to_slot)
+                return JSONResponse(
+                    {"ok": True, "edge": [from_slot, to_slot], "mode": "gated"}
+                )
+
+            return await self._proxy_edge_promote(crew_id, from_slot, to_slot)
+        except Exception:
+            _logger.exception("edge-promote handler error")
+            return JSONResponse({"error": "internal_error"}, status_code=500)
+
+    async def _proxy_edge_promote(
+        self, crew_id: str, from_slot: str, to_slot: str
+    ) -> JSONResponse:
+        """Proxy an edge-promote POST to the instance that owns crew_id.
+
+        Mirror of _proxy_shape_approval. The follower receives crew_id == its
+        own broker's crew and serves locally (no re-proxy loop). 404 when
+        unknown / not in registry; 502 when registered but unreachable.
+        """
+        if self._registry is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        target = next(
+            (e for e in self._registry.read_all() if e.get("crew_id") == crew_id),
+            None,
+        )
+        if target is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        port = target.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        url = f"http://127.0.0.1:{port}/edge-promote/{crew_id}/{from_slot}/{to_slot}"
+        try:
+            resp = await self._http_client.post(url)
+        except Exception:
+            _logger.warning(
+                "edge-promote proxy to crew %s (port %s) failed",
+                crew_id, port, exc_info=True,
+            )
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+        try:
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception:
+            return JSONResponse({"error": "bad_gateway"}, status_code=502)
+
     def _make_app(self) -> Starlette:
         return Starlette(routes=[
             Route("/", self._handle_root),
@@ -927,6 +1136,16 @@ class UIServer:
             Route(
                 "/shape-approval/{crew_id}/{shape_id}",
                 self._handle_shape_approval,
+                methods=["POST"],
+            ),
+            # M2 edge observability
+            Route(
+                "/edge-log/{crew_id}/{from_slot}/{to_slot}",
+                self._handle_edge_log,
+            ),
+            Route(
+                "/edge-promote/{crew_id}/{from_slot}/{to_slot}",
+                self._handle_edge_promote,
                 methods=["POST"],
             ),
             WebSocketRoute("/ws", self._handle_ws),

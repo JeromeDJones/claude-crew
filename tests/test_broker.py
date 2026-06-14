@@ -22,6 +22,7 @@ from claude_crew.broker import (
     LEAD_ID,
     LiveTeammateInfo,
     TeammateAlreadyDeadError,
+    Topology,
     UnknownTeammateError,
 )
 from claude_crew.envelope import Envelope, new_message_id
@@ -1034,10 +1035,21 @@ class TestLeadMessageLongPoll:
         assert 0.1 <= elapsed <= 0.7, f"expected ~0.2 s wake, got {elapsed:.3f} s"
         assert len(broker.get_messages(recipient=LEAD_ID)) == 1
 
-    # SC-5: teammate-to-teammate send does NOT notify the lead Condition
+    # SC-5: teammate-to-teammate direct-edge send does NOT notify the lead Condition.
+    # M2: under edge routing, only "direct" mode sends bypass LEAD notification.
+    # No-topology sends now gate to LEAD (gated fallback), so this test sets up
+    # a direct edge to preserve the SC-5 invariant for the M2 world.
     async def test_teammate_send_does_not_wake_lead_poll(self, broker: Broker) -> None:
         a = await broker.spawn_teammate(role="r", name=None, factory=_factory)
         b_id = await broker.spawn_teammate(role="r", name=None, factory=_factory)
+
+        # M2: a direct edge is required so the send bypasses LEAD notification.
+        topo = Topology(
+            shape_name="test",
+            edges=(("a", "b", "direct"),),
+            slot_to_teammate={"a": a, "b": b_id},
+        )
+        broker.record_topology(topo)
 
         async def _teammate_send() -> None:
             await asyncio.sleep(0.05)
@@ -1049,13 +1061,13 @@ class TestLeadMessageLongPoll:
 
         task = asyncio.create_task(_teammate_send())
         start = time.monotonic()
-        # Times out — NOT woken by the teammate-to-teammate send
+        # Times out — NOT woken by a direct-mode teammate-to-teammate send
         await broker.wait_for_lead_message(0.2)  # type: ignore[attr-defined]
         elapsed = time.monotonic() - start
         await task
 
         assert elapsed >= 0.15, (
-            f"lead poll was spuriously woken by a teammate-to-teammate send: {elapsed:.3f} s"
+            f"lead poll was spuriously woken by a direct-edge teammate-to-teammate send: {elapsed:.3f} s"
         )
 
     # SC-7: cancellation does not leave the Condition locked / deadlock subsequent ops

@@ -6,6 +6,33 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-13] Feature: m2-edge-routing — retro findings
+
+Post-retro findings from the `m2-edge-routing` feature (PASS, 1537 full-suite green, 4 tasks, 13 ATs).
+
+### [High, prompt/skill] Green-untestable-deliverable skip pattern — implementor contract missing "deletion-detecting" structural test mandate
+
+- **What**: This failure mode recurred **twice in M2**: (1) `scoped-send-teammate` cycle 0 shipped green ATs 8–10 but omitted the central deliverable — the in-process SDK MCP `send_to` tool — because the green suite had no test covering it (live-SDK integration test deferred); slice-reviewer caught it (High, REQUEST-CHANGES); cycle 1 corrected. (2) Dashboard on-graph SVG overlay (`dashboard.html`) was omitted from a first attempt; coordinator caught on diff inspection. Root cause: implementors conflate "deferred test" with "deferred deliverable."
+- **Where**: `rr-planner` skill prompt and/or `rr-implementor` skill prompt — the contract is missing a mandatory checklist item for this sub-case.
+- **Why it matters**: Two independent implementors in the same feature fell into the same trap. The green suite passed in both cases; only reviewer intervention caught the missing deliverable. Without the pattern being named in the contract, it will recur.
+- **Suggested action**: Add to the planner/implementor contract: *"For every deliverable whose primary verification is deferred (live-SDK, Playwright, manual), the implementor MUST (a) build the deliverable regardless, AND (b) ship at least one green-suite structural test that FAILS if the deliverable is deleted — handler invocation, config-shape assertion, or symbol-exists check."* The `TestSendToToolRegistration` pattern (handler invoked with `SdkTeammate.__new__` + `AsyncMock` broker) is the canonical template for in-process MCP tools. See `m2-edge-routing-debrief-implementor-task-scoped-send-teammate.md` for the full heuristic.
+
+### [Low, process] `taskTouches` under-declaration — test files for touched production modules and factory wiring chain not declared
+
+- **What**: Two `taskTouches` under-declarations adjudicated Info across M2: `tests/test_broker.py` (not declared for `broker-edge-routing`, which necessarily added auth-guard test helpers) and `claude_crew/factories.py` (not declared for `scoped-send-teammate`, where the `neighbors=` kwarg threads through `stub_factory` / `sdk_factory` / `default_factory`). Both legitimate; neither blocked the verdict. Same class as [2026-05-06] startup-diagnostics finding ("`server.py` undeclared when slice introduces factory→broker wiring") — that finding never hardened into a rule.
+- **Where**: `rr-planner` skill prompt — breakout heuristics.
+- **Why it matters**: The gap recurred across two features. The `taskTouches` list feeds the file-footprint/conflict-detection tooling; under-declaration makes collisions invisible to automated gates.
+- **Suggested action**: Add two heuristics to the planner contract: **(a) Test-file co-declaration**: when a task touches `claude_crew/<module>.py`, also declare `tests/test_<module>.py` if it exists; **(b) Factory wiring**: when a task adds a kwarg to `SdkTeammate.__init__` / `Broker.__init__` / any wiring-chain constructor, declare `claude_crew/factories.py` (and `server.py` if it flows through spawn).
+
+### [Low, tooling] Dashboard `links[i]→edgeStats[i]` positional edge mapping — brittle to mermaid reorder
+
+- **What**: `TopologyEdgePanel` in `dashboard.html` decorates mermaid-rendered `.flowchart-link` elements by positional index (`links[i] → edgeStats[i]`). Sound for current `graph TD` shapes — mermaid emits one link per source edge in source order. If a future shape variant causes mermaid to coalesce or reorder edges, per-mode coloring / pulse animation / selected-edge panel would silently skew.
+- **Where**: `claude_crew/ui/dashboard.html` — `TopologyEdgePanel` post-render SVG walk.
+- **Why it matters**: Silent miscoloring of edges would mislead the operator about which edge is direct/tee/gated/tripped. Not a defect today.
+- **Suggested action**: Replace positional `links[i]` with a keyed `(from_slot, to_slot)` lookup matched against `edgeStats` order. Fast-follow; natural fit for a wsc-m1 dashboard polish pass.
+
+---
+
 ## [2026-06-12] Feature: m1-5-async-shape-gate — retro findings
 
 Post-retro findings from the `m1-5-async-shape-gate` feature (PASS, 1461 full-suite green, cycle 0).

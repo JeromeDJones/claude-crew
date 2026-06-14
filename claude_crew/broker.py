@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 
 LEAD_ID = "lead"
 
+# M2: default per-directed-edge exchange budget for the circuit breaker.
+# Override via Broker._circuit_breaker_max_exchanges at construction time or
+# for targeted tests.  8 exchanges per edge is the M2 default; tune per-crew
+# by passing max_exchanges to Broker() once that kwarg is wired in.
+CIRCUIT_BREAKER_MAX_EXCHANGES: int = 8
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +44,10 @@ class UnknownTeammateError(KeyError):
 
 class TeammateAlreadyDeadError(RuntimeError):
     """Raised when attempting to send to a tombstoned (killed/dead) teammate."""
+
+
+class UnauthorizedEdgeError(Exception):
+    """Raised when a teammate's scoped send targets a non-declared recipient."""
 
 
 @dataclass(frozen=True)
@@ -152,6 +162,26 @@ class Topology:
 
 
 @dataclass(frozen=True)
+class EdgeStat:
+    """Per-directed-edge statistics snapshot for the dashboard and circuit breaker.
+
+    ``mode`` is the *effective* routing mode (honors ``_edge_overrides`` and
+    circuit-breaker trips); it may differ from the declared mode in
+    ``Topology.edges`` when the edge has been overridden or promoted.
+
+    ``tripped`` is True when the circuit breaker specifically tripped this edge
+    (as opposed to a manual ``promote_edge`` call, which also sets an override
+    but is operator-initiated rather than auto-triggered).
+    """
+
+    from_slot: str
+    to_slot: str
+    mode: str        # effective mode: "gated" | "tee" | "direct"
+    exchanges: int   # how many tee/direct messages were delivered on this edge
+    tripped: bool    # True when circuit breaker auto-tripped this edge
+
+
+@dataclass(frozen=True)
 class BrokerSnapshot:
     """Frozen, value-copied view of broker state for downstream consumers.
 
@@ -182,6 +212,11 @@ class BrokerSnapshot:
     shape_proposals: "tuple[ShapeProposal, ...]" = ()
     # M0: topologies recorded after successful shape instantiation.
     topologies: "tuple[Topology, ...]" = ()
+    # M2: per-edge exchange stats derived from the active topology/topologies.
+    # Each entry covers one directed (from_slot, to_slot) pair; mode reflects
+    # the effective routing (honoring overrides/trips); tripped=True when the
+    # circuit breaker auto-tripped that edge.
+    topology_edge_stats: "tuple[EdgeStat, ...]" = ()
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -223,6 +258,22 @@ class Broker:
         self._proposal_condition: asyncio.Condition = asyncio.Condition()
         # M0: recorded topologies after successful instantiation.
         self._topologies: list[Topology] = []
+        # M2: per-edge routing overrides. Keys are (from_slot, to_slot) pairs;
+        # values are forced routing modes (currently always "gated") set by the
+        # circuit breaker or promote_edge. Checked before the topology's declared
+        # mode in _edge_mode so overrides take precedence.
+        self._edge_overrides: dict[tuple[str, str], str] = {}
+        # M2 circuit breaker: per-directed-edge exchange counter. Keyed by
+        # (from_slot, to_slot); incremented on every successful tee/direct
+        # delivery before the trip check. Counts the triggering message too.
+        self._edge_exchanges: dict[tuple[str, str], int] = {}
+        # M2 circuit breaker: subset of _edge_overrides that were auto-tripped
+        # by the circuit breaker (as opposed to manual promote_edge calls).
+        # Used to set EdgeStat.tripped=True in the snapshot.
+        self._edge_tripped: set[tuple[str, str]] = set()
+        # Per-edge exchange budget. Default from the module constant; tests may
+        # lower this directly (broker._circuit_breaker_max_exchanges = N).
+        self._circuit_breaker_max_exchanges: int = CIRCUIT_BREAKER_MAX_EXCHANGES
         # Tombstoned teammates: keyed by teammate_id, holds the Teammate object
         # after it's popped from _teammates so get_tool_output can still delegate
         # to it for evicted-but-recently-dead lookups.
@@ -251,6 +302,7 @@ class Broker:
         extra_skills: list[str] | None = None,
         mcp_servers: list[str] | None = None,
         env: "dict[str, str] | None" = None,
+        neighbors: "list[dict] | None" = None,
     ) -> str:
         teammate_id = f"t-{uuid4().hex[:12]}"
         resolved_name = name if name is not None else role
@@ -263,6 +315,8 @@ class Broker:
         }
         if env is not None:
             factory_kwargs["env"] = env
+        if neighbors is not None:
+            factory_kwargs["neighbors"] = neighbors
         teammate = factory(teammate_id, resolved_name, role, **factory_kwargs)
         await teammate.start(self, inbox)
 
@@ -778,6 +832,11 @@ class Broker:
 
         Returns the envelope as enqueued (with broker-assigned seq), or
         ``None`` if it was dropped as a duplicate.
+
+        M2: teammate→teammate sends (both non-LEAD, sender is a live teammate)
+        are routed via the active topology's edge mode (gated/tee/direct).
+        Lead-origin and lead-bound sends short-circuit to the original behavior
+        (unchanged). Internal/broker/dead-sender sends also bypass routing.
         """
         if env.id in self._seen_ids:
             return None
@@ -794,6 +853,12 @@ class Broker:
 
         if env.recipient != LEAD_ID and env.recipient not in self._teammates:
             raise UnknownTeammateError(env.recipient)
+
+        # M2: teammate→teammate routing. Short-circuit for lead-bound (recipient==LEAD)
+        # and lead-origin (sender==LEAD) sends, and for internal/dead-sender sends.
+        # Only live-teammate→live-teammate sends go through edge routing.
+        if env.recipient != LEAD_ID and env.sender in self._teammates:
+            return await self._send_routed(env)
 
         seq = self._next_seq
         self._next_seq += 1
@@ -818,6 +883,187 @@ class Broker:
         else:
             await self._inboxes[stamped.recipient].put(stamped)
         return stamped
+
+    async def _apply_circuit_breaker(
+        self,
+        env: Envelope,
+        routing_mode: str,
+        ts: float,
+    ) -> str:
+        """Update circuit-breaker state and trip the edge if necessary.
+
+        Called for tee/direct routing candidates only. Increments
+        ``_edge_exchanges`` for the (from_slot, to_slot) edge, then checks
+        whether the exchange count exceeds ``_circuit_breaker_max_exchanges``.
+
+        The per-edge exchange budget is the sole trip condition (no deadlock
+        detector — spec amendment, 2026-06-13). Reciprocal ping-pong traffic
+        (a→b→a→b) must stay off the lead while below the budget (AT#10
+        precondition); the budget alone force-inserts the lead on a runaway loop.
+
+        When the budget is exceeded:
+        - ``_edge_overrides[(f,t)]`` is set to ``"gated"`` (idempotent guard).
+        - ``_edge_tripped`` records the edge as auto-tripped.
+        - A control envelope ``{type:"circuit_breaker", edge:[f,t],
+          reason:"budget_exceeded"}`` is emitted to LEAD.
+        - Returns ``"gated"`` so the caller re-routes the triggering message.
+
+        When the budget is not exceeded, returns ``routing_mode`` unchanged.
+
+        Idempotency: if the edge is already in ``_edge_overrides`` (tripped or
+        manually promoted), ``_resolve_routing_mode`` would have returned "gated"
+        and this method would not be called.  The guard on ``_edge_overrides``
+        membership is a belt-and-suspenders defence against any bypass.
+        """
+        topo = self._active_topology_for(env.sender, env.recipient)
+        if topo is None:
+            return routing_mode
+
+        from_slot = self._id_to_slot(topo, env.sender)
+        to_slot = self._id_to_slot(topo, env.recipient)
+        if from_slot is None or to_slot is None:
+            return routing_mode
+
+        forward_key = (from_slot, to_slot)
+
+        # Increment exchange counter (counts the triggering message too).
+        count = self._edge_exchanges.get(forward_key, 0) + 1
+        self._edge_exchanges[forward_key] = count
+
+        # Belt-and-suspenders: edge already overridden by a previous trip or
+        # promote_edge — shouldn't reach here via _resolve_routing_mode but
+        # guard for any direct-call bypass.
+        if forward_key in self._edge_overrides:
+            return routing_mode
+
+        # Budget is the sole trip condition.
+        if count <= self._circuit_breaker_max_exchanges:
+            return routing_mode  # Within budget; normal delivery proceeds.
+
+        # ---- TRIP ----
+        self._edge_overrides[forward_key] = "gated"
+        self._edge_tripped.add(forward_key)
+
+        # Emit circuit-breaker control envelope to LEAD.
+        ctrl_seq = self._next_seq
+        self._next_seq += 1
+        ctrl = Envelope(
+            id=new_message_id(),
+            seq=ctrl_seq,
+            sender="broker",
+            recipient=LEAD_ID,
+            timestamp=ts,
+            payload={
+                "type": "circuit_breaker",
+                "edge": [from_slot, to_slot],
+                "reason": "budget_exceeded",
+            },
+        )
+        self._seen_ids.add(ctrl.id)
+        self._log.append(ctrl)
+        self._sink.write_envelope(ctrl.to_dict())
+        async with self._lead_message_condition:
+            self._lead_message_condition.notify_all()
+
+        # Signal to the caller to re-route the triggering message as "gated".
+        return "gated"
+
+    async def _send_routed(self, env: Envelope) -> Envelope | None:
+        """Apply per-edge routing for teammate→teammate sends (M2).
+
+        Routing modes:
+          gated   → lead-bound wrapper {gated_for, from, payload} to LEAD;
+                    original NOT delivered to recipient inbox and NOT in _log.
+                    Original id still added to _seen_ids for dedup.
+          tee     → original delivered to recipient inbox AND cc envelope
+                    {cc_of, from, to, payload} to LEAD; both in _log.
+          direct  → original delivered to recipient inbox; in _log; no LEAD notify.
+          fallback (no edge / no topology) → same as gated.
+
+        Circuit breaker (M2): on tee/direct modes, ``_apply_circuit_breaker``
+        is called first.  If it trips the edge it returns ``"gated"`` and the
+        triggering message is re-routed to LEAD; a separate control envelope
+        is also emitted to LEAD by the helper.
+        """
+        routing_mode = self._resolve_routing_mode(env.sender, env.recipient)
+        ts = env.timestamp if env.timestamp else time.time()
+
+        # Apply circuit breaker before tee/direct delivery.  A trip converts
+        # routing_mode to "gated" so the triggering message lands on LEAD.
+        if routing_mode in ("direct", "tee"):
+            routing_mode = await self._apply_circuit_breaker(env, routing_mode, ts)
+
+        if routing_mode == "direct":
+            seq = self._next_seq
+            self._next_seq += 1
+            stamped = Envelope(
+                id=env.id, seq=seq, sender=env.sender, recipient=env.recipient,
+                timestamp=ts, payload=env.payload,
+            )
+            self._seen_ids.add(stamped.id)
+            self._log.append(stamped)
+            self._sink.write_envelope(stamped.to_dict())
+            await self._inboxes[stamped.recipient].put(stamped)
+            return stamped
+
+        elif routing_mode == "tee":
+            # Deliver original to recipient inbox AND a derived cc to LEAD.
+            # Both are appended to _log.
+            seq = self._next_seq
+            self._next_seq += 1
+            stamped = Envelope(
+                id=env.id, seq=seq, sender=env.sender, recipient=env.recipient,
+                timestamp=ts, payload=env.payload,
+            )
+            self._seen_ids.add(stamped.id)
+            self._log.append(stamped)
+            self._sink.write_envelope(stamped.to_dict())
+            await self._inboxes[stamped.recipient].put(stamped)
+
+            # Derived cc envelope to LEAD (new id so it has its own dedup slot)
+            cc_seq = self._next_seq
+            self._next_seq += 1
+            cc_id = new_message_id()
+            cc = Envelope(
+                id=cc_id, seq=cc_seq, sender=env.sender, recipient=LEAD_ID,
+                timestamp=ts,
+                payload={
+                    "cc_of": stamped.id,
+                    "from": env.sender,
+                    "to": env.recipient,
+                    "payload": env.payload,
+                },
+            )
+            self._seen_ids.add(cc.id)
+            self._log.append(cc)
+            self._sink.write_envelope(cc.to_dict())
+            async with self._lead_message_condition:
+                self._lead_message_condition.notify_all()
+            return stamped
+
+        else:
+            # gated or no-edge fallback: lead-bound wrapper; NOT to recipient inbox.
+            # Mark original id as seen (dedup) without logging the original.
+            self._seen_ids.add(env.id)
+
+            wrapper_seq = self._next_seq
+            self._next_seq += 1
+            wrapper_id = new_message_id()
+            wrapper = Envelope(
+                id=wrapper_id, seq=wrapper_seq, sender=env.sender, recipient=LEAD_ID,
+                timestamp=ts,
+                payload={
+                    "gated_for": env.recipient,
+                    "from": env.sender,
+                    "payload": env.payload,
+                },
+            )
+            self._seen_ids.add(wrapper.id)
+            self._log.append(wrapper)
+            self._sink.write_envelope(wrapper.to_dict())
+            async with self._lead_message_condition:
+                self._lead_message_condition.notify_all()
+            return wrapper
 
     async def broadcast(
         self,
@@ -955,6 +1201,26 @@ class Broker:
                 if cfg is not None:
                     dead_configs[info.id] = cfg
 
+        # M2: build topology_edge_stats from all recorded topologies.
+        # Walk in reverse order so later topologies take precedence when the
+        # same (from_slot, to_slot) pair appears in multiple topologies.
+        edge_stats: list[EdgeStat] = []
+        seen_edge_keys: set[tuple[str, str]] = set()
+        for topo in reversed(self._topologies):
+            for f_slot, t_slot, _declared_mode in topo.edges:
+                key = (f_slot, t_slot)
+                if key in seen_edge_keys:
+                    continue
+                seen_edge_keys.add(key)
+                effective_mode = self._edge_mode(topo, f_slot, t_slot) or _declared_mode
+                edge_stats.append(EdgeStat(
+                    from_slot=f_slot,
+                    to_slot=t_slot,
+                    mode=effective_mode,
+                    exchanges=self._edge_exchanges.get(key, 0),
+                    tripped=key in self._edge_tripped,
+                ))
+
         return BrokerSnapshot(
             crew_id=self.crew_id,
             teammates=teammates_tuple,
@@ -965,6 +1231,7 @@ class Broker:
             startup_diagnostics=self._startup_diagnostics,
             shape_proposals=tuple(self._proposals.values()),
             topologies=tuple(self._topologies),
+            topology_edge_stats=tuple(edge_stats),
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:
@@ -1196,6 +1463,148 @@ class Broker:
     def get_topologies(self) -> "tuple[Topology, ...]":
         """Return all recorded topologies as an immutable tuple."""
         return tuple(self._topologies)
+
+    # ---------- M2 edge routing (helpers) ----------
+
+    def _active_topology_for(
+        self, sender_id: str, recipient_id: str
+    ) -> "Topology | None":
+        """Return the latest recorded Topology whose slot_to_teammate contains
+        BOTH sender_id and recipient_id; else None.
+
+        "Latest" = last element in _topologies that satisfies the predicate.
+        """
+        for topo in reversed(self._topologies):
+            vals = topo.slot_to_teammate.values()
+            if sender_id in vals and recipient_id in vals:
+                return topo
+        return None
+
+    def _id_to_slot(self, topo: "Topology", teammate_id: str) -> "str | None":
+        """Reverse-map a teammate_id to its slot name in this topology."""
+        for slot, tid in topo.slot_to_teammate.items():
+            if tid == teammate_id:
+                return slot
+        return None
+
+    def _edge_mode(
+        self, topo: "Topology", from_slot: str, to_slot: str
+    ) -> "str | None":
+        """Return the routing mode for the forward edge (from_slot→to_slot).
+
+        Checks _edge_overrides first (circuit-breaker / promote_edge results)
+        then falls back to the declared mode in topo.edges. Returns None when
+        no such forward edge exists.
+        """
+        override = self._edge_overrides.get((from_slot, to_slot))
+        if override is not None:
+            return override
+        for f, t, mode in topo.edges:
+            if f == from_slot and t == to_slot:
+                return mode
+        return None
+
+    def _resolve_routing_mode(self, sender_id: str, recipient_id: str) -> str:
+        """Resolve the effective routing mode for a teammate→teammate send.
+
+        Returns "gated", "tee", or "direct". Falls back to "gated" when no
+        active topology contains both endpoints, or no forward edge is declared.
+        """
+        topo = self._active_topology_for(sender_id, recipient_id)
+        if topo is None:
+            return "gated"
+        sender_slot = self._id_to_slot(topo, sender_id)
+        recipient_slot = self._id_to_slot(topo, recipient_id)
+        if sender_slot is None or recipient_slot is None:
+            return "gated"
+        mode = self._edge_mode(topo, sender_slot, recipient_slot)
+        return mode if mode is not None else "gated"
+
+    def _resolve_scoped_recipient(
+        self, sender_id: str, recipient: str
+    ) -> str:
+        """Resolve a send_scoped recipient to a concrete teammate_id.
+
+        Accepts slot name, teammate_id (alive or tombstoned), or LEAD_ID.
+        Raises UnauthorizedEdgeError when the recipient cannot be resolved.
+        """
+        if recipient == LEAD_ID:
+            return LEAD_ID
+        # Known teammate_id (alive or tombstoned in _info)
+        if recipient in self._info:
+            return recipient
+        # Try as slot name in the latest topology containing sender_id
+        for topo in reversed(self._topologies):
+            if sender_id in topo.slot_to_teammate.values():
+                if recipient in topo.slot_to_teammate:
+                    return topo.slot_to_teammate[recipient]
+        raise UnauthorizedEdgeError(
+            f"cannot resolve recipient {recipient!r} for sender {sender_id!r}"
+        )
+
+    # ---------- M2 edge routing (public API) ----------
+
+    def authorize_send(self, sender_id: str, recipient_id: str) -> None:
+        """Authorize a directed send from sender_id to recipient_id.
+
+        No-op when recipient_id == LEAD_ID (lead is always reachable).
+        Else raises UnauthorizedEdgeError unless a forward edge
+        (sender_slot→recipient_slot) exists in the active topology.
+        """
+        if recipient_id == LEAD_ID:
+            return
+        topo = self._active_topology_for(sender_id, recipient_id)
+        if topo is None:
+            raise UnauthorizedEdgeError(
+                f"no active topology containing both {sender_id!r} and {recipient_id!r}"
+            )
+        sender_slot = self._id_to_slot(topo, sender_id)
+        recipient_slot = self._id_to_slot(topo, recipient_id)
+        if sender_slot is None or recipient_slot is None:
+            raise UnauthorizedEdgeError(
+                f"could not resolve slots for {sender_id!r}→{recipient_id!r}"
+            )
+        if self._edge_mode(topo, sender_slot, recipient_slot) is None:
+            raise UnauthorizedEdgeError(
+                f"no forward edge {sender_slot!r}→{recipient_slot!r} in active topology"
+            )
+
+    async def send_scoped(
+        self,
+        sender_id: str,
+        recipient: str,
+        payload: Any,
+        *,
+        id: str | None = None,
+    ) -> "Envelope | None":
+        """Send from sender_id to recipient with topology-based authorization.
+
+        recipient may be a slot name OR teammate_id OR LEAD_ID.
+        Slot names are resolved to teammate_ids via the active topology.
+        Calls authorize_send before enqueuing — raises UnauthorizedEdgeError
+        when the recipient is not a declared out-edge neighbor of sender.
+        On success, builds an Envelope and calls send().
+        """
+        resolved = self._resolve_scoped_recipient(sender_id, recipient)
+        self.authorize_send(sender_id, resolved)
+        env = Envelope(
+            id=id if id is not None else new_message_id(),
+            seq=0,
+            sender=sender_id,
+            recipient=resolved,
+            timestamp=time.time(),
+            payload=payload,
+        )
+        return await self.send(env)
+
+    def promote_edge(self, from_slot: str, to_slot: str) -> None:
+        """Force an edge to 'gated' (operator steps back onto it).
+
+        Sets _edge_overrides[(from_slot, to_slot)] = 'gated'. Idempotent —
+        already-gated overrides are silently overwritten with the same value.
+        Unknown edges record a harmless override (no edge ever matches it).
+        """
+        self._edge_overrides[(from_slot, to_slot)] = "gated"
 
     def get_tool_output(self, teammate_id: str, tool_use_id: str) -> "str | None":
         """Return the stored tool output for the given (teammate_id, tool_use_id) pair.
