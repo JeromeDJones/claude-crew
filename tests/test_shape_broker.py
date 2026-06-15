@@ -1,8 +1,10 @@
-"""Broker proposal state machine and topology recording — ATs 5, 6, 7.
+"""Broker proposal state machine and topology recording — ATs 1, 5, 6, 7, 9.
 
+AT1: BrokerSnapshot.topology_slot_to_teammate aggregated from recorded topologies.
 AT5: register_proposal → resolve_proposal("approve"|"decline") updates status.
 AT6: await_proposal unblocks when resolve_proposal fires; times out otherwise.
 AT7: record_topology surfaces in broker.snapshot().topologies with edges + map intact.
+AT9: multi-topology last-write-wins merge for topology_slot_to_teammate.
 
 Hardening tests:
 - Fix 1: resolve_proposal source-state guard (cannot re-resolve a terminal proposal).
@@ -441,6 +443,75 @@ async def test_no_notify_before_resolve(broker: Broker) -> None:
         and m.payload.get("shape_id") == shape_id
     ]
     assert len(shape_resolved) == 0
+
+
+# ---------------------------------------------------------------------------
+# AT1 — BrokerSnapshot.topology_slot_to_teammate (AC-6 broker field)
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_slot_to_teammate_single_topology(broker: Broker) -> None:
+    """AT1 (AC-6 broker field): single topology — snapshot carries its slot map."""
+    topology = Topology(
+        shape_name="at1-shape",
+        edges=(("planner", "impl", "direct"),),
+        slot_to_teammate={"planner": "tid-1", "impl": "tid-2"},
+    )
+    broker.record_topology(topology)
+
+    snap = broker.snapshot()
+    assert snap.topology_slot_to_teammate == {"planner": "tid-1", "impl": "tid-2"}
+
+
+async def test_snapshot_slot_to_teammate_empty_when_no_topologies(broker: Broker) -> None:
+    """AT1 (AC-6 broker field, zero case): no topologies → empty map."""
+    snap = broker.snapshot()
+    assert snap.topology_slot_to_teammate == {}
+
+
+# ---------------------------------------------------------------------------
+# AT9 — multi-topology last-write-wins merge (AC-6 multi-topology)
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_slot_to_teammate_last_write_wins(broker: Broker) -> None:
+    """AT9 (AC-6 multi-topology): second topology's slot value wins on collision."""
+    t1 = Topology(
+        shape_name="shape-first",
+        edges=(("impl", "rev", "direct"),),
+        slot_to_teammate={"impl": "tid-old"},
+    )
+    t2 = Topology(
+        shape_name="shape-second",
+        edges=(("impl", "rev", "tee"),),
+        slot_to_teammate={"impl": "tid-new"},
+    )
+    broker.record_topology(t1)
+    broker.record_topology(t2)
+
+    snap = broker.snapshot()
+    assert snap.topology_slot_to_teammate["impl"] == "tid-new"
+
+
+async def test_snapshot_slot_to_teammate_non_collision_slots_merged(
+    broker: Broker,
+) -> None:
+    """AT9 (multi-topology): non-colliding slots from both topologies appear."""
+    t1 = Topology(
+        shape_name="shape-a",
+        edges=(),
+        slot_to_teammate={"planner": "tid-p"},
+    )
+    t2 = Topology(
+        shape_name="shape-b",
+        edges=(),
+        slot_to_teammate={"implementor": "tid-i"},
+    )
+    broker.record_topology(t1)
+    broker.record_topology(t2)
+
+    snap = broker.snapshot()
+    assert snap.topology_slot_to_teammate == {"planner": "tid-p", "implementor": "tid-i"}
 
 
 async def test_second_resolve_produces_no_extra_notify(broker: Broker) -> None:
