@@ -33,8 +33,65 @@
       --st-done:     oklch(0.57 0.15 150);
       --st-error:    oklch(0.53 0.18 25);
 
+      /* Topology edge mode tokens — used by the unified TopologyGraph
+         (replaces M2 TopologyEdgePanel inline hex). Reused by the deletion-
+         detector Playwright test which asserts the computed stroke against
+         these tokens. */
+      --edge-direct:  #22c55e;
+      --edge-tee:     #3b82f6;
+      --edge-gated:   #f59e0b;
+      --edge-tripped: #ef4444;
+
       --font-sans: 'Inter', system-ui, sans-serif;
       --font-mono: 'Geist Mono', 'Fira Code', monospace;
+    }
+
+    /* === Unified TopologyGraph — node card styles ===
+       Renders inside mermaid <foreignObject> labels. The slot/role label is
+       row1; the 8-char teammate-id is row2 (empty for the lead node and for
+       roster nodes whose slot label IS the id). Border colour + 1.6s pulse
+       encode the activity layer; per-mode edge stroke (set inline via
+       window.mapEdgeStatsToPaths) encodes the routing layer. */
+    .nodecard {
+      display: inline-flex; flex-direction: column;
+      padding: 6px 10px 5px;
+      background: var(--bg-1);
+      border: 2px solid var(--line);
+      border-radius: 6px;
+      min-width: 86px;
+      font-family: var(--font-sans);
+    }
+    .nodecard.thinking { border-color: var(--st-thinking); animation: borderpulse 1.6s ease-in-out infinite; --pulse-color: oklch(0.62 0.15 75 / 0.30); }
+    .nodecard.tool     { border-color: var(--st-tool);     animation: borderpulse 1.6s ease-in-out infinite; --pulse-color: oklch(0.55 0.16 290 / 0.30); }
+    .nodecard.waiting  { border-color: var(--st-waiting); }
+    .nodecard.idle     { border-color: var(--line); }
+    .nodecard.lead     { border-color: var(--accent-line); background: var(--bg-2); }
+    .nodecard .row1 {
+      display: flex; align-items: center; gap: 6px;
+      font-weight: 600; font-size: 12px; color: var(--fg-0);
+      font-family: var(--font-mono);
+    }
+    .nodecard .ndot {
+      width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    }
+    .nodecard.thinking .ndot { background: var(--st-thinking); }
+    .nodecard.tool     .ndot { background: var(--st-tool); }
+    .nodecard.waiting  .ndot { background: var(--st-waiting); }
+    .nodecard.idle     .ndot { background: var(--st-idle); }
+    .nodecard.lead     .ndot { background: var(--accent); }
+    .nodecard .row2 {
+      font-family: var(--font-mono); font-size: 10px; color: var(--fg-3);
+      margin-top: 1px; line-height: 1.2; min-height: 12px;
+    }
+    @keyframes borderpulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+      50%      { box-shadow: 0 0 0 4px var(--pulse-color, rgba(0,0,0,0.08)); }
+    }
+    /* 550ms exchange-increment pulse on edges. */
+    .edge-pulse { animation: edgepulse 550ms ease-out; }
+    @keyframes edgepulse {
+      0%   { stroke-width: 6px; }
+      100% { stroke-width: var(--edge-stroke-w, 2.5px); }
     }
 
     html, body, #root {
@@ -1552,54 +1609,172 @@
       );
     }
 
-    // --- TopologyEdgePanel (M2 on-graph edge overlay) ---
-    // Renders the active topology as a mermaid graph TD, then walks the
-    // SVG's .flowchart-link / edge-path elements post-render (mermaid v11
-    // edge classes, same as the artifact-md thickening rule) and decorates:
-    //   direct → green  |  tee → blue  |  gated → amber  |  tripped → red
-    //   pulse on exchanges increment  |  click → edge-log popup
-    //   promote control via POST /edge-promote (multi-instance crew_id aware)
-    // Re-applies on every edgeStats change: mermaid regenerates the SVG each
-    // render so decoration must re-run after every render (same contract as
-    // the foreignObject legibility fix in renderMermaidBlocks).
-    function TopologyEdgePanel({ edgeStats, crewId }) {
+    // --- TopologyGraph (unified MiniGraph + TopologyEdgePanel) ---
+    // One mermaid-rendered graph that carries BOTH the activity layer
+    // (per-teammate status painted onto the node border + corner dot +
+    // 1.6s border pulse) and the routing layer (per-edge mode colour +
+    // exchange badge + 550ms pulse + click → edge-log popup + promote).
+    //
+    //   Active topology  → mermaid `graph TD`, `lead` first-class, peer
+    //                      edges routed; gated edges visibly bridge `lead`.
+    //   Roster fallback  → mermaid `graph LR` star, `lead → teammate_*`,
+    //                      neutral grey edges, no badges/click, legend hidden.
+    //
+    // The activity↔routing join uses cli.slot_to_teammate (additive
+    // /api/state field) — NOT the agent.role===slot guess (slot labels are
+    // author-defined and may differ from pack roles, e.g. slot `impl_a`
+    // vs role `implementor`).
+    //
+    // BC-03 fix: edges look up their EdgeStat by (from_slot, to_slot) via
+    // window.mapEdgeStatsToPaths (id-parse primary, LS-/LE- class fallback,
+    // positional last-resort+console.warn). Mermaid v11 reorders edge paths
+    // during layout, so positional links[i]→edgeStats[i] aliases reciprocal
+    // pairs and renders a healthy back-edge as the tripped peer.
+    //
+    // Lead-spoke motion pulses (MiniGraph's animateMotion along
+    // teammate→lead spokes) are deliberately removed: pulses on peer edges
+    // would collide with the routing-layer meaning of edge stroke. Activity
+    // motion now lives entirely on the node border.
+    function TopologyGraph({ cli, agents }) {
       const containerRef = useRef(null);
-      const prevExchangesRef = useRef({});
       const [selectedEdge, setSelectedEdge] = useState(null);
       const [edgeLog, setEdgeLog] = useState(null);
       const [promoteKey, setPromoteKey] = useState(null);
+      const prevExchangesRef = useRef({});
 
-      // Build deterministic mermaid source. Edges are ordered the same as
-      // edgeStats so that the i-th .flowchart-link in the rendered SVG maps
-      // to edgeStats[i] — no brittle ID parsing needed.
-      const edgeStatsKey = JSON.stringify(edgeStats);
-      const mermaidSrc = React.useMemo(() => {
-        if (!edgeStats || edgeStats.length === 0) return null;
-        const lines = ['graph TD'];
+      const edgeStats = cli.topology_edge_stats || [];
+      const slotToTeammate = cli.slot_to_teammate || {};
+      const crewId = cli.id;
+      const isRoster = !edgeStats || edgeStats.length === 0;
+
+      // ── Gated-bridge expansion ──
+      // The broker records gated edges as peer→peer (lead is never an
+      // endpoint — broker.py:1216 / shapes.ShapeEdge). The spec's headline
+      // design decision (Design Decisions §"Mermaid graph TD with `lead`
+      // as a first-class node; gated edges route peer-->lead-->peer")
+      // requires lead to visibly bridge gated routes. We expand each gated
+      // EdgeStat into TWO synthetic mermaid segments and annotate each
+      // synthetic with `_source` pointing back at the original peer→peer
+      // EdgeStat so click/badge/log all reference the source endpoints
+      // (the crew_id-keyed /edge-log fetch is the SOURCE's, not lead's).
+      // Non-gated edges (direct/tee, including their tripped styling)
+      // remain single peer edges unchanged — this is critical to keep
+      // BC-03 reciprocal-pair keyed lookup (AT-5/AT-6) byte-identical.
+      const displayEdges = React.useMemo(() => {
+        const out = [];
         edgeStats.forEach(es => {
-          const badge = es.tripped ? '⚡' : es.exchanges > 0 ? String(es.exchanges) : '';
-          // Slot names are identifiers; label carries mode+count.
-          lines.push(`  ${es.from_slot}-->|"${es.mode}${badge}"|${es.to_slot}`);
+          if (es.mode === 'gated' && es.from_slot !== 'lead' && es.to_slot !== 'lead') {
+            // Two synthetic segments — both carry the SOURCE EdgeStat
+            // verbatim on _source so the click handler / selected-edge
+            // panel / fetch URL all dispatch against the real peer→peer
+            // identity. exchanges/tripped on the synthetic mirror the
+            // source so visual decoration (stroke/badge/pulse) is consistent.
+            out.push({
+              from_slot: es.from_slot, to_slot: 'lead',
+              mode: 'gated', exchanges: es.exchanges, tripped: es.tripped,
+              _source: es,
+            });
+            out.push({
+              from_slot: 'lead', to_slot: es.to_slot,
+              mode: 'gated', exchanges: es.exchanges, tripped: es.tripped,
+              _source: es,
+            });
+          } else {
+            out.push(es);
+          }
         });
-        return lines.join('\n');
-      }, [edgeStatsKey]);
+        return out;
+      }, [JSON.stringify(edgeStats)]);
 
-      // Re-render mermaid + apply decoration whenever edgeStats changes.
-      // Mirrors renderMermaidBlocks: mermaid.render → DOMPurify → insert SVG
-      // → walk .flowchart-link elements → apply style + onclick.
+      // Stable status-class derivation: for active topologies, the join goes
+      // slot → teammate_id (via cli.slot_to_teammate) → agents[].status.
+      // For roster fallback, nodes ARE teammates so the status reads
+      // directly from agents[].status. Defensive: unknown slot OR
+      // tombstoned teammate → "idle".
+      function statusFromTeammate(tid) {
+        if (!tid) return 'idle';
+        const a = agents.find(a => a.id === tid);
+        return a?.status || 'idle';
+      }
+      function statusClassFor(status) {
+        if (status === 'thinking') return 'thinking';
+        if (status === 'tool-use') return 'tool';
+        if (status === 'waiting')  return 'waiting';
+        return 'idle';
+      }
+      // mermaid HTML labels need ATTRIBUTE single-quotes — the outer label
+      // is double-quoted ( `id["..."]` ), so any inner double quote would
+      // terminate the label early and break parsing.
+      function nodeLabel(rowOne, rowTwo, cls) {
+        return `<div class='nodecard ${cls}'><div class='row1'><span class='ndot'></span>${rowOne}</div><div class='row2'>${rowTwo}</div></div>`;
+      }
+
+      // Build deterministic mermaid source — same shape every render given
+      // identical inputs so React's useEffect re-renders aren't surprises.
+      const srcKey = JSON.stringify({
+        displayEdges: displayEdges.map(e => [e.from_slot, e.to_slot, e.mode, e.exchanges, e.tripped]),
+        slotToTeammate,
+        agents: agents.map(a => [a.id, a.role, a.status]),
+        isRoster,
+      });
+      const mermaidSrc = React.useMemo(() => {
+        const orientation = isRoster ? 'graph LR' : 'graph TD';
+        const lines = [orientation];
+        // ── Node declarations ──
+        if (isRoster) {
+          // lead first, then one node per live teammate.
+          lines.push(`  lead["${nodeLabel('lead', '', 'lead')}"]`);
+          agents.forEach(a => {
+            const cls = statusClassFor(a.status);
+            const slot = `teammate_${a.id}`;
+            // Roster nodes' slot label IS the id (preserves today's
+            // MiniGraph "who is this teammate" answer). row2 stays empty.
+            lines.push(`  ${slot}["${nodeLabel(a.id.slice(0, 8), '', cls)}"]`);
+          });
+        } else {
+          // Slots include every endpoint in the DISPLAY edges (so the
+          // synthetic gated→lead segments add lead even if no other edge
+          // touches it — making the bridge structurally visible).
+          const slots = new Set(['lead']);
+          displayEdges.forEach(es => { slots.add(es.from_slot); slots.add(es.to_slot); });
+          slots.forEach(slot => {
+            if (slot === 'lead') {
+              lines.push(`  lead["${nodeLabel('lead', '', 'lead')}"]`);
+              return;
+            }
+            const tid = slotToTeammate[slot];
+            const status = statusFromTeammate(tid);
+            const cls = statusClassFor(status);
+            const idLine = tid ? tid.slice(0, 8) : '';
+            lines.push(`  ${slot}["${nodeLabel(slot, idLine, cls)}"]`);
+          });
+        }
+        // ── Edges ──
+        if (isRoster) {
+          agents.forEach(a => {
+            lines.push(`  lead --> teammate_${a.id}`);
+          });
+        } else {
+          displayEdges.forEach(es => {
+            const badge = es.tripped ? '⚡' : (es.exchanges > 0 ? String(es.exchanges) : '');
+            const lbl = `${es.mode} ${badge}`.trim();
+            lines.push(`  ${es.from_slot} -->|"${lbl}"| ${es.to_slot}`);
+          });
+        }
+        return lines.join('\n');
+      }, [srcKey]);
+
+      // Render + decorate. Mirrors renderMermaidBlocks's DOMPurify config
+      // (allow foreignObject for node labels). Re-runs whenever the
+      // mermaid source changes — mermaid regenerates the SVG each render.
       useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
-        if (!mermaidSrc) { container.innerHTML = ''; return; }
-
         let cancelled = false;
-        const uid = 'edge-topo-' + crypto.randomUUID().replace(/-/g, '');
+        const uid = 'topo-' + crypto.randomUUID().replace(/-/g, '');
 
         mermaid.render(uid, mermaidSrc).then(({ svg }) => {
           if (cancelled || !containerRef.current) return;
-
-          // Same DOMPurify config as renderMermaidBlocks — allow foreignObject
-          // for mermaid node labels; forbid script/event-handlers.
           const holder = document.createElement('div');
           holder.innerHTML = DOMPurify.sanitize(svg, {
             USE_PROFILES: { svg: true, svgFilters: true },
@@ -1610,61 +1785,86 @@
           });
           const svgEl = holder.querySelector('svg');
           if (!svgEl) return;
+          // Constrain SVG to its host (overflow:hidden on .topology-host)
+          // so the mermaid graph cannot bleed UPWARD into the roster region
+          // above (which would intercept .roster-row clicks).
           svgEl.style.width = '100%';
-          svgEl.style.height = 'auto';
-          svgEl.style.overflow = 'visible';
+          svgEl.style.height = '100%';
+          svgEl.style.maxWidth = '100%';
+          svgEl.style.maxHeight = '100%';
+          svgEl.removeAttribute('width');
+          svgEl.removeAttribute('height');
+          svgEl.style.display = 'block';
           containerRef.current.innerHTML = '';
           containerRef.current.appendChild(svgEl);
 
-          // ── POST-RENDER SVG-WALK DECORATION LAYER ──
-          // Mermaid v11 assigns class .flowchart-link to each directed edge path.
-          // The same class is used for edge-thickening in .artifact-md SVGs (see CSS).
-          // Edge order in the SVG matches source order → edgeStats[i] maps to links[i].
-          const links = svgEl.querySelectorAll('.flowchart-link, path.edge-path');
-          links.forEach((path, i) => {
-            const es = (edgeStats || [])[i];
-            if (!es) return;
-            const key = `${es.from_slot}→${es.to_slot}`;
-            // 1. Per-mode stroke color.
-            const color = es.tripped   ? '#ef4444'   // red   — tripped/gated-by-CB
-              : es.mode === 'gated'    ? '#f59e0b'   // amber — manual gate
-              : es.mode === 'tee'      ? '#3b82f6'   // blue  — observe + deliver
-              : '#22c55e';                            // green — direct
-            path.style.stroke = color;
-            path.style.strokeWidth = es.tripped ? '3px' : '2.5px';
-            path.style.cursor = 'pointer';
-            path.style.transition = 'stroke-width 0.35s ease';
-            // 2. Animation pulse when exchange count increments since last render.
-            const prev = prevExchangesRef.current[key];
-            if (prev !== undefined && es.exchanges > prev) {
-              path.style.strokeWidth = '6px';
-              setTimeout(() => {
-                if (path.isConnected) path.style.strokeWidth = es.tripped ? '3px' : '2.5px';
-              }, 550);
-            }
-            // 3. Click hit-testing → fetch GET /edge-log (multi-instance: use crewId).
-            path.addEventListener('click', () => {
-              setSelectedEdge(es);
-              setEdgeLog({ loading: true, messages: null, error: null });
-              fetch(`/edge-log/${crewId}/${es.from_slot}/${es.to_slot}`)
-                .then(r => r.json())
-                .then(d => setEdgeLog({ loading: false, messages: d.messages, error: null }))
-                .catch(() => setEdgeLog({ loading: false, messages: null, error: 'fetch failed' }));
+          // ── EDGE DECORATION ──
+          if (isRoster) {
+            // Roster fallback: neutral grey, disabled click, no badge/pulse.
+            svgEl.querySelectorAll('path.flowchart-link, path.edge-path').forEach(p => {
+              p.style.stroke = 'var(--line)';
+              p.style.strokeWidth = '1.5px';
+              p.style.cursor = 'default';
             });
-          });
-
-          // Update prev-exchanges ref for next-cycle pulse detection.
-          const next = {};
-          (edgeStats || []).forEach(es => {
-            next[`${es.from_slot}→${es.to_slot}`] = es.exchanges;
-          });
-          prevExchangesRef.current = next;
+          } else {
+            // Active: keyed lookup via the window-exposed helper. Used
+            // both here AND by the green-suite deletion-detector test.
+            // We pass DISPLAY edges (gated split into through-lead synthetic
+            // segments) so each rendered path resolves to ITS segment record.
+            // The decoration then unwraps `_source` (synthetic only) so the
+            // click/fetch/panel reference the SOURCE peer→peer EdgeStat —
+            // preserving crew_id-keyed /edge-log routing.
+            const pathToEdge = window.mapEdgeStatsToPaths(svgEl, displayEdges);
+            pathToEdge.forEach((segment, path) => {
+              const source = segment._source || segment;
+              const colour = segment.tripped              ? 'var(--edge-tripped)'
+                           : segment.mode === 'gated'     ? 'var(--edge-gated)'
+                           : segment.mode === 'tee'       ? 'var(--edge-tee)'
+                           :                                'var(--edge-direct)';
+              const w = segment.tripped ? '3px' : '2.5px';
+              path.style.stroke = colour;
+              path.style.strokeWidth = w;
+              path.style.setProperty('--edge-stroke-w', w);
+              path.style.cursor = 'pointer';
+              path.style.transition = 'stroke-width 0.35s ease';
+              // 550ms exchange-pulse on exchange-count increment — keyed by
+              // SOURCE peers (so a synthetic split doesn't double-fire).
+              const sourceKey = `${source.from_slot}→${source.to_slot}`;
+              const prev = prevExchangesRef.current[sourceKey];
+              if (prev !== undefined && source.exchanges > prev) {
+                path.classList.add('edge-pulse');
+                setTimeout(() => {
+                  if (path.isConnected) path.classList.remove('edge-pulse');
+                }, 600);
+              }
+              // Click → /edge-log with SOURCE endpoints + crewId path-segment
+              // (load-bearing for the leader→follower proxy — CLAUDE.md
+              // multi-instance trap). Selected-edge panel shows SOURCE too.
+              path.addEventListener('click', () => {
+                setSelectedEdge(source);
+                setEdgeLog({ loading: true, messages: null, error: null });
+                fetch(`/edge-log/${crewId}/${source.from_slot}/${source.to_slot}`)
+                  .then(r => r.json())
+                  .then(d => setEdgeLog({ loading: false, messages: d.messages, error: null }))
+                  .catch(() => setEdgeLog({ loading: false, messages: null, error: 'fetch failed' }));
+              });
+            });
+            // Update prev-exchanges ref for next-cycle pulse detection.
+            // Keyed by SOURCE peers (one entry per real EdgeStat, not per
+            // synthetic segment) so a single source-exchange increment
+            // doesn't double-pulse the two through-lead segments.
+            const next = {};
+            edgeStats.forEach(es => {
+              next[`${es.from_slot}→${es.to_slot}`] = es.exchanges;
+            });
+            prevExchangesRef.current = next;
+          }
         }).catch(() => {});  // ignore mermaid parse errors (e.g. slot names with spaces)
 
         return () => { cancelled = true; };
-      }, [mermaidSrc, crewId]);
+      }, [mermaidSrc, crewId, isRoster, displayEdges]);
 
-      // 4. Promote-to-gated control: POST /edge-promote (multi-instance aware).
+      // POST /edge-promote. crewId in path = multi-instance correct.
       const promoteEdge = (es) => {
         const key = `${es.from_slot}→${es.to_slot}`;
         setPromoteKey(key);
@@ -1672,7 +1872,6 @@
           .then(r => r.json())
           .then(() => {
             setPromoteKey(null);
-            // Refresh log after promote so the panel reflects the gated state.
             fetch(`/edge-log/${crewId}/${es.from_slot}/${es.to_slot}`)
               .then(r => r.json())
               .then(d => setEdgeLog({ loading: false, messages: d.messages, error: null }))
@@ -1681,38 +1880,38 @@
           .catch(() => setPromoteKey(null));
       };
 
-      if (!edgeStats || edgeStats.length === 0) return null;
-
+      const subtitle = isRoster ? 'roster — no shape instantiated' : (cli.label || '');
       const EDGE_COLORS = [
-        ['direct', '#22c55e'], ['tee', '#3b82f6'],
-        ['gated', '#f59e0b'], ['tripped', '#ef4444'],
+        ['direct',  'var(--edge-direct)'],
+        ['tee',     'var(--edge-tee)'],
+        ['gated',   'var(--edge-gated)'],
+        ['tripped', 'var(--edge-tripped)'],
       ];
 
       return (
-        <div style={{ padding: '10px 16px', borderTop: '1px solid var(--line)' }}>
-          <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase',
-            letterSpacing: '0.06em', color: 'var(--fg-2)', marginBottom: 6 }}>
-            Edge Routing
+        <div className="topology-graph" style={{ padding: "12px 16px", display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: 420, minHeight: 0 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-2)", marginBottom: 4 }}>
+            Topology
           </div>
-          {/* Mermaid topology container — SVG-walk decoration applied post-render */}
-          <div ref={containerRef} />
-          {/* Mode legend */}
-          <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-            {EDGE_COLORS.map(([lbl, clr]) => (
-              <span key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 3,
-                fontSize: 9.5, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>
-                <span style={{ width: 14, height: 2, background: clr,
-                  display: 'inline-block', borderRadius: 1 }}/>
-                {lbl}
-              </span>
-            ))}
+          <div className="topology-subtitle" style={{ fontSize: 12, color: "var(--fg-2)", marginBottom: 8, minHeight: 16 }}>
+            {subtitle}
           </div>
-          {/* Selected-edge panel: edge-log messages + promote control */}
-          {selectedEdge && (
-            <div style={{ marginTop: 8, padding: '8px 10px', background: 'var(--bg-0)',
-              border: '1px solid var(--line)', borderRadius: 4, fontSize: 11 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between',
-                alignItems: 'flex-start', marginBottom: 5 }}>
+          <div ref={containerRef} className="topology-host" style={{ flex: "0 1 auto", overflow: "hidden", minHeight: 120, maxHeight: 240 }} />
+          {/* Legend hidden in roster fallback (no modes to legend). */}
+          {!isRoster && (
+            <div className="topology-legend" style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+              {EDGE_COLORS.map(([lbl, clr]) => (
+                <span key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9.5, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ width: 14, height: 2, background: clr, display: 'inline-block', borderRadius: 1 }}/>
+                  {lbl}
+                </span>
+              ))}
+            </div>
+          )}
+          {/* Selected-edge panel — opens when an edge in an active topology is clicked. */}
+          {selectedEdge && !isRoster && (
+            <div className="topology-selpanel" style={{ marginTop: 8, padding: '8px 10px', background: 'var(--bg-0)', border: '1px solid var(--line)', borderRadius: 4, fontSize: 11 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 }}>
                 <div>
                   <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 11.5 }}>
                     {selectedEdge.from_slot} → {selectedEdge.to_slot}
@@ -1721,26 +1920,18 @@
                     {selectedEdge.mode}{selectedEdge.tripped ? ' ⚡' : ''} · {selectedEdge.exchanges}x
                   </span>
                 </div>
-                <button onClick={() => setSelectedEdge(null)} style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'var(--fg-3)', fontSize: 13, padding: '0 2px', lineHeight: 1 }}>✕</button>
+                <button onClick={() => setSelectedEdge(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', fontSize: 13, padding: '0 2px', lineHeight: 1 }}>✕</button>
               </div>
-              {/* Promote control — visible for non-gated, non-tripped edges only */}
+              {/* Promote control — hidden for already-gated/tripped edges (M2 parity). */}
               {selectedEdge.mode !== 'gated' && !selectedEdge.tripped && (
                 <button
                   onClick={() => promoteEdge(selectedEdge)}
                   disabled={promoteKey === `${selectedEdge.from_slot}→${selectedEdge.to_slot}`}
-                  style={{ padding: '3px 10px', fontSize: 10.5, marginBottom: 6,
-                    background: '#92400e', color: '#fff7ed', border: 'none',
-                    borderRadius: 3, cursor: 'pointer', fontWeight: 600,
-                    opacity: promoteKey ? 0.65 : 1 }}>
-                  {promoteKey === `${selectedEdge.from_slot}→${selectedEdge.to_slot}`
-                    ? 'Promoting…' : 'Promote to gated'}
+                  style={{ padding: '3px 10px', fontSize: 10.5, marginBottom: 6, background: '#92400e', color: '#fff7ed', border: 'none', borderRadius: 3, cursor: 'pointer', fontWeight: 600, opacity: promoteKey ? 0.65 : 1 }}>
+                  {promoteKey === `${selectedEdge.from_slot}→${selectedEdge.to_slot}` ? 'Promoting…' : 'Promote to gated'}
                 </button>
               )}
-              {/* Message log (last 10, newest last) */}
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10,
-                maxHeight: 130, overflowY: 'auto' }}>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, maxHeight: 130, overflowY: 'auto' }}>
                 {edgeLog?.loading && <div style={{ color: 'var(--fg-3)' }}>Loading…</div>}
                 {edgeLog?.error   && <div style={{ color: '#ef4444' }}>{edgeLog.error}</div>}
                 {edgeLog?.messages && edgeLog.messages.length === 0 && (
@@ -1762,66 +1953,7 @@
               </div>
             </div>
           )}
-        </div>
-      );
-    }
-
-    // --- MiniGraph ---
-    function MiniGraph({ cli, agents }) {
-      const W = 290, H = 320;
-      const center = { x: W / 2, y: H / 2 - 10 };
-      const r = 95;
-      const positions = agents.map((a, i) => {
-        const t = (i / agents.length) * Math.PI * 2 - Math.PI / 2;
-        return { ...a, x: center.x + Math.cos(t) * r, y: center.y + Math.sin(t) * r };
-      });
-
-      return (
-        <div style={{ borderRight: "1px solid var(--line)", padding: "16px 18px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-2)", marginBottom: 4 }}>
-            Topology
-          </div>
-          <div style={{ fontSize: 12, color: "var(--fg-2)", marginBottom: 8 }}>{cli.label}</div>
-          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 320 }}>
-            <defs>
-              <radialGradient id="mcCenter" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stopColor="oklch(0.50 0.14 220 / 0.20)"/>
-                <stop offset="100%" stopColor="oklch(0.50 0.14 220 / 0)"/>
-              </radialGradient>
-            </defs>
-            {positions.map(p => (
-              <line key={`e-${p.id}`} x1={center.x} y1={center.y} x2={p.x} y2={p.y}
-                stroke="oklch(0.75 0.01 250)" strokeWidth="1"/>
-            ))}
-            <circle cx={center.x} cy={center.y} r="40" fill="url(#mcCenter)"/>
-            <circle cx={center.x} cy={center.y} r="22" fill="var(--bg-2)" stroke="var(--accent-line)"/>
-            <text x={center.x} y={center.y + 4} textAnchor="middle" fontSize="10" fontFamily="var(--font-mono)" fill="var(--fg-0)">lead</text>
-            {positions.map(p => (
-              <g key={p.id} transform={`translate(${p.x} ${p.y})`}>
-                <circle r="14" fill="var(--bg-2)" stroke="var(--line)"/>
-                <circle r="4" fill={
-                  p.status === "thinking" ? "var(--st-thinking)" :
-                  p.status === "tool-use" ? "var(--st-tool)" :
-                  p.status === "waiting"  ? "var(--st-waiting)" :
-                  "var(--st-idle)"
-                }>
-                  {(p.status === "thinking" || p.status === "tool-use") &&
-                    <animate attributeName="opacity" values="1;0.4;1" dur="1.6s" repeatCount="indefinite"/>
-                  }
-                </circle>
-                <text y="26" textAnchor="middle" fontSize="9" fontFamily="var(--font-mono)" fill="var(--fg-2)">{p.id.slice(0, 8)}</text>
-              </g>
-            ))}
-            {positions.filter(p => p.status === "thinking" || p.status === "tool-use").map((p, i) => (
-              <circle key={`pulse-${p.id}`} r="2" fill="var(--accent)">
-                <animateMotion dur={`${2.4 + i * 0.3}s`} repeatCount="indefinite"
-                  path={`M ${p.x} ${p.y} L ${center.x} ${center.y}`}/>
-                <animate attributeName="opacity" values="0;1;0" dur={`${2.4 + i * 0.3}s`} repeatCount="indefinite"/>
-              </circle>
-            ))}
-          </svg>
-
-          <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--fg-2)" }}>
+          <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--fg-2)", paddingTop: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span>cwd</span><span className="mono" style={{ color: "var(--fg-0)" }}>{cli.cwd}</span>
             </div>
@@ -1832,11 +1964,64 @@
               <span>uptime</span><span className="mono" style={{ color: "var(--fg-0)" }}>{fmtDuration(cli.uptime)}</span>
             </div>
           </div>
-          {/* M2: on-graph edge overlay — mermaid graph TD + SVG-walk decoration layer */}
-          <TopologyEdgePanel edgeStats={cli.topology_edge_stats} crewId={cli.id}/>
         </div>
       );
     }
+
+    // window.mapEdgeStatsToPaths — keyed-lookup helper exposed for the
+    // green-suite deletion-detector test (tests/test_unified_topology_keyed_lookup.py).
+    // BC-03: mermaid v11 reorders edge paths during layout; the M2 panel
+    // used positional links[i]→edgeStats[i] and aliased reciprocal pairs
+    // (healthy back-edge inherited the tripped edge's red ⚡ decoration).
+    // The fix encodes each edge's endpoints via TWO independent signals:
+    //   1. path.id of the form L_<from>_<to>_<n>   (regex; tolerant of `-`/`_` separator)
+    //   2. classes  LS-<from>  and  LE-<to>        (mermaid v11 source/target tokens)
+    // A single channel of mermaid emit-format drift cannot break the lookup;
+    // only positional fallback is reached if BOTH signals fail (warn).
+    window.mapEdgeStatsToPaths = function(svgRoot, edgeStats) {
+      const byKey = new Map();
+      (edgeStats || []).forEach(es => byKey.set(`${es.from_slot}→${es.to_slot}`, es));
+      const paths = svgRoot.querySelectorAll('path.flowchart-link');
+      const result = new Map();
+      let positionalFallbackUsed = 0;
+      paths.forEach((path, idx) => {
+        let es = null;
+        // 1. Primary: parse the path id with a tolerant regex (mermaid
+        //    has shipped both `_` and `-` separators across recent versions).
+        const id = path.id || (path.parentElement && path.parentElement.id) || '';
+        const m = id.match(/^L[-_](.+?)[-_](.+?)[-_]\d+$/);
+        if (m) {
+          es = byKey.get(`${m[1]}→${m[2]}`) || null;
+        }
+        // 2. Fallback: read LS-<from> / LE-<to> class tokens (survives
+        //    slot names containing underscores, which break the non-greedy
+        //    regex split).
+        if (!es) {
+          const cls = (path.getAttribute('class') || '').split(/\s+/);
+          const ls = cls.find(c => c.startsWith('LS-'));
+          const le = cls.find(c => c.startsWith('LE-'));
+          if (ls && le) {
+            es = byKey.get(`${ls.slice(3)}→${le.slice(3)}`) || null;
+          }
+        }
+        // 3. Last-resort positional — signals mermaid changed its emit
+        //    format; should never fire in practice.
+        if (!es && (edgeStats || [])[idx]) {
+          es = edgeStats[idx];
+          positionalFallbackUsed++;
+        }
+        if (es) result.set(path, es);
+      });
+      if (positionalFallbackUsed > 0) {
+        console.warn(`[unified-topology] keyed lookup miss for ${positionalFallbackUsed} edge(s) — fell back to positional. Mermaid id format may have changed.`);
+      }
+      return result;
+    };
+
+    // [unified-topology-view] The legacy TopologyEdgePanel and MiniGraph
+    // components were removed when TopologyGraph subsumed both layers
+    // (activity on node border, routing on edges). The mount-site in
+    // MissionControlLayout was retargeted to <TopologyGraph .../>.
 
     // Render a stored tool-output body nicely. The body is the raw SDK tool
     // response (often a JSON envelope). Parse it and surface the useful text;
@@ -2732,7 +2917,7 @@
               onToggleTerminated={() => setTerminatedOpen(o => ({...o, [activeId]: !(o[activeId] === true)}))}
               onTerminatedAgentClick={setOpenPanel}
               startupDiagnostics={cli.startup_diagnostics || []}
-              topologyNode={<MiniGraph cli={cli} agents={liveAgents}/>}
+              topologyNode={<TopologyGraph cli={cli} agents={liveAgents}/>}
             />
             <div style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
               {liveAgents.length > 0 && spotlightedAgents.length === 0 ? (

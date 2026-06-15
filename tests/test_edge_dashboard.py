@@ -14,6 +14,15 @@ AT#13: Multi-instance aggregation + proxy. Leader /api/state includes follower's
        topology_edge_stats keyed by follower's crew_id; GET /edge-log/{follower_id}
        against the leader proxies to the follower (200, not 404).
 
+unified-topology-view AT-3, AT-8 (added by unify-topology-graph-component):
+  - AT-3: dashboard renders exactly one TopologyGraph (no legacy MiniGraph radial
+    SVG; no separate TopologyEdgePanel mount; first-class `lead` node in the
+    active topology).
+  - AT-8: activity attaches via slot_to_teammate, NOT a `role === slot` guess.
+    A slot label that differs from the teammate's pack role (e.g. slot `impl_a`
+    vs role `implementor`) still resolves to the right activity status — the
+    `impl_a` node card carries the `tool` activity class.
+
 asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
 """
 from __future__ import annotations
@@ -21,12 +30,23 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import socket
+import threading
+import time
 from typing import Any
 
 import httpx
 import pytest
+import uvicorn
 
-from claude_crew.broker import Broker, LEAD_ID, Topology
+from claude_crew.broker import (
+    Broker,
+    BrokerSnapshot,
+    EdgeStat,
+    LEAD_ID,
+    LiveTeammateInfo,
+    TeammateInfo,
+    Topology,
+)
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.instance_registry import InstanceRegistry
 from claude_crew.teammate import StubTeammate
@@ -484,3 +504,421 @@ class TestMultiInstanceEdgeLogProxy:
             resp = await client.get("/edge-log/unknowncrew1/a/b")
 
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# unified-topology-view AT-3, AT-8 — Playwright dashboard assertions
+# ---------------------------------------------------------------------------
+#
+# These tests drive the live dashboard in a real browser (Chromium) to verify
+# the unified TopologyGraph component. They monkey-patch `Broker.snapshot` so
+# we can plant a precise topology + slot_to_teammate fixture without booting
+# real teammates. Same pattern as `tests/dashboard/test_roster_spotlight.py`.
+#
+# Run prerequisite: `uv run playwright install chromium` (one-time).
+
+
+def _alive_info_at(idx: int, role: str = "builder", name: str | None = None) -> TeammateInfo:
+    return TeammateInfo(
+        id=f"tid-{idx}",
+        name=name if name is not None else f"agent-{idx}",
+        role=role,
+        spawned_at=time.time() - 60,
+        alive=True,
+    )
+
+
+def _live_entry_at(info: TeammateInfo, *, status_kwargs: dict | None = None) -> LiveTeammateInfo:
+    status: dict[str, Any] = {
+        "current_tool_count": 0,
+        "current_turn_started_at_wallclock": None,
+        "total_input_tokens": 100,
+        "total_output_tokens": 50,
+        "total_cost_usd": 0.05,
+        "current_tools": [],
+        "current_tool": None,
+        "last_activity_at_wallclock": None,
+    }
+    if status_kwargs:
+        status.update(status_kwargs)
+    return LiveTeammateInfo(info=info, status=status, model="claude-sonnet-4-6")
+
+
+def _stub_snapshot(
+    *,
+    crew_id: str = "crew-at38",
+    live: tuple[LiveTeammateInfo, ...],
+    edge_stats: tuple[EdgeStat, ...] = (),
+    slot_to_teammate: dict[str, str] | None = None,
+) -> BrokerSnapshot:
+    infos = tuple(le.info for le in live)
+    return BrokerSnapshot(
+        crew_id=crew_id,
+        teammates=infos,
+        live=live,
+        log=(),
+        topology_edge_stats=edge_stats,
+        topology_slot_to_teammate=dict(slot_to_teammate or {}),
+    )
+
+
+def _patched_broker_for_dashboard(snapshot: BrokerSnapshot) -> Broker:
+    """Return a Broker whose .snapshot() always returns the given fixture."""
+    b = Broker()
+    b.snapshot = lambda log_limit=None: snapshot  # type: ignore[method-assign]
+    # AT-3 / AT-8 need /api/state.cli.id to match snapshot.crew_id (the
+    # dashboard's TopologyGraph reads cli.id as crewId for per-edge fetches).
+    b.crew_id = snapshot.crew_id  # type: ignore[misc]
+    return b
+
+
+def _spin_dashboard(broker: Broker):
+    """Start a UIServer on a free port in a daemon thread; return (url, server, thread)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer did not start within 10 seconds")
+
+    return f"http://127.0.0.1:{port}", server, t
+
+
+# ── AT-3 — one graph, no legacy MiniGraph, no separate TopologyEdgePanel ────
+
+
+@pytest.fixture
+def at3_active_topology_url():
+    """Dashboard with planner → implementor → reviewer (3 peer edges), lead present."""
+    p_info = _alive_info_at(1, role="planner", name="planner-a")
+    i_info = _alive_info_at(2, role="implementor", name="implementor-a")
+    r_info = _alive_info_at(3, role="reviewer", name="reviewer-a")
+    live = (
+        _live_entry_at(p_info),
+        _live_entry_at(i_info),
+        _live_entry_at(r_info),
+    )
+    edges = (
+        EdgeStat(from_slot="planner", to_slot="implementor", mode="direct", exchanges=2, tripped=False),
+        EdgeStat(from_slot="implementor", to_slot="reviewer", mode="tee", exchanges=4, tripped=False),
+        EdgeStat(from_slot="planner", to_slot="lead", mode="gated", exchanges=1, tripped=False),
+        EdgeStat(from_slot="lead", to_slot="reviewer", mode="gated", exchanges=1, tripped=False),
+    )
+    s2t = {"planner": "tid-1", "implementor": "tid-2", "reviewer": "tid-3"}
+    snap = _stub_snapshot(crew_id="crew-at3", live=live, edge_stats=edges, slot_to_teammate=s2t)
+    broker = _patched_broker_for_dashboard(snap)
+    url, server, t = _spin_dashboard(broker)
+    yield url
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_at3_unified_topology_renders_single_graph_with_lead_node(at3_active_topology_url, page):
+    """AT-3: exactly one topology graph; no legacy radial MiniGraph SVG; lead first-class.
+
+    The unified TopologyGraph mounts where MiniGraph used to live. The old
+    hand-drawn radial SVG (with a centered <circle> for the lead + spoke
+    <line> elements) is gone, replaced by a single mermaid-rendered SVG
+    containing one <g class="node"> per slot, including the `lead` node.
+    """
+    page.goto(at3_active_topology_url)
+    page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.wait_for_timeout(800)  # mermaid render + post-render decoration
+
+    # Header reads "Topology" (CSS uppercases).
+    rail_text = page.locator(".rail-topology").inner_text()
+    assert "TOPOLOGY" in rail_text.upper(), f"Expected Topology header; got: {rail_text!r}"
+
+    # Exactly one SVG in the rail-topology subtree — the unified graph.
+    svgs = page.locator(".rail-topology svg")
+    assert svgs.count() == 1, f"Expected exactly 1 topology SVG; found {svgs.count()}"
+
+    # The legacy MiniGraph radial SVG had a <radialGradient id="mcCenter">.
+    # Its absence is a strong signal that the hand-drawn roster hub is gone.
+    legacy_radial = page.locator(".rail-topology svg defs radialGradient#mcCenter")
+    assert legacy_radial.count() == 0, "Legacy MiniGraph radial gradient must not render"
+
+    # The unified graph contains the `lead` node as a first-class node.
+    # The slot label "lead" appears inside the foreignObject nodecard.
+    rail_inner = page.locator(".rail-topology").inner_text()
+    assert "lead" in rail_inner.lower(), f"Expected 'lead' node label in rail; got: {rail_inner!r}"
+
+    # Topology slot labels are also present.
+    for slot in ("planner", "implementor", "reviewer"):
+        assert slot in rail_inner.lower(), (
+            f"Expected slot {slot!r} in rail-topology; got: {rail_inner!r}"
+        )
+
+    # Exactly one TopologyGraph wrapper — i.e. no separate TopologyEdgePanel
+    # mount. The class .topology-graph is the unified wrapper.
+    wrappers = page.locator(".rail-topology .topology-graph")
+    assert wrappers.count() == 1, (
+        f"Expected exactly one TopologyGraph wrapper; found {wrappers.count()}"
+    )
+
+
+# ── AT-8 — Activity attaches via slot_to_teammate (not role===slot) ─────────
+
+
+@pytest.fixture
+def at8_divergent_slot_role_url():
+    """Slot label `impl_a` whose teammate has role `implementor` and status `tool-use`.
+
+    The `role === slot` guess would FAIL to attach activity (no agent has
+    role `impl_a`) — the node would render idle. The slot_to_teammate join
+    `{"impl_a": "tid-9"}` is the only correct binding; activity must follow it.
+    """
+    implementor_info = TeammateInfo(
+        id="tid-9",
+        name="impl-a-agent",
+        role="implementor",
+        spawned_at=time.time() - 60,
+        alive=True,
+    )
+    other_info = TeammateInfo(
+        id="tid-10",
+        name="planner-a",
+        role="planner",
+        spawned_at=time.time() - 60,
+        alive=True,
+    )
+    live = (
+        _live_entry_at(implementor_info, status_kwargs={
+            "current_tool": {"tool_name": "Bash", "tool_use_id": "tu-1", "started_at_wallclock": time.time()},
+            "current_tools": [
+                {"tool_name": "Bash", "tool_use_id": "tu-1", "started_at_wallclock": time.time()}
+            ],
+            "current_tool_count": 1,
+        }),
+        _live_entry_at(other_info),
+    )
+    # Mark the implementor's runtime status separately via the LiveTeammateInfo's
+    # `status` dict — but the dashboard expects a per-agent status string. The
+    # production `_build_local_instance` derives a string status. To inject a
+    # known status into the rendered agents[].status, plant `current_tool` so
+    # the dashboard's status derivation lands on "tool-use" for this agent.
+    edges = (
+        EdgeStat(from_slot="planner_a", to_slot="impl_a", mode="direct", exchanges=2, tripped=False),
+    )
+    s2t = {"planner_a": "tid-10", "impl_a": "tid-9"}
+    snap = _stub_snapshot(crew_id="crew-at8", live=live, edge_stats=edges, slot_to_teammate=s2t)
+    broker = _patched_broker_for_dashboard(snap)
+    url, server, t = _spin_dashboard(broker)
+    yield url
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_at8_activity_joins_via_slot_to_teammate(at8_divergent_slot_role_url, page):
+    """AT-8: slot `impl_a` (≠ role `implementor`) inherits the teammate's tool-use status.
+
+    The `impl_a` node card must carry the `tool` activity class — proving the
+    join went through `slot_to_teammate` and not the broken `role === slot`
+    guess (which would have left it idle, since no live agent has role
+    `impl_a`).
+    """
+    page.goto(at8_divergent_slot_role_url)
+    page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    # Mermaid foreignObject HTML is the slow path — give it a beat.
+    page.wait_for_timeout(1000)
+
+    # Query the foreignObject's nested .nodecard for the `impl_a` slot.
+    # Mermaid emits the foreignObject content as innerHTML — find the
+    # nodecard whose row1 text contains "impl_a".
+    node_classes = page.evaluate(
+        """() => {
+          const out = [];
+          document.querySelectorAll('.rail-topology .nodecard').forEach(nc => {
+            const row1 = nc.querySelector('.row1');
+            out.push({label: row1 ? row1.innerText.trim() : '', cls: nc.className});
+          });
+          return out;
+        }"""
+    )
+    # Locate the impl_a node card.
+    impl_a = next((n for n in node_classes if "impl_a" in n["label"]), None)
+    assert impl_a is not None, (
+        f"impl_a node card not found in rendered topology; cards: {node_classes!r}"
+    )
+    # Activity attached via slot_to_teammate → status "tool-use" → class "tool".
+    assert "tool" in impl_a["cls"].split(), (
+        f"Expected impl_a nodecard to carry 'tool' activity class; got: {impl_a!r}"
+    )
+    # Lead node is also present (first-class node — also covers AT-3 invariant
+    # for completeness within this fixture).
+    lead = next((n for n in node_classes if n["label"].strip() == "lead"), None)
+    assert lead is not None, (
+        f"lead node card missing; cards: {node_classes!r}"
+    )
+    assert "lead" in lead["cls"].split(), (
+        f"Expected lead nodecard to carry 'lead' class; got: {lead!r}"
+    )
+
+
+# ── Gated bridge — `peer --> lead --> peer` for gated EdgeStats ─────────────
+#
+# Spec Design Decision: "Mermaid graph TD with `lead` as a first-class node;
+# gated edges route peer --> lead --> peer". The broker records gated edges
+# as peer→peer (lead is never an endpoint — broker.py:1216 / shapes
+# ShapeEdge). The unified component synthesizes two through-lead segments
+# from each gated EdgeStat at render time so the gated route is visibly
+# bridged. Both segments carry the source EdgeStat's gated styling and
+# (critically for the multi-instance contract) clicking either segment
+# fetches /edge-log keyed by the SOURCE peer endpoints with crewId in the
+# path.
+
+
+@pytest.fixture
+def gated_bridge_url():
+    """Real-broker-shape fixture: planner→implementor recorded as a single
+    GATED EdgeStat. The unified graph must render this as two synthetic
+    segments through lead, not a flat planner→implementor peer edge."""
+    p_info = _alive_info_at(1, role="planner", name="planner-a")
+    i_info = _alive_info_at(2, role="implementor", name="implementor-a")
+    live = (_live_entry_at(p_info), _live_entry_at(i_info))
+    edges = (
+        EdgeStat(
+            from_slot="planner", to_slot="implementor",
+            mode="gated", exchanges=3, tripped=False,
+        ),
+    )
+    s2t = {"planner": "tid-1", "implementor": "tid-2"}
+    snap = _stub_snapshot(crew_id="crew-bridge", live=live, edge_stats=edges, slot_to_teammate=s2t)
+    broker = _patched_broker_for_dashboard(snap)
+    url, server, t = _spin_dashboard(broker)
+    yield url, broker.crew_id
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_gated_edge_bridges_through_lead_with_two_amber_segments(gated_bridge_url, page):
+    """A gated EdgeStat(planner, implementor) renders as planner→lead AND
+    lead→implementor, both amber-gated, both crewId-routed to SOURCE endpoints.
+
+    Structural assertion (path classes `LS-<from>` / `LE-<to>` are the
+    keyed-lookup fallback signal — exactly the channel a future regression
+    would break first if the bridge were silently flattened back to a
+    single peer edge)."""
+    url, crew_id = gated_bridge_url
+    page.goto(url)
+    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.wait_for_timeout(1000)
+
+    paths_info = page.evaluate(
+        """() => {
+          const paths = document.querySelectorAll('.rail-topology path.flowchart-link');
+          return [...paths].map(p => ({
+            id: p.id || '',
+            cls: p.getAttribute('class') || '',
+            stroke: p.style.stroke || '',
+            width: p.style.strokeWidth || '',
+          }));
+        }"""
+    )
+    assert len(paths_info) >= 2, (
+        f"Gated bridge must render 2+ paths (peer→lead, lead→peer); got: {paths_info!r}"
+    )
+
+    import re as _re
+
+    def _endpoints(info: dict) -> tuple[str | None, str | None]:
+        # Try the keyed-lookup id-parse path first (same regex as
+        # window.mapEdgeStatsToPaths in dashboard.html — production parity).
+        m = _re.match(r"^L[-_](.+?)[-_](.+?)[-_]\d+$", info["id"])
+        if m:
+            return m.group(1), m.group(2)
+        # Fallback: LS-/LE- class tokens. Mermaid v11 doesn't always emit
+        # them, so id-parse is the primary signal.
+        cls_tokens = info["cls"].split()
+        ls = next((c[3:] for c in cls_tokens if c.startswith("LS-")), None)
+        le = next((c[3:] for c in cls_tokens if c.startswith("LE-")), None)
+        return ls, le
+
+    endpoints = [_endpoints(p) for p in paths_info]
+    assert ("planner", "lead") in endpoints, (
+        f"Missing planner→lead synthetic segment; endpoints: {endpoints!r}; paths: {paths_info!r}"
+    )
+    assert ("lead", "implementor") in endpoints, (
+        f"Missing lead→implementor synthetic segment; endpoints: {endpoints!r}; paths: {paths_info!r}"
+    )
+    # The original flat peer edge must NOT have been rendered.
+    assert ("planner", "implementor") not in endpoints, (
+        f"Gated edge was rendered as a flat peer edge instead of bridged through lead; "
+        f"endpoints: {endpoints!r}"
+    )
+    # Both segments carry gated-amber stroke (not direct/tee/tripped).
+    for info in paths_info:
+        ls, le = _endpoints(info)
+        if (ls, le) in {("planner", "lead"), ("lead", "implementor")}:
+            assert "var(--edge-gated)" in info["stroke"], (
+                f"Gated synthetic segment must be amber; got: {info!r}"
+            )
+
+
+@pytest.mark.dashboard
+def test_clicking_gated_segment_fetches_source_endpoints_with_crew_id(
+    gated_bridge_url, page
+):
+    """Clicking EITHER synthetic gated segment must issue GET /edge-log/<crew>/planner/implementor
+    — the SOURCE peer endpoints — preserving the multi-instance crew_id-in-path
+    contract.  (A naive bridge implementation that routed clicks to
+    /edge-log/<crew>/planner/lead or /<crew>/lead/implementor would silently
+    404 on follower-owned rows.)"""
+    url, crew_id = gated_bridge_url
+    page.goto(url)
+    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.wait_for_timeout(1000)
+
+    captured: list[str] = []
+    page.on(
+        "request",
+        lambda req: captured.append(req.url) if "/edge-log/" in req.url else None,
+    )
+
+    # Click each synthetic segment in turn and verify the SOURCE endpoints
+    # are used in the fetch URL.
+    paths = page.locator(".rail-topology path.flowchart-link")
+    n = paths.count()
+    assert n >= 2, f"Expected 2+ synthetic gated paths; got {n}"
+    for i in range(n):
+        paths.nth(i).dispatch_event("click")
+        page.wait_for_timeout(400)
+
+    matching = [u for u in captured if f"/edge-log/{crew_id}/planner/implementor" in u]
+    assert matching, (
+        f"Click on a gated synthetic segment must fetch SOURCE endpoints "
+        f"(/edge-log/{crew_id}/planner/implementor); captured: {captured!r}"
+    )
+    # Negative: NO request should go to a synthetic endpoint involving lead.
+    bad = [u for u in captured if "/lead/" in u or u.endswith("/lead")]
+    assert not bad, (
+        f"Gated-bridge click must not fetch /edge-log against `lead` as an "
+        f"endpoint (lead is the bridge node, not a peer); got: {bad!r}"
+    )
