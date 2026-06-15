@@ -469,6 +469,11 @@ class UIServer:
                 }
                 for es in snapshot.topology_edge_stats
             ],
+            # AC-6 serialization: aggregated slot→teammate_id map from all
+            # recorded topologies (last-write-wins per slot). Sibling to
+            # topology_edge_stats so the dashboard can join activity (keyed by
+            # teammate-id) onto routing nodes (keyed by slot).
+            "slot_to_teammate": dict(snapshot.topology_slot_to_teammate),
         }
         return instance, messages
 
