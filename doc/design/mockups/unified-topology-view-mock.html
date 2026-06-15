@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Unified Topology View — Mockup</title>
+<!-- Self-contained mockup for doc/design/unified-topology-view-uxspec.md.
+     No live API calls. State-switcher demonstrates the three states the
+     unified view must support:
+       (i)   roster-only fallback   — no topology instantiated
+       (ii)  active 3-node topology — mix of modes + reciprocal pair + tripped
+       (iii) selected-edge panel    — click any edge in state (ii)
+     Mermaid via CDN. All other CSS/JS inline. Reuses the dashboard's
+     OKLCH design tokens and status colour vocabulary. -->
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    /* Lifted verbatim from claude_crew/ui/dashboard.html — keeps the
+       mockup visually aligned with the live dashboard's tokens so the
+       implementor doesn't have to re-derive colour. */
+    --bg-0: oklch(0.91 0.016 236);
+    --bg-1: oklch(0.83 0.026 237);
+    --bg-2: oklch(0.74 0.034 238);
+    --bg-3: oklch(0.64 0.042 239);
+    --line: oklch(0.60 0.044 239);
+    --line-soft: oklch(0.72 0.032 238);
+    --fg-0: oklch(0.13 0.068 262);
+    --fg-1: oklch(0.22 0.074 260);
+    --fg-2: oklch(0.40 0.055 257);
+    --fg-3: oklch(0.55 0.040 253);
+    --accent: oklch(0.55 0.210 240);
+    --accent-line: oklch(0.55 0.210 240 / 0.45);
+    --st-idle:     oklch(0.50 0.038 257);
+    --st-thinking: oklch(0.62 0.15 75);
+    --st-tool:     oklch(0.55 0.16 290);
+    --st-waiting:  oklch(0.55 0.16 240);
+    --st-done:     oklch(0.57 0.15 150);
+    --st-error:    oklch(0.53 0.18 25);
+    /* Edge mode colours — match TopologyEdgePanel (M2) verbatim. */
+    --edge-direct:  #22c55e;
+    --edge-tee:     #3b82f6;
+    --edge-gated:   #f59e0b;
+    --edge-tripped: #ef4444;
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'Geist Mono', 'Fira Code', monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg-0); color: var(--fg-0); font-family: var(--font-sans); }
+
+  .frame {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    min-height: 100vh;
+  }
+
+  /* === Left rail — the unified topology view === */
+  .rail {
+    border-right: 1px solid var(--line);
+    padding: 14px 16px;
+    background: var(--bg-1);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .rail-header {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--fg-2); margin-bottom: 4px;
+  }
+  .rail-subtitle {
+    font-size: 12px; color: var(--fg-2); margin-bottom: 10px; min-height: 16px;
+  }
+
+  /* Mermaid container — the SVG is decorated post-render by the JS below. */
+  .graph-host {
+    background: var(--bg-0);
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+    padding: 8px;
+    min-height: 280px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .graph-host svg { width: 100%; height: auto; max-height: 360px; overflow: visible; }
+
+  /* Node card — rendered inside foreignObject. Border colour + pulse = activity. */
+  .nodecard {
+    display: inline-flex; flex-direction: column;
+    padding: 6px 10px 5px;
+    background: var(--bg-1);
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    min-width: 86px;
+    font-family: var(--font-sans);
+  }
+  .nodecard.thinking { border-color: var(--st-thinking); animation: borderpulse 1.6s ease-in-out infinite; }
+  .nodecard.tool     { border-color: var(--st-tool);     animation: borderpulse 1.6s ease-in-out infinite; }
+  .nodecard.waiting  { border-color: var(--st-waiting); }
+  .nodecard.idle     { border-color: var(--line); }
+  .nodecard.lead     { border-color: var(--accent-line); background: var(--bg-2); }
+  .nodecard .row1 {
+    display: flex; align-items: center; gap: 6px;
+    font-weight: 600; font-size: 12px; color: var(--fg-0);
+    font-family: var(--font-mono);
+  }
+  .nodecard .dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+  }
+  .nodecard.thinking .dot { background: var(--st-thinking); }
+  .nodecard.tool     .dot { background: var(--st-tool); }
+  .nodecard.waiting  .dot { background: var(--st-waiting); }
+  .nodecard.idle     .dot { background: var(--st-idle); }
+  .nodecard.lead     .dot { background: var(--accent); }
+  .nodecard .row2 {
+    font-family: var(--font-mono); font-size: 10px; color: var(--fg-3);
+    margin-top: 1px; line-height: 1.2; min-height: 12px;
+  }
+  @keyframes borderpulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+    50%      { box-shadow: 0 0 0 4px var(--pulse-color, rgba(0,0,0,0.08)); }
+  }
+  .nodecard.thinking { --pulse-color: oklch(0.62 0.15 75 / 0.30); }
+  .nodecard.tool     { --pulse-color: oklch(0.55 0.16 290 / 0.30); }
+
+  /* Edge stroke decoration is applied via inline style in JS;
+     the .edge-pulse class fires the 550ms width-jump pulse on exchange increment. */
+  .edge-pulse { animation: strokepulse 550ms ease-out; }
+  @keyframes strokepulse {
+    0%   { stroke-width: 6px; }
+    100% { stroke-width: var(--edge-stroke-w, 2.5px); }
+  }
+  path.flowchart-link { cursor: pointer; transition: stroke-width 0.25s; }
+  path.flowchart-link.disabled-click { cursor: default; }
+
+  /* Legend */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin: 8px 0 0; padding: 0;
+    font-size: 10px; font-family: var(--font-mono); color: var(--fg-3);
+  }
+  .legend > span { display: inline-flex; align-items: center; gap: 4px; }
+  .legend .swatch { width: 14px; height: 2.5px; border-radius: 1px; display: inline-block; }
+
+  /* Selected-edge panel */
+  .selpanel {
+    margin-top: 10px; padding: 9px 11px;
+    background: var(--bg-0); border: 1px solid var(--line); border-radius: 4px;
+    font-size: 11px;
+  }
+  .selpanel-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+  .selpanel-head .edgekey { font-family: var(--font-mono); font-weight: 600; font-size: 11.5px; }
+  .selpanel-head .meta { color: var(--fg-3); margin-left: 6px; font-size: 10px; }
+  .selpanel-head button {
+    background: none; border: none; cursor: pointer;
+    color: var(--fg-3); font-size: 13px; padding: 0 4px; line-height: 1;
+  }
+  .promote-btn {
+    padding: 3px 10px; font-size: 10.5px; margin-bottom: 6px;
+    background: #92400e; color: #fff7ed; border: none; border-radius: 3px;
+    cursor: pointer; font-weight: 600;
+  }
+  .msglog {
+    font-family: var(--font-mono); font-size: 10px;
+    max-height: 130px; overflow-y: auto;
+  }
+  .msglog .row { margin-bottom: 3px; line-height: 1.4; }
+  .msglog .seq { color: var(--fg-3); }
+  .msglog .who { color: var(--fg-2); }
+  .msglog .pl  { color: var(--fg-1); }
+
+  /* Footer (cwd/branch/uptime) — preserved from MiniGraph */
+  .footer {
+    margin-top: auto; padding-top: 12px;
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: 11px; color: var(--fg-2);
+  }
+  .footer .kv { display: flex; justify-content: space-between; }
+  .footer .v { font-family: var(--font-mono); color: var(--fg-0); }
+
+  /* === Right pane — mockup chrome (state switcher + notes) === */
+  .pane { padding: 28px 32px; max-width: 760px; }
+  .pane h1 { font-size: 22px; margin: 0 0 4px; color: var(--fg-0); }
+  .pane .lede { color: var(--fg-2); margin: 0 0 18px; font-size: 13px; line-height: 1.5; }
+  .switcher { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+  .switcher button {
+    padding: 6px 12px; font-size: 12px; font-family: var(--font-sans);
+    background: var(--bg-2); border: 1px solid var(--line); color: var(--fg-1);
+    border-radius: 4px; cursor: pointer; font-weight: 500;
+  }
+  .switcher button.on { background: var(--accent); color: white; border-color: var(--accent); }
+  .notes {
+    font-size: 12px; line-height: 1.55; color: var(--fg-1);
+    background: var(--bg-1); border: 1px solid var(--line-soft);
+    border-radius: 4px; padding: 14px 18px;
+  }
+  .notes h3 { margin: 0 0 6px; font-size: 13px; color: var(--fg-0); }
+  .notes ul { margin: 4px 0 10px 18px; padding: 0; }
+  .notes li { margin: 3px 0; }
+  .notes code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-2); padding: 1px 4px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <!-- ============ LEFT RAIL — the unified topology view ============ -->
+  <aside class="rail">
+    <div class="rail-header">Topology</div>
+    <div class="rail-subtitle" id="subtitle">—</div>
+
+    <div class="graph-host" id="graphHost"></div>
+
+    <div class="legend" id="legend">
+      <span><span class="swatch" style="background:var(--edge-direct)"></span>direct</span>
+      <span><span class="swatch" style="background:var(--edge-tee)"></span>tee</span>
+      <span><span class="swatch" style="background:var(--edge-gated)"></span>gated</span>
+      <span><span class="swatch" style="background:var(--edge-tripped)"></span>tripped</span>
+    </div>
+
+    <div id="selPanel"></div>
+
+    <div class="footer">
+      <div class="kv"><span>cwd</span><span class="v">~/dev/claude-crew</span></div>
+      <div class="kv"><span>branch</span><span class="v" style="color:var(--accent)">feat/unified-topology</span></div>
+      <div class="kv"><span>uptime</span><span class="v">12m 4s</span></div>
+    </div>
+  </aside>
+
+  <!-- ============ RIGHT PANE — mockup chrome ============ -->
+  <main class="pane">
+    <h1>Unified Topology View — Mockup</h1>
+    <p class="lede">
+      One graph replaces the two stacked graphs currently in the dashboard left rail.
+      Nodes carry activity (border colour + pulse + dot). Edges carry routing
+      (mode colour + badge + click). Cycle the three states below.
+    </p>
+
+    <div class="switcher">
+      <button data-state="roster">i. Roster fallback (no topology)</button>
+      <button data-state="active" class="on">ii. Active 3-node topology</button>
+      <button data-state="selected">iii. Active + edge selected</button>
+    </div>
+
+    <!-- BC-03 toggle — demonstrates the bug → fix. With "Simulate M2 bug" ON,
+         the mockup uses positional indexing (links[i] → edgeStats[i]) like the
+         buggy M2 panel; the reciprocal implementor↔reviewer pair will render
+         with swapped stats (the wrong edge goes red). OFF = the keyed fix. -->
+    <label style="display:inline-flex; gap:8px; align-items:center; padding:8px 12px;
+                  margin-bottom: 14px; background: var(--bg-1); border:1px solid var(--line-soft);
+                  border-radius:4px; font-size:12px; cursor:pointer;">
+      <input type="checkbox" id="bc03Toggle" style="cursor:pointer;"/>
+      <span><b>Simulate the M2 bug (positional indexing).</b>
+        With this ON, the reciprocal <code>implementor↔reviewer</code> pair renders with swapped
+        stats — the healthy edge goes red and the tripped edge goes green. Turn it OFF to see
+        the keyed-by-<code>(from,to)</code> fix.</span>
+    </label>
+
+    <div class="notes">
+      <h3>What to look for</h3>
+      <ul>
+        <li><b>State i — roster fallback.</b> <code>topology_edge_stats = []</code>.
+            Same component, no peer edges, neutral grey, no legend, no badges,
+            no click. Degenerate state of the unified view, not a separate widget.</li>
+        <li><b>State ii — active topology.</b> <code>lead</code> is a first-class
+            node. The <code>planner→lead→implementor</code> gated route is
+            visibly bridged through lead. <code>implementor↔reviewer</code> is a
+            <b>reciprocal pair</b> — both <code>direct</code>, with distinct
+            stats (one healthy 8x, one tripped 1x). The BC-03 fix: each edge
+            carries its own stats, never swapped. <code>planner→reviewer</code>
+            is a <code>tee</code>. Activity: planner thinking (amber border, pulsing),
+            implementor tool-use (purple border, pulsing), reviewer idle.</li>
+        <li><b>BC-03 demonstration.</b> Toggle <i>"Simulate the M2 bug"</i>
+            above. ON = the buggy positional mapping (the reciprocal pair's
+            stats swap — the wrong edge goes red). OFF = the keyed-by-(from,to)
+            fix (each edge carries its own stats). Flip back and forth on
+            state ii to see the difference at a glance. This IS the bug the
+            slice fixes, demonstrated visually.</li>
+        <li><b>State iii — edge selected.</b> Clicking any decorated edge in
+            state ii opens the panel below the graph: mode + exchange count,
+            "Promote to gated" button (hidden for already-gated and tripped
+            edges per M2 contract), and the stubbed message log.</li>
+        <li><b>Multi-instance.</b> All <code>/edge-log</code> and
+            <code>/edge-promote</code> URLs in the (stubbed) handlers are
+            <code>/${crewId}/${from}/${to}</code> — preserves the M2 contract
+            (do not regress the leader→follower proxy; see CLAUDE.md trap).</li>
+        <li><b>Removed from today's hub.</b> The <code>animateMotion</code>
+            pulses along teammate→lead spokes are gone. In the unified view,
+            pulses on edges would imply routing — confusing for activity.
+            Activity motion lives on the node border now. Flagged in spec §7.</li>
+      </ul>
+    </div>
+  </main>
+</div>
+
+<script>
+  /* ──────────────────────────────────────────────────────────────────
+     Dummy data — represents the three states the unified view supports.
+     `agents` mirrors what /api/state.cli.agents exposes; `edgeStats`
+     mirrors cli.topology_edge_stats. Keep names/shape close to the live
+     schema so the implementor can lift this directly.
+     ────────────────────────────────────────────────────────────────── */
+
+  const AGENTS = [
+    { id: "a7b3c2d8e9f0",         role: "planner",     status: "thinking" },
+    { id: "b8c4d3e9f0a1",         role: "implementor", status: "tool-use" },
+    { id: "c9d5e4f0a1b2",         role: "reviewer",    status: "idle"     },
+  ];
+
+  // State ii / iii edge stats — note the reciprocal pair on implementor↔reviewer.
+  const EDGE_STATS_ACTIVE = [
+    { from_slot: "planner",     to_slot: "lead",        mode: "gated",  tripped: false, exchanges: 3 },
+    { from_slot: "lead",        to_slot: "implementor", mode: "gated",  tripped: false, exchanges: 3 },
+    { from_slot: "planner",     to_slot: "reviewer",    mode: "tee",    tripped: false, exchanges: 5 },
+    { from_slot: "implementor", to_slot: "reviewer",    mode: "direct", tripped: false, exchanges: 8 },
+    // The reciprocal back-edge — same pair, different direction, distinct stats,
+    // AND tripped. With positional mapping (M2 bug) this would have swapped
+    // stats with the forward edge. With keyed lookup, it renders correctly.
+    { from_slot: "reviewer",    to_slot: "implementor", mode: "direct", tripped: true,  exchanges: 1 },
+  ];
+
+  // Stubbed message log returned by /edge-log/<crewId>/<from>/<to>.
+  function stubMsgs(es) {
+    const n = Math.min(10, es.exchanges);
+    const out = [];
+    for (let i = 1; i <= n; i++) {
+      out.push({
+        seq: 1200 + i,
+        sender: es.from_slot,
+        recipient: es.to_slot,
+        payload: `{"kind":"task","ref":"#${i}"}`,
+      });
+    }
+    return out;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     The state machine. `currentState` ∈ "roster" | "active" | "selected".
+     `selectedEdge` is the EdgeStat the user clicked (state iii only).
+     ────────────────────────────────────────────────────────────────── */
+  let currentState = "active";
+  let selectedEdge = null;
+
+  /* ──────────────────────────────────────────────────────────────────
+     Build mermaid source for whichever state we're in.
+     Roster fallback: lead --- teammate_X for each live teammate.
+     Active: lead is a first-class node, every EdgeStat becomes a peer edge.
+     Node ids in mermaid = slot name (or teammate-id for roster nodes
+     without a slot mapping). Labels are HTML rendered via foreignObject.
+     ────────────────────────────────────────────────────────────────── */
+  function nodeLabel(role, teammateId, statusClass) {
+    // The HTML rendered inside the mermaid node. Mermaid wraps this in a
+    // foreignObject when htmlLabels=true. ATTRIBUTES MUST USE SINGLE QUOTES
+    // — the outer mermaid label is double-quoted (`id["..."]`), so any inner
+    // double quote terminates the label early and breaks parsing.
+    const id = teammateId ? teammateId.slice(0, 8) : "";
+    return `<div class='nodecard ${statusClass}'><div class='row1'><span class='dot'></span>${role}</div><div class='row2'>${id}</div></div>`;
+  }
+
+  function statusClassFor(role) {
+    if (role === "lead") return "lead";
+    const a = AGENTS.find(x => x.role === role);
+    if (!a) return "idle";
+    if (a.status === "thinking") return "thinking";
+    if (a.status === "tool-use") return "tool";
+    if (a.status === "waiting")  return "waiting";
+    return "idle";
+  }
+
+  function buildMermaidSource(state) {
+    // Active topologies render top-down (real shapes flow planner→reviewer);
+    // roster fallback renders left-right (star is wide-and-shallow and the
+    // narrow left rail benefits from horizontal layout). Spec §Q4.
+    const orientation = (state === "roster") ? "graph LR" : "graph TD";
+    const lines = [orientation];
+    // ── Node declarations (always emit lead) ──
+    const slots = new Set(["lead"]);
+    if (state === "active" || state === "selected") {
+      EDGE_STATS_ACTIVE.forEach(es => { slots.add(es.from_slot); slots.add(es.to_slot); });
+    } else {
+      AGENTS.forEach(a => slots.add(a.role));
+    }
+    slots.forEach(slot => {
+      const teammate = AGENTS.find(a => a.role === slot);
+      const tid = teammate ? teammate.id : null;
+      const cls = statusClassFor(slot);
+      // Mermaid HTML labels need backticks; use the html-string syntax.
+      lines.push(`  ${slot}["${nodeLabel(slot, tid, cls)}"]`);
+    });
+    // ── Edges ──
+    if (state === "active" || state === "selected") {
+      EDGE_STATS_ACTIVE.forEach(es => {
+        const badge = es.tripped ? "⚡" : (es.exchanges > 0 ? String(es.exchanges) : "");
+        const lbl = `${es.mode} ${badge}`.trim();
+        lines.push(`  ${es.from_slot} -->|"${lbl}"| ${es.to_slot}`);
+      });
+    } else {
+      AGENTS.forEach(a => {
+        lines.push(`  lead --> ${a.role}`);
+      });
+    }
+    // ── Class assignment so we can paint node borders without re-parsing ──
+    // (Mermaid emits class onto the .node <g>; the post-render walk picks
+    //  this up directly. Same approach M2's TopologyEdgePanel uses for edges.)
+    slots.forEach(slot => {
+      const cls = statusClassFor(slot);
+      lines.push(`  class ${slot} act-${cls}`);
+    });
+    return lines.join("\n");
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     Post-render decoration. THIS is the unified version of:
+        (a) MiniGraph's per-node activity styling (today: SVG circle + dot)
+        (b) TopologyEdgePanel's per-edge mode colour + click handler
+     The BC-03 fix is here: edges look up their EdgeStat by (from,to) keyed
+     from the parent <g>'s id, not by index.
+     ────────────────────────────────────────────────────────────────── */
+  function decorate(svgRoot, state) {
+    // Edge decoration — keyed by (from,to), not positional.
+    // Build the lookup map once, then walk every edge <g> and resolve.
+    const edgeStats = (state === "active" || state === "selected") ? EDGE_STATS_ACTIVE : [];
+    const byKey = new Map();
+    edgeStats.forEach(es => byKey.set(`${es.from_slot}→${es.to_slot}`, es));
+    // BC-03 demo toggle: when ON, force positional indexing (the M2 bug);
+    // when OFF, use the keyed lookup (the fix). Mockup-only — the production
+    // implementation always uses keyed lookup; this flag exists purely so
+    // Jerome can see the bug→fix difference by clicking.
+    const simulateBug = document.getElementById("bc03Toggle")?.checked === true;
+
+    // Mermaid v11 emits each edge as a <path class="flowchart-link LS-<src> LE-<dst> ...">
+    // with an id like "L_<src>_<dst>_<n>". The endpoints are encoded in TWO
+    // places — id and the LS-/LE- classes — so we have defense in depth:
+    //   1. preferred: parse `id` with /^L[-_](.+?)[-_](.+?)[-_]\d+$/  (mermaid
+    //      has shipped both `_` and `-` separators across recent versions)
+    //   2. fallback:  read LS-* / LE-* class tokens
+    //   3. last-resort positional (logged as console.warn — should never fire)
+    const paths = svgRoot.querySelectorAll("path.flowchart-link");
+    let positionalFallbackUsed = 0;
+    paths.forEach((path, idx) => {
+      let es = null;
+      if (simulateBug) {
+        // === M2 bug path — positional mapping. Mermaid reorders paths during
+        // layout, so for a reciprocal pair this attaches the wrong stats to
+        // each edge. THIS IS THE BUG WE'RE FIXING. ===
+        es = edgeStats[idx] || null;
+      } else {
+        // === Fix — keyed lookup with defence-in-depth. ===
+        const id = path.id || (path.parentElement && path.parentElement.id) || "";
+        const m = id.match(/^L[-_](.+?)[-_](.+?)[-_]\d+$/);
+        if (m) {
+          es = byKey.get(`${m[1]}→${m[2]}`) || null;
+        }
+        if (!es) {
+          // Class-based fallback — mermaid v11 emits LS-<src> and LE-<dst>.
+          const cls = (path.getAttribute("class") || "").split(/\s+/);
+          const ls = cls.find(c => c.startsWith("LS-"));
+          const le = cls.find(c => c.startsWith("LE-"));
+          if (ls && le) {
+            es = byKey.get(`${ls.slice(3)}→${le.slice(3)}`) || null;
+          }
+        }
+        if (!es) {
+          es = edgeStats[idx] || null;
+          if (es) positionalFallbackUsed++;
+        }
+      }
+      if (!es) return;
+
+      const colour =
+        es.tripped              ? "var(--edge-tripped)" :
+        es.mode === "gated"     ? "var(--edge-gated)" :
+        es.mode === "tee"       ? "var(--edge-tee)" :
+                                  "var(--edge-direct)";
+      const w = es.tripped ? "3px" : "2.5px";
+      path.style.stroke = colour;
+      path.style.strokeWidth = w;
+      path.style.setProperty("--edge-stroke-w", w);
+
+      // Also paint the arrowhead marker — mermaid puts the arrow in <defs>,
+      // but the simplest visual fix is to colour the marker via path's marker-end
+      // CSS variable proxy. For this mockup we just colour the path; the live
+      // implementor should also walk the marker-end ref for full colour parity.
+      path.addEventListener("click", () => {
+        selectedEdge = es;
+        currentState = "selected";
+        renderState();
+      });
+    });
+    if (positionalFallbackUsed > 0) {
+      console.warn(`[unified-topology] keyed lookup miss for ${positionalFallbackUsed} edge(s) — fell back to positional. Mermaid id format may have changed.`);
+    }
+
+    // Roster fallback: neutral grey, disabled click.
+    if (state === "roster") {
+      svgRoot.querySelectorAll("path.flowchart-link").forEach(p => {
+        p.style.stroke = "var(--line)";
+        p.style.strokeWidth = "1.5px";
+        p.classList.add("disabled-click");
+        p.style.cursor = "default";
+      });
+    }
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     Selected-edge panel — opens when state === "selected".
+     Mirrors TopologyEdgePanel's panel verbatim (promote button hidden
+     for gated/tripped). Multi-instance URL shape preserved.
+     ────────────────────────────────────────────────────────────────── */
+  const STUB_CREW_ID = "crew-7c8a1234";
+  function renderSelectedPanel() {
+    const host = document.getElementById("selPanel");
+    if (currentState !== "selected" || !selectedEdge) { host.innerHTML = ""; return; }
+    const es = selectedEdge;
+    const msgs = stubMsgs(es);
+    const showPromote = es.mode !== "gated" && !es.tripped;
+    // URL shape — preserves M2 multi-instance contract. Live implementor
+    // wires these to fetch(`/edge-log/${crewId}/...`); mockup just shows the URL.
+    const edgeLogUrl   = `/edge-log/${STUB_CREW_ID}/${es.from_slot}/${es.to_slot}`;
+    const promoteUrl   = `/edge-promote/${STUB_CREW_ID}/${es.from_slot}/${es.to_slot}`;
+    host.innerHTML = `
+      <div class="selpanel">
+        <div class="selpanel-head">
+          <div>
+            <span class="edgekey">${es.from_slot} → ${es.to_slot}</span>
+            <span class="meta">${es.mode}${es.tripped ? " ⚡" : ""} · ${es.exchanges}x</span>
+          </div>
+          <button id="selClose" title="Close">✕</button>
+        </div>
+        ${showPromote ? `<button class="promote-btn" title="POST ${promoteUrl}">Promote to gated</button>` : ""}
+        <div style="font-family:var(--font-mono); font-size:9px; color:var(--fg-3); margin-bottom:6px;">
+          GET ${edgeLogUrl}
+        </div>
+        <div class="msglog">
+          ${msgs.length === 0
+            ? `<div style="color:var(--fg-3)">No messages on this edge yet.</div>`
+            : msgs.map(m => `
+                <div class="row">
+                  <span class="seq">#${m.seq}</span>
+                  <span class="who">${(m.sender||'').slice(0,8)}→${(m.recipient||'').slice(0,8)}: </span>
+                  <span class="pl">${m.payload.slice(0,60)}</span>
+                </div>`).join("")}
+        </div>
+      </div>`;
+    document.getElementById("selClose").onclick = () => {
+      selectedEdge = null; currentState = "active"; renderState();
+    };
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     Render — rebuild mermaid, decorate, re-render the panel & legend.
+     ────────────────────────────────────────────────────────────────── */
+  mermaid.initialize({ startOnLoad: false, theme: "neutral", flowchart: { htmlLabels: true, curve: "basis" }, securityLevel: "loose" });
+
+  async function renderState() {
+    const host = document.getElementById("graphHost");
+    const subtitle = document.getElementById("subtitle");
+    const legend = document.getElementById("legend");
+
+    // Subtitle + legend visibility per state.
+    if (currentState === "roster") {
+      subtitle.textContent = "roster — no shape instantiated";
+      legend.style.display = "none";
+    } else {
+      subtitle.textContent = "active shape: planner→implementor→reviewer";
+      legend.style.display = "flex";
+    }
+
+    // Switcher button highlight.
+    document.querySelectorAll(".switcher button").forEach(b => {
+      const st = b.getAttribute("data-state");
+      const matches = (currentState === st) || (currentState === "selected" && st === "selected");
+      b.classList.toggle("on", matches);
+    });
+
+    // Render mermaid.
+    const src = buildMermaidSource(currentState === "selected" ? "active" : currentState);
+    const uid = "g-" + Math.random().toString(36).slice(2);
+    let svg;
+    try {
+      const out = await mermaid.render(uid, src);
+      svg = out.svg;
+    } catch (e) {
+      host.innerHTML = `<div style="color:var(--st-error); font-family:var(--font-mono); font-size:11px; padding:12px;">mermaid render failed: ${e.message}</div>`;
+      return;
+    }
+    host.innerHTML = svg;
+    const svgEl = host.querySelector("svg");
+    if (svgEl) {
+      svgEl.style.background = "transparent";
+      decorate(svgEl, currentState === "selected" ? "active" : currentState);
+    }
+    renderSelectedPanel();
+  }
+
+  document.querySelectorAll(".switcher button").forEach(b => {
+    b.addEventListener("click", () => {
+      const st = b.getAttribute("data-state");
+      if (st === "selected") {
+        // Auto-select an interesting edge — the tripped one — so iii is
+        // demonstrable without first having to click in state ii.
+        selectedEdge = EDGE_STATS_ACTIVE.find(e => e.tripped) || EDGE_STATS_ACTIVE[0];
+        currentState = "selected";
+      } else {
+        selectedEdge = null;
+        currentState = st;
+      }
+      renderState();
+    });
+  });
+
+  // BC-03 toggle — re-render whenever Jerome flips it.
+  document.getElementById("bc03Toggle").addEventListener("change", () => renderState());
+
+  // Boot
+  renderState();
+</script>
+</body>
+</html>
