@@ -6,6 +6,26 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-15] Feature: unified-topology-view
+
+Deferred items from the `unified-topology-view` slice (validation PASS, 1552 full-suite green excluding the known shutdown flake; feature-review PASS). Both adjudicated non-blocking.
+
+### [Low, dashboard] Through-lead synthetic gated segments collide in the keyed lookup on shared lead-adjacent endpoints
+
+- **What**: The unified `TopologyGraph` expands each gated peer edge into two synthetic segments (`from→lead`, `lead→to`) via `displayEdges`. When two distinct gated edges share a lead-adjacent endpoint (fan-in/fan-out, e.g. `planner→impl` and `reviewer→impl` both gated → two `lead→impl` segments with the identical `from→to` key), `window.mapEdgeStatsToPaths`'s `byKey.set` overwrites, so both rendered `lead→impl` paths resolve to the *last* source `EdgeStat`. A click on one can dispatch `/edge-log` against the other's source peers, and a tripped source can be masked on that half-segment.
+- **Where**: `claude_crew/ui/dashboard.html` — `displayEdges` synthesis + `window.mapEdgeStatsToPaths` `byKey` map.
+- **Why it matters**: An operator clicking a gated segment in a fan-in topology could open the wrong edge's message log. Partial, not total, masking (the `from→lead` half keys distinctly, so a tripped gated edge still renders red on its peer-adjacent segment). Requires a rare topology (two gated edges converging on one slot); outside every acceptance test and below the human AC-7 gate. Feature-review and slice-review (task-2 cycle-1) both adjudicated it tracked debt.
+- **Suggested action**: Thread a stable per-source synthetic identity through to decoration so keyed lookup + click-routing stay 1:1 with the source `EdgeStat`. Do NOT disambiguate by mermaid emit ordinal (`L_lead_impl_0` vs `_1`) — that recouples the lookup to layout order, the exact positional fragility BC-03 exists to kill. Add a fan-in regression test alongside the existing keyed-lookup deletion-detector.
+
+### [Low, dashboard/UX] Multi-node topology graph is clipped in the narrow left rail
+
+- **What**: A topology with several nodes (e.g. planner + lead + implementor + reviewer, where the gated bridge adds the lead node, increasing height) renders taller than the left-rail's allotted area, so lower nodes / edges fall below the fold without scrolling. Observed at signoff on the shipped `TopologyGraph`.
+- **Where**: `claude_crew/ui/dashboard.html` — `.rail-topology` container sizing / the topology SVG max-height in the left rail.
+- **Why it matters**: Cosmetic, not correctness — but the operator can't see the whole crew at a glance in a non-trivial topology. Same family as the existing "wide `graph LR` diagrams render cramped in the narrow artifact drawer" item.
+- **Suggested action**: Give the rail topology a scroll affordance or a fit-to-rail zoom, or widen the rail for non-trivial topologies. Cheap follow-up; pairs naturally with the wide-diagram drawer item.
+
+---
+
 ## [2026-06-13] Feature: m2-edge-routing — retro findings
 
 Post-retro findings from the `m2-edge-routing` feature (PASS, 1537 full-suite green, 4 tasks, 13 ATs).

@@ -316,7 +316,7 @@ The handler calls `broker.send_scoped(sender_id, recipient, {"text": message})`.
 
 ### Dashboard edge observability (M2)
 
-`/api/state` now carries `topology_edge_stats: list[EdgeStat]` per crew instance (sourced from `BrokerSnapshot.topology_edge_stats`; each entry includes `{from_slot, to_slot, mode, exchanges, tripped, crew_id}`).
+`/api/state` carries `topology_edge_stats: list[EdgeStat]` per crew instance (sourced from `BrokerSnapshot.topology_edge_stats`; each entry includes `{from_slot, to_slot, mode, exchanges, tripped, crew_id}`), plus the additive `slot_to_teammate: {slot: teammate_id}` map (sourced from `BrokerSnapshot.topology_slot_to_teammate`, aggregated from all recorded topologies with last-write-wins on slot collision). `slot_to_teammate` is the authoritative join that lets the unified view attach per-teammate activity (keyed by teammate-id) onto per-slot routing nodes — not an `agent.role === slot` guess (slot labels are author-defined and may differ from pack roles).
 
 Two new per-instance endpoints (fully multi-instance proxied via `crew_id`):
 
@@ -327,7 +327,13 @@ Two new per-instance endpoints (fully multi-instance proxied via `crew_id`):
 
 Both guarded by `_PATH_PARAM_RE` (`^[A-Za-z0-9_\-]+$`), return 400 on bad param, 502 on proxy failure. Slot→teammate-id resolution walks `reversed(topologies)` (latest topology governs — Assumption #3).
 
-`TopologyEdgePanel` in `dashboard.html` is an on-graph SVG-walk decoration (not a side table): after `mermaid.render()` it walks `svgEl.querySelectorAll('.flowchart-link, path.edge-path')` and decorates each link with per-mode color (direct=green, tee=blue, gated=amber, tripped=red), stroke-width pulse on traffic (widens when `exchanges > prev`, restores via `setTimeout`), and a selected-edge panel showing the message log and a promote-to-gated control. Re-applies after each `mermaid.render` (wired to `useEffect([mermaidSrc, crewId])`). Multi-instance correct: both `fetch` URLs carry `crewId`.
+**Unified topology view (supersedes the M2 two-graph layout).** `dashboard.html` renders a single `TopologyGraph` component (which replaced the pre-M2 lead-centric `MiniGraph` roster hub *and* the M2 `TopologyEdgePanel` edge overlay — both removed). One mermaid graph carries both layers on disjoint visual channels:
+- **Activity layer** (node): each node is a `foreignObject` card (slot label + 8-char teammate-id) whose border color + 1.6s pulse + corner dot encode the occupant teammate's status, joined via `cli.slot_to_teammate` (→ teammate-id → `agents[].status`). The legacy teammate→lead `animateMotion` spoke pulses are deliberately removed (edge motion would collide with the routing channel).
+- **Routing layer** (edge): post-`mermaid.render()` SVG-walk decoration colors each `path.flowchart-link` by mode (direct=green, tee=blue, gated=amber, tripped=red, thicker on tripped), with a 550ms exchange-increment pulse, a selected-edge message-log panel, and a promote-to-gated control.
+- **Gated-through-lead bridging:** the broker records gated edges peer→peer; a `displayEdges` memo expands each gated `EdgeStat` into two synthetic segments (`from→lead`, `lead→to`, both amber) carrying the source `EdgeStat` on `_source`, so `lead` visibly bridges gated routes. Click/badge/log on either segment dispatch against the SOURCE peer endpoints.
+- **BC-03 keyed edge mapping:** `window.mapEdgeStatsToPaths(svgRoot, edgeStats)` resolves each rendered path to its `EdgeStat` by **endpoint identity** — parsing the mermaid path id (`/^L[-_](.+?)[-_](.+?)[-_]\d+$/`) with an `LS-`/`LE-` class fallback and a positional last-resort that `console.warn`s. This replaces M2's positional `links[i]→edgeStats[i]` mapping, which aliased reciprocal pairs when mermaid v11 reordered paths during layout. A green-suite Playwright deletion-detector (`tests/test_unified_topology_keyed_lookup.py`) fails if the lookup reverts to positional.
+- **Roster fallback:** when `topology_edge_stats` is empty, the same component renders a `graph LR` star (`lead → teammate_*`, neutral grey, no badges/click, legend hidden, subtitle "roster — no shape instantiated").
+- Multi-instance correct: all `/edge-log` + `/edge-promote` fetches carry `crewId`.
 
 ---
 
