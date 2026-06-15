@@ -217,6 +217,12 @@ class BrokerSnapshot:
     # the effective routing (honoring overrides/trips); tripped=True when the
     # circuit breaker auto-tripped that edge.
     topology_edge_stats: "tuple[EdgeStat, ...]" = ()
+    # M3: per-slot teammate mapping aggregated from all recorded topologies.
+    # Last topology wins on slot collision (same "last wins" semantics as
+    # topology_edge_stats — later topologies take precedence).
+    topology_slot_to_teammate: "Mapping[str, str]" = dataclasses.field(
+        default_factory=dict
+    )
 
 
 # A factory takes (id, name, role, model=None) and returns an unstarted
@@ -1221,6 +1227,12 @@ class Broker:
                     tripped=key in self._edge_tripped,
                 ))
 
+        # M3: build topology_slot_to_teammate — flatten all topologies with
+        # last-write-wins (later topology overwrites earlier on slot collision).
+        slot_to_teammate: dict[str, str] = {}
+        for topo in self._topologies:
+            slot_to_teammate.update(topo.slot_to_teammate)
+
         return BrokerSnapshot(
             crew_id=self.crew_id,
             teammates=teammates_tuple,
@@ -1232,6 +1244,7 @@ class Broker:
             shape_proposals=tuple(self._proposals.values()),
             topologies=tuple(self._topologies),
             topology_edge_stats=tuple(edge_stats),
+            topology_slot_to_teammate=slot_to_teammate,
         )
 
     def get_teammate_status(self, teammate_id: str) -> dict[str, Any]:

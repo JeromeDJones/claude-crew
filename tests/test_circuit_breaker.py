@@ -38,6 +38,7 @@ from claude_crew.broker import (
 )
 from claude_crew.envelope import Envelope, new_message_id
 from claude_crew.teammate import Teammate
+from claude_crew.ui_server import UIServer
 
 
 # ---------------------------------------------------------------------------
@@ -539,3 +540,92 @@ class TestEdgeStatSnapshot:
         stats = {(e.from_slot, e.to_slot): e for e in snap.topology_edge_stats}
         assert stats[("a", "b")].mode == "gated"
         assert stats[("a", "b")].tripped is False  # manual promote, not auto-trip
+
+
+# ---------------------------------------------------------------------------
+# AT-2 — slot_to_teammate serialized on /api/state per-cli payload
+# ---------------------------------------------------------------------------
+
+class TestSlotToTeammateSerialization:
+    """AT-2 (AC-6 serialization): _build_local_instance surfaces slot_to_teammate
+    as a sibling to topology_edge_stats; topology_edge_stats is byte-for-byte
+    unchanged. Uses subset-style assertions (not dict-equality on the whole
+    instance) so future additive keys don't break this suite.
+    """
+
+    async def test_slot_to_teammate_present_in_payload(self, broker: Broker) -> None:
+        """slot_to_teammate key appears in the instance dict, equal to the broker's
+        topology_slot_to_teammate."""
+        a_id = await _spawn(broker, "planner")
+        b_id = await _spawn(broker, "impl")
+        broker.record_topology(_topo(
+            [("planner", "impl", "direct")],
+            {"planner": a_id, "impl": b_id},
+        ))
+
+        snap = broker.snapshot()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+
+        # AT-2: slot_to_teammate is present and matches the broker field (subset).
+        assert "slot_to_teammate" in instance
+        assert instance["slot_to_teammate"] == {"planner": a_id, "impl": b_id}
+
+    async def test_slot_to_teammate_empty_without_topology(self, broker: Broker) -> None:
+        """With no recorded topology, slot_to_teammate is an empty dict."""
+        snap = broker.snapshot()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+
+        assert "slot_to_teammate" in instance
+        assert instance["slot_to_teammate"] == {}
+
+    async def test_slot_to_teammate_sibling_not_nested_in_edge_stats(
+        self, broker: Broker
+    ) -> None:
+        """slot_to_teammate is a top-level key, NOT nested inside topology_edge_stats entries."""
+        a_id = await _spawn(broker, "a")
+        b_id = await _spawn(broker, "b")
+        broker.record_topology(_topo(
+            [("a", "b", "direct")], {"a": a_id, "b": b_id}
+        ))
+
+        snap = broker.snapshot()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+
+        # slot_to_teammate is a top-level sibling key.
+        assert "slot_to_teammate" in instance
+        # No edge stat entry has a slot_to_teammate key nested inside it.
+        for edge_stat in instance["topology_edge_stats"]:
+            assert "slot_to_teammate" not in edge_stat
+
+    async def test_topology_edge_stats_serialization_unchanged(
+        self, broker: Broker
+    ) -> None:
+        """Adding slot_to_teammate leaves topology_edge_stats byte-for-byte unchanged."""
+        a_id = await _spawn(broker, "a")
+        b_id = await _spawn(broker, "b")
+        broker.record_topology(_topo(
+            [("a", "b", "tee"), ("b", "a", "direct")],
+            {"a": a_id, "b": b_id},
+        ))
+        # Send one message so exchanges is non-zero on one edge.
+        await broker.send(_env(a_id, b_id))
+
+        snap = broker.snapshot()
+        ui = UIServer(broker, port=0)
+        instance, _ = ui._build_local_instance(snap)
+
+        stats = {(e["from_slot"], e["to_slot"]): e for e in instance["topology_edge_stats"]}
+        # Exact key set on each edge-stat entry must be byte-for-byte unchanged.
+        expected_keys = {"from_slot", "to_slot", "mode", "exchanges", "tripped", "crew_id"}
+        for stat in instance["topology_edge_stats"]:
+            assert set(stat.keys()) == expected_keys, (
+                f"topology_edge_stats entry has unexpected keys: {set(stat.keys())}"
+            )
+        # Values remain correct.
+        assert stats[("a", "b")]["mode"] == "tee"
+        assert stats[("a", "b")]["exchanges"] == 1
+        assert stats[("b", "a")]["mode"] == "direct"
+        assert stats[("b", "a")]["exchanges"] == 0

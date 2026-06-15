@@ -912,3 +912,151 @@ def test_effort_panel_legacy_snapshot_renders_plain(legacy_effort_url, page):
     assert "→" not in panel_text, (
         "Legacy snapshot must not render the divergence arrow"
     )
+
+
+# ── unified-topology-view AT-7 — multi-instance crewId in fetch path ────────
+
+
+from claude_crew.broker import BrokerSnapshot as _BS_AT7  # noqa: E402
+from claude_crew.broker import EdgeStat as _EdgeStat_AT7  # noqa: E402
+from claude_crew.broker import LiveTeammateInfo as _Live_AT7  # noqa: E402
+from claude_crew.broker import TeammateInfo as _TInfo_AT7  # noqa: E402
+
+
+def _at7_make_broker(crew_id: str = "crew-at7-follower") -> Broker:
+    """Broker with a 2-slot active topology so an edge is clickable."""
+    a_info = _TInfo_AT7(
+        id="tid-a", name="planner", role="planner",
+        spawned_at=time.time() - 60, alive=True,
+    )
+    b_info = _TInfo_AT7(
+        id="tid-b", name="implementor", role="implementor",
+        spawned_at=time.time() - 60, alive=True,
+    )
+    base_status: dict = {
+        "current_tool_count": 0,
+        "current_turn_started_at_wallclock": None,
+        "total_input_tokens": 0, "total_output_tokens": 0, "total_cost_usd": 0.0,
+        "current_tools": [], "current_tool": None,
+        "last_activity_at_wallclock": None,
+    }
+    live = (
+        _Live_AT7(info=a_info, status=dict(base_status), model="claude-sonnet-4-6"),
+        _Live_AT7(info=b_info, status=dict(base_status), model="claude-sonnet-4-6"),
+    )
+    edges = (
+        _EdgeStat_AT7(from_slot="planner", to_slot="implementor", mode="direct", exchanges=2, tripped=False),
+    )
+    snap = _BS_AT7(
+        crew_id=crew_id,
+        teammates=(a_info, b_info),
+        live=live,
+        log=(),
+        topology_edge_stats=edges,
+        topology_slot_to_teammate={"planner": "tid-a", "implementor": "tid-b"},
+    )
+    b = Broker()
+    b.snapshot = lambda log_limit=None: snap  # type: ignore[method-assign]
+    b.crew_id = crew_id  # type: ignore[misc]
+    return b
+
+
+@pytest.fixture(scope="module")
+def at7_unified_topology_url():
+    """Single dashboard with an active 2-slot topology — enough to observe the
+    /edge-log fetch URL on click. The multi-instance HTTP proxy itself is
+    covered end-to-end by tests/test_edge_dashboard.py::TestMultiInstanceEdgeLogProxy
+    (M2 gate, unchanged by this slice). What we additionally verify here is
+    that the unified TopologyGraph *preserves* the crew_id-in-path contract:
+    a same-origin shortcut (`/edge-log/${from}/${to}` without crewId) would
+    silently 404 on follower-owned rows — the multi-instance trap CLAUDE.md
+    warns about and AT-7 makes a regression guard for.
+    """
+    broker = _at7_make_broker()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    ui = UIServer(broker, port=port)
+    app = ui._make_app()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("UIServer (AT-7) did not start within 10 seconds")
+
+    yield f"http://127.0.0.1:{port}", broker.crew_id
+
+    server.should_exit = True
+    t.join(timeout=3)
+
+
+@pytest.mark.dashboard
+def test_at7_unified_topology_preserves_crew_id_in_edge_log_path(
+    at7_unified_topology_url, page
+):
+    """AT-7: clicking an edge issues a GET /edge-log/{crewId}/{from}/{to} fetch.
+
+    The unified TopologyGraph must keep the crew_id path-segment on every
+    per-edge fetch. A same-origin shortcut would hit the leader's broker and
+    404 for follower-owned rows (the CLAUDE.md multi-instance trap). This
+    test records the actual fetch URL the component emits when an edge is
+    clicked.
+    """
+    url, crew_id = at7_unified_topology_url
+    page.goto(url)
+    page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.wait_for_timeout(800)  # mermaid render + post-render decoration
+
+    # Capture every fetch URL the dashboard issues from now on.
+    captured: list[str] = []
+    page.on(
+        "request",
+        lambda req: captured.append(req.url) if "/edge-" in req.url else None,
+    )
+
+    # Diagnostic — what paths does mermaid emit?
+    diag = page.evaluate(
+        """() => {
+          const all = document.querySelectorAll('.rail-topology svg path');
+          const out = [];
+          all.forEach(p => out.push({
+            cls: p.getAttribute('class') || '',
+            id: p.id || '',
+          }));
+          return out;
+        }"""
+    )
+    # Click the first decorated flowchart-link path (the lone edge in this fixture).
+    edge_path = page.locator(".rail-topology path.flowchart-link").first
+    edge_path.wait_for(state="attached", timeout=5000)
+    # Use dispatchEvent so the synthetic click runs the JS handler regardless of
+    # how mermaid sized the path or where the centroid lies. Some path
+    # geometries are 0-area at certain zoom levels and confound .click().
+    edge_path.dispatch_event("click")
+    # Wait briefly for the fetch to fire.
+    page.wait_for_timeout(1500)
+
+    assert any(f"/edge-log/{crew_id}/" in u for u in captured), (
+        f"Expected an /edge-log/{crew_id}/ fetch after edge click; "
+        f"captured: {captured!r}; svg paths: {diag!r}"
+    )
