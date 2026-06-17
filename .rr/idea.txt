@@ -1,0 +1,254 @@
+Title: M3 follow-up batch — plan-mode write gate + teammate telemetry hardening
+
+This slice closes four post-M3 follow-ups recorded in doc/BACKLOG.md (all under
+the [2026-06-17] headings). They batch together because the two substantive
+fixes both touch claude_crew/sdk_teammate.py (the SDK-teammate per-turn loop,
+hooks, and death/telemetry path) — one planned unit so the reviewer sees the
+cross-cutting sdk_teammate.py concerns once. The other two are test-only and
+disjoint. This is hardening, not new product surface.
+
+IMPORTANT framing — verify before you build. One of these items (stderr
+telemetry) was logged in the backlog as "never populated / null in practice,"
+but that was a STALE-SERVER observation during the M3 run, not a code gap. The
+capture machinery is ALREADY fully implemented and tested. Confirm the current
+state of each item against the code before deciding what work remains — do not
+re-implement what already exists.
+
+================================================================================
+DELIVERABLE 1 (HIGH — the centerpiece): claude-crew-side plan-mode write gate
+================================================================================
+
+Problem: a teammate spawned with permission_mode="plan" can still WRITE files in
+headless SDK subprocess sessions. As of claude-agent-sdk 0.1.68 / Claude Code
+CLI 2.1.177, plan mode presents an approval UI instead of silently blocking;
+headless, that UI is a no-op, so the Write goes through. Any coordinator that
+spawns teammates with permission_mode:plan as a safety gate against mutations is
+NOT actually gated. This is a silent safety regression (severity HIGH).
+
+The wiring is CORRECT today — claude_crew/sdk_teammate.py sets
+opts_kwargs["permission_mode"] (~line 1448) and --permission-mode plan reaches
+the CLI. The behavioral contract changed upstream. So the fix is NOT wiring; it
+is a claude-crew-SIDE enforcement layer that does not depend on the SDK's plan
+gate.
+
+Desired outcome: when a teammate declares permission_mode:plan (whether via the
+spawn-time arg or the role pack), claude-crew itself denies the mutating tools
+(Write, Edit, NotebookEdit, and any other file/state mutators in the standard
+toolset) so the write CANNOT happen, regardless of SDK behavior. There is
+already a PreToolUse hook in sdk_teammate.py (the callback around line 767, the
+hook registration around line 1390) and a disallowed_tools wiring path
+(role-pack disallowedTools around lines 1457-1461) — the planner should evaluate
+both mechanisms and choose the one that is robust, testable, and least likely to
+silently break (a PreToolUse deny-hook that returns a permissionDecision of
+"deny" is the more surgical option; disallowed_tools is coarser but simpler).
+Consider that some plan-mode teammates legitimately use non-mutating tools
+(Read, Grep, Bash for read-only inspection) — the gate must block MUTATION, not
+neuter the teammate entirely. Decide and document exactly which tools are
+denied under plan mode.
+
+Validation is non-negotiable here: this needs a LIVE SDK test that spawns a real
+teammate with permission_mode="plan", asks it to write a file, and asserts the
+file does NOT exist afterward. There is already an xfail test for exactly this:
+tests/test_live_sdk.py::test_plan_mode_blocks_file_write_and_cwd_works
+(currently @pytest.mark.xfail(strict=False) at ~line 232). Once the claude-crew
+gate exists and works, flip that test to strict (remove xfail / make it a hard
+pass). Also add implementation-level coverage (the PreToolUse deny path or the
+disallowed_tools set) so the gate is proven at both layers.
+
+Also: update CLAUDE.md "Known limitations" — the current text documents the
+plan-mode regression as an open limitation. Once fixed, that note should reflect
+the claude-crew-side enforcement (so it no longer reads as "you are not gated").
+
+================================================================================
+DELIVERABLE 2: fix TNM<->subagent correlation (SDK 0.1.68)
+================================================================================
+
+Problem: in SDK 0.1.68 a subagent dispatch produces a TaskNotificationMessage
+(TNM) whose tool_use_id differs from the tool_use_id the PostSubagentUse hook
+sees for the same dispatch. So claude_crew/sdk_teammate.py's
+_task_notifs_by_tool_use_id map never matches at _end_turn, which logs
+"_end_turn: no TNM for subagent tool_use_id=... defaulting outcome from hook"
+(around line 1114). The TNM is recorded keyed by tool_use_id in
+_collect_response_text (the msg.tool_use_id gate around line 364).
+
+This is BENIGN today — the hook-outcome fallback still sets the correct outcome
+and last_subagent_completed, so subagents succeed — but F7's precise TNM-based
+outcome telemetry is dead and the warning is noise.
+
+Desired outcome: correlate TNM to its subagent by a stable key that actually
+matches in 0.1.68 — task_id, or arrival-order per active Task call — instead of
+tool_use_id. Add a regression test asserting the TNM is found (i.e. the
+"no TNM for subagent" fallback warning does NOT fire for a normal subagent
+dispatch). Investigate the real TNM/hook fields available in 0.1.68 before
+choosing the correlation key; do not guess.
+
+Cleanup tied to this: two live tests were narrowed during the M3 greening to
+tolerate the benign warning — they currently assert only on real
+"subagent failure: status=" warnings rather than the full warning filter:
+tests/ test_pack_end_to_end and test_user_and_project_agents_invokable (search
+the live test files for the narrowed filter). Once correlation is fixed and the
+"no TNM" warning no longer fires, RESTORE the full warning filter in those two
+tests so they once again assert a clean warning-free run.
+
+================================================================================
+DELIVERABLE 3 (test-only + backlog): stderr telemetry — correct stale backlog,
+add a forced-crash strengthening test
+================================================================================
+
+VERIFY FIRST: the stderr-capture feature is ALREADY shipped (it landed as
+"teammate-death-diagnostics" on 2026-06-09). The full path exists and is tested:
+- claude_crew/sdk_teammate.py: _on_stderr_line callback registered as the SDK
+  stderr sink (opts_kwargs["stderr"] = self._on_stderr_line, ~line 1515), a
+  bounded _stderr_ring buffer, _stderr_tail_redacted(), and
+  snap["stderr_tail"] = self._stderr_tail_redacted() (~line 1230).
+- claude_crew/broker.py: the death record reads snap["stderr_tail"] into
+  stderr_tail_at_death (~line 565) and surfaces it on get_teammate_status
+  (~line 1313) and BrokerSnapshot.
+- Tests: test_broker.py AT-5/AT-6 (broker propagation), test_sdk_teammate.py
+  AT2/AT3 (redaction + empty), AT7 (~line 3716: a ProcessError death emits the
+  WARNING with exc_class/exit_code/last_tool/stderr_tail), and a live test
+  tests/test_live_stderr.py.
+
+So the backlog entry under [2026-06-17] "Teammate death telemetry: capture &
+surface subprocess stderr" claiming stderr_tail_at_death is "declared but never
+populated; null in practice" is STALE — it was observing the M3 run's stale
+running server (which predated the 2026-06-09 ship; see the existing backlog
+note at the [2026-06-04] SDK-death entry "the running claude-crew MCP server
+predates the 2026-06-09 teammate-death-diagnostics ship"). The running server
+has since been restarted onto a current build.
+
+Two outcomes wanted:
+
+(a) Correct the backlog honestly. Update the [2026-06-17] stderr-telemetry
+entry to record that the capture path is implemented and tested, that the M3
+null observation was a stale-server artifact, and resolve/close it (mark it
+RESOLVED with the explanation, in the same style as other resolved BACKLOG
+entries — do NOT silently delete it; the audit trail matters).
+
+(b) Add the one genuinely-missing test. The existing live test injects the
+probe line manually (tm._on_stderr_line(PROBE)) and the AT7 test mocks
+ProcessError — neither forces a REAL subprocess non-zero exit and asserts the
+captured stderr survives onto the death record. That real-crash path is exactly
+the M3 scenario that was never live-proven. Add a test (live if it must spawn a
+real subprocess that crashes; otherwise an integration test that drives the
+real death path) that forces a teammate subprocess to exit non-zero AND asserts
+stderr_tail_at_death (on the tombstone / get_teammate_status) is non-null and
+contains the captured subprocess stderr. Note the live-test design caveat
+documented in test_live_stderr.py: the claude CLI emits nothing to stderr on a
+normal turn (all output is stdout JSON) — so the test must induce a real
+stderr-producing crash, not rely on normal-turn stderr.
+
+================================================================================
+DELIVERABLE 4 (test-infra only, disjoint): fix the shutdown-signals flake
+================================================================================
+
+Problem: tests/test_shutdown_signals.py::test_sigterm_triggers_clean_exit_and_
+deregister and ::test_sigint_triggers_clean_exit_and_deregister intermittently
+fail with "_wait_for_registry_entry" timing out at 15s — a spawned
+"python -m claude_crew.cli" subprocess not registering within the window under
+full-suite load. Passes in isolation and on rerun. Low severity, but it makes
+the full "uv run pytest" exit non-zero on unlucky runs, which trips the
+validation gate and the live-suite-before-merge policy.
+
+Desired outcome: make these two tests resilient to host load — raise /
+parameterize the registration timeout, poll longer with backoff, or serialize
+these tests so they don't race the rest of the suite for CPU. The fix must keep
+the tests meaningful (they still prove clean SIGTERM/SIGINT deregistration);
+just remove the load-sensitivity. Validate by running them repeatedly under
+concurrent load and confirming they no longer flake.
+
+================================================================================
+CONSTRAINTS / NON-NEGOTIABLES (whole slice)
+================================================================================
+
+- Honest tests only. No gamed-green: fix the real cause or, if something cannot
+  be fixed in scope, an explicit xfail/skip WITH a backlog note — never weaken
+  an assertion to pass.
+- Two-layer validation per the project standard: implementation-level AND one
+  layer above, happy + sad paths, for every behavioral change (Deliverables 1
+  and 2). Deliverables 3 and 4 are test/doc only.
+- Deliverable 1 ships WITH a live SDK test that actually exercises the gate
+  (real teammate, real Write attempt, assert no file) — a green stub suite is
+  not a merge signal for a permission gate. Per this project's CLAUDE.md
+  "Run live tests before merging," the live suite covering the touched surface
+  runs before merge.
+- Full-suite validation. Deliverables 1 and 2 change behavior other suites
+  assert on (a removed/renamed WARN, hook wiring, tool-permission defaults), so
+  the validation gate must run the FULL "uv run pytest" (stub) — not a
+  keyword-filtered subset — plus the relevant live tests
+  (CLAUDE_CREW_LIVE_TESTS=1) for Deliverables 1 and 2.
+- Batch-by-shared-surface note for the breakout: Deliverables 1 and 2 both edit
+  claude_crew/sdk_teammate.py, so they must NOT run as parallel same-file tasks
+  — serialize them with a dependency edge (or fold into one task) so they don't
+  collide. Deliverables 3 (tests/ + doc/BACKLOG.md) and 4
+  (tests/test_shutdown_signals.py) are disjoint and can run in parallel with
+  each other and with the sdk_teammate.py work.
+
+================================================================================
+OUT OF SCOPE (do not pull in)
+================================================================================
+
+- The two M3 "follow-up" backlog items at [2026-06-17] — "widen the
+  adaptation_diff gate channel from str to structured AdaptationDiff" and
+  "persist adaptation chains to broker/transcript" — are explicitly deferred
+  enhancements, NOT part of this batch. Leave them in the backlog.
+- Do NOT re-implement the stderr-capture feature (Deliverable 3) — it exists.
+  The only code work there is the new forced-crash test; the rest is a backlog
+  correction.
+- Do not redesign the SDK-teammate turn loop, the broker death machinery, or
+  the redaction allowlist beyond what each deliverable strictly needs.
+
+================================================================================
+PROCESS / AUTHORING DIRECTIVES FOR THIS RUN (planner: honor these)
+================================================================================
+
+This run doubles as a workflow-tuning experiment. Three directives shape how you
+author the spec + breakout:
+
+1. SPEC-TO-AT COVERAGE SWEEP (mandatory). For every optional parameter, default
+   flag, and conditional / branching code path your spec introduces or touches,
+   author AT LEAST ONE acceptance test that exercises that specific branch —
+   INCLUDING the negative / "the gate fires" / "the optional path is taken"
+   case, not just the happy path. Concretely for Deliverable 1: the plan-mode
+   gate has multiple branches — plan-mode + mutating tool (must DENY), plan-mode
+   + read-only tool (must ALLOW), non-plan-mode + mutating tool (must ALLOW).
+   Each branch owes ≥1 AT. This sweep exists because the M3 run shipped a HIGH
+   defect — an optional code branch fully specified but with NO acceptance test
+   exercising it; plan-review caught it late. Make the inverse-coverage explicit
+   in the spec so plan-review can verify it at a glance. Add a short
+   "## Branch Coverage" note (use #### sub-bullets, not ## ) mapping each
+   optional/conditional branch to its covering AT id.
+
+2. BREAKOUT STRUCTURE FOR PARALLEL DISPATCH. This run will dispatch tasks in
+   parallel (RR_PARALLELISM>1). Author the Task Breakout so that:
+   - Deliverable 1 (plan-mode gate) and Deliverable 2 (TNM correlation) BOTH
+     edit claude_crew/sdk_teammate.py → put a dependsOn edge between them (or
+     fold them into one task) so they never run as concurrent same-file tasks.
+     Their taskTouches WILL overlap on sdk_teammate.py; that overlap must be
+     serialized by a dependency edge, not left to collide at merge-back.
+   - Deliverable 3 (stderr: tests/ + doc/BACKLOG.md) and Deliverable 4
+     (tests/test_shutdown_signals.py) touch disjoint files from each other and
+     from the sdk_teammate.py pair → no dependency edges; they dispatch in
+     parallel. Give each accurate, non-overlapping taskTouches globs.
+
+3. IMPLEMENTATION-TIER HINTS. The coordinator will right-size the agent to the
+   work via the tier escape-hatch. Set each task's implementation tier honestly:
+   - Deliverable 4 (shutdown-flake): a timeout bump / poll-backoff in one test
+     file — likely TRIVIAL or MECHANICAL tier (coordinator may apply directly or
+     via a Haiku implementor; feature-review backstops).
+   - Deliverable 3 (stderr): the backlog correction is trivial prose; the
+     forced-crash test is real reasoning work (subprocess-death path) — if both
+     live in one task, tier it REASONING; if you split the backlog-doc edit from
+     the test, the doc edit is TRIVIAL.
+   - Deliverables 1 and 2: REASONING tier (judgment-heavy: permission semantics,
+     SDK correlation). Full implementor + slice-reviewer.
+   Annotate the tier per task in the breakout so the coordinator's tiering is
+   visible and auditable, not guessed.
+
+Pointers the planner should read for context: doc/BACKLOG.md (the four
+[2026-06-17] entries + the [2026-06-04] SDK-death entry for the stale-server
+note), claude_crew/sdk_teammate.py (hook + telemetry + death paths),
+claude_crew/broker.py (death record), tests/test_live_sdk.py (the plan-mode
+xfail), tests/test_live_stderr.py (the existing stderr live test + its design
+caveat), tests/test_shutdown_signals.py, and CLAUDE.md (the live-tests-before-
+merge policy + Known limitations).
