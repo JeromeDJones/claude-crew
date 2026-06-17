@@ -896,3 +896,37 @@ External consumers could still send `agent_def.skills = "all"` through the spawn
 - **Why it matters**: Every teammate crash is currently a guessing game. In the M3 adaptation-algebra run (2026-06-17) the persistent slice-reviewer died `exit_code:1` on its second-task turn-start; the *plausible* inference (a non-zero Bash exit from a flaky test) was provably WRONG per the transcript (it died in ~40ms before running any tool), and the actual subprocess stderr that would have named the failure was unavailable. Surfacing stderr turns "guess + transcript archaeology" into a one-glance diagnosis.
 - **Suggested action**: Capture the SDK subprocess's stderr (tail, last ~4–8 KB, redacted via the existing v1 redaction allowlist) when the liveness poll / response drain detects death; store it on the death record and populate `stderr_tail_at_death` on the tombstone + `get_teammate_status` + `BrokerSnapshot` (and optionally the dashboard's death/notices surface). Size: S–M. Add a test that forces a teammate subprocess to exit non-zero and asserts `stderr_tail_at_death` is non-null and contains the captured stderr.
 - **Related (separate, lower-priority item)**: persistent-teammate **second-turn** subprocess death — the M3 slice-reviewer died immediately on receiving its 2nd-task message (~40ms, before any tool). Watch for recurrence to confirm systemic vs. one-off; if systemic, harden the per-turn subprocess re-query path. The stderr capture above is the prerequisite diagnostic for investigating this.
+
+## [2026-06-17] permission_mode='plan' no longer blocks Write in headless SDK sessions (HIGH) — permission/security
+
+### Plan mode is no longer a write gate in non-interactive teammate subprocesses
+- **What**: A teammate spawned with `permission_mode="plan"` is asked to write a file; the file gets written. Plan mode no longer blocks the Write tool in headless SDK subprocess sessions. Confirmed live: `tests/test_live_sdk.py::test_plan_mode_blocks_file_write_and_cwd_works` (currently `@pytest.mark.xfail(strict=False)`).
+- **Where**: behavior originates upstream — claude-agent-sdk 0.1.68 / Claude Code CLI 2.1.177. Wiring is **correct** in claude-crew (`sdk_teammate.py` sets `opts_kwargs["permission_mode"]`; `--permission-mode plan` reaches the CLI; the field exists in the SDK). The behavioral contract changed: plan mode now presents an approval UI rather than silently blocking, and headless that UI is a no-op so the write proceeds.
+- **Why it matters**: **Severity HIGH.** Any production coordinator that spawns teammates with `permission_mode: plan` as a safety gate against mutations is NOT actually gated — the write goes through. This is a silent safety regression; the xfail gives false comfort to anyone who doesn't read this backlog.
+- **Suggested action**: (1) Confirm CLI 2.1.177 release-note behavior for plan mode. (2) Implement a **claude-crew-side enforcement** — block/deny Write (and other mutators) via a PreToolUse hook or `disallowed_tools` when a teammate declares `permission_mode: plan`, rather than relying on the SDK's plan gate. (3) Once a real gate exists, flip the test to `strict=True`. (4) Document the limitation in CLAUDE.md "Known limitations" until fixed.
+
+## [2026-06-17] F7 subagent telemetry: TaskNotificationMessage.tool_use_id no longer correlates (SDK 0.1.68) — observability
+
+### TNM tool_use_id ≠ PostSubagentUse hook tool_use_id → "no TNM for subagent" warnings
+- **What**: In SDK 0.1.68, a subagent dispatch produces a `TaskNotificationMessage` whose `tool_use_id` differs from the `tool_use_id` the PostSubagentUse hook sees for the same dispatch (verified by runtime probe: e.g. `toolu_01ARWn4Z…` vs `toolu_01Bxnup…`). So `_task_notifs_by_tool_use_id` never matches at `_end_turn`, which logs `_end_turn: no TNM for subagent tool_use_id=… defaulting outcome from hook` (`sdk_teammate.py:~1114`).
+- **Where**: `claude_crew/sdk_teammate.py` — TNM recording (`_collect_response_text`, the `msg.tool_use_id is not None` gate ~line 364) and the `_end_turn` correlation/fallback.
+- **Why it matters**: Benign today — the hook-outcome fallback still sets the correct `outcome` and `last_subagent_completed`, so subagents succeed. But F7's precise TNM-based outcome telemetry is dead, and the warning is noise. The two live tests (`test_pack_end_to_end`, `test_user_and_project_agents_invokable`) were narrowed to assert only on real `subagent failure: status=` warnings; restore the full warning filter once correlation is fixed.
+- **Suggested action**: Correlate TNM↔subagent by `task_id` (or arrival order per active Task call) instead of `tool_use_id`; add a regression test asserting the TNM is found (no fallback warning). Size: S.
+
+## [2026-06-17] test_shutdown_signals.py intermittent registration-race flake — test-infra
+
+- **What**: `tests/test_shutdown_signals.py::{test_sigterm,test_sigint}_triggers_clean_exit_and_deregister` intermittently fail with `_wait_for_registry_entry` timing out at 15s — a spawned `python -m claude_crew.cli` subprocess not registering in time under full-suite load. Passes in isolation and on rerun.
+- **Why it matters**: Low — host-load-sensitive flake, not a product bug. But it makes the full `uv run pytest` exit non-zero on unlucky runs, which trips validation/CI gates and the live-suite-before-merge policy.
+- **Suggested action**: Raise/parameterize the registration timeout, or make the test resilient to load (poll longer, or serialize these tests). Size: S.
+
+## [2026-06-17] M3 follow-up: widen the adaptation_diff gate channel from str to structured AdaptationDiff — tooling
+
+- **What**: M3 renders `AdaptationDiff.render()` into the existing `adaptation_diff: str` gate channel (back-compat, no gate-signature change). A future option is to widen the channel to carry the structured `AdaptationDiff` object so the dashboard can render a richer, field-level diff at the approval gate.
+- **Why it matters**: Low — pure enhancement; the string channel works. Becomes valuable if/when the dashboard wants structured diff rendering.
+- **Suggested action**: Add a structured-diff field alongside the string (additive), teach the dashboard to render it. Explicitly a non-goal of M3 (recorded in the M3 spec/ARCHITECTURE).
+
+## [2026-06-17] M3 follow-up: persist adaptation chains to broker/transcript for cross-call provenance — tooling
+
+- **What**: M3's `AdaptationChain` provenance is in-process only (returned/threaded, not persisted). A future option is to persist chains on broker state / the transcript so "how did we reach this shape" is observable across calls/sessions and replayable.
+- **Why it matters**: Low — no cross-call observability requirement in M3. Becomes useful for audit/replay of how a crew topology was derived.
+- **Suggested action**: Persist `AdaptationChain` (base + verb steps + diffs) on `BrokerSnapshot`/transcript; add a replay/derivation view. Explicitly deferred in the M3 spec.
