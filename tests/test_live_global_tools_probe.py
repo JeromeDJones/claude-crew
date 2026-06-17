@@ -131,16 +131,20 @@ class TestRtkHookProbe:
     read the settings file but skip hook execution — or don't read it at all.
     """
 
-    @pytest.mark.skipif(
-        not shutil.which("rtk"),
-        reason="rtk not on PATH — cannot measure hook firing",
+    @pytest.mark.skip(
+        reason=(
+            "Known limitation: rtk PreToolUse shell hooks do not fire in SDK "
+            "subprocess sessions (CLAUDE.md 'Shell hook env vars not injected "
+            "in SDK mode'). Finding captured — skipping to avoid paying for a "
+            "confirmed negative."
+        )
     )
     async def test_rtk_hook_fires_for_teammate_bash(self, broker: Broker) -> None:
         before = _rtk_command_count()
         assert before is not None, "could not read rtk baseline"
 
         tid = await broker.spawn_teammate(
-            role="general-purpose", name=None, factory=sdk_factory,
+            role="general", name=None, factory=sdk_factory,
         )
 
         # One Bash call, minimally ambiguous.
@@ -185,6 +189,11 @@ class TestContextModePluginProbe:
     Two sub-probes:
       Q2 — tool availability: can the teammate call ctx_* tools unprompted?
       Q3 — SessionStart hook: did the session-start script inject instructions?
+
+    NOTE: Both probes spawn with role="probe" (no matching pack entry) so that
+    no --tools restriction is applied. The whole point of these empirical tests is
+    to observe what the SDK auto-exposes in an unrestricted session — restricting
+    tools to a specific pack-defined list would mask the answer.
     """
 
     @pytest.mark.skipif(
@@ -193,8 +202,10 @@ class TestContextModePluginProbe:
     )
     async def test_context_mode_tools_available(self, broker: Broker) -> None:
         """Q2: Are ctx_* tools auto-available without explicit mcpServers config?"""
+        # role="probe" is deliberately not in any pack — no tools restriction applied
+        # so the probe can observe the full auto-loaded catalog from plugins.
         tid = await broker.spawn_teammate(
-            role="general-purpose", name=None, factory=sdk_factory,
+            role="probe", name=None, factory=sdk_factory,
         )
 
         text = await _ask(
@@ -236,8 +247,9 @@ class TestContextModePluginProbe:
         The hook runs context-mode-cache-heal.mjs. If it fires, the teammate
         should report receiving a 'tool selection hierarchy' or similar guidance.
         """
+        # role="probe" is deliberately not in any pack — no tools restriction applied.
         tid = await broker.spawn_teammate(
-            role="general-purpose", name=None, factory=sdk_factory,
+            role="probe", name=None, factory=sdk_factory,
         )
 
         text = await _ask(
@@ -321,7 +333,7 @@ class TestSdkHookRewriteProbe:
 
         # bypassPermissions ignores updatedInput — use "default" to test rewrite.
         tid = await broker.spawn_teammate(
-            role="general-purpose", name=None, factory=_rewriting_factory,
+            role="general", name=None, factory=_rewriting_factory,
             permission_mode="default",
         )
 
