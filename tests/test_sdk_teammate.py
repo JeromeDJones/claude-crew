@@ -40,6 +40,7 @@ from claude_crew.sdk_teammate import (
     RateLimitedError,
     _STDERR_RING_MAXLEN,
     _STDERR_RING_BYTE_CAP,
+    _PLAN_MODE_DENIED_TOOLS,
 )
 from tests.fakes.sdk import FakeSDKClient, text_response, text_response_with_usage
 from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
@@ -3765,3 +3766,226 @@ class TestDeathSiteWarning:
         # Control flow must be unchanged — death handoff vars set
         assert tm._death_suspected is True
         assert tm._death_in_flight_envelope is env
+
+
+# ---------- plan-mode write gate (ATs 1-11) ----------
+
+
+class TestPlanModeWriteGate:
+    """BDD scenarios for the plan-mode write gate in _on_pre_tool_use.
+
+    ATs 1-8: implementation-level, stub. No SDK subprocess spawned — the hook
+    is called directly after setting self._effective_permission_mode on the
+    teammate instance.
+
+    ATs 10-11 are structural guards (no live SDK needed).
+    AT 9 (live) lives in tests/test_live_sdk.py::TestPermissionModeAndCwdLive.
+    """
+
+    def _make_teammate(self, role: str = "builder") -> SdkTeammate:
+        """Build a minimal SdkTeammate for direct hook invocation."""
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write", "Edit", "Bash", "NotebookEdit"],
+        )
+        return SdkTeammate(
+            id="tm-gate", name="gate", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "b"},
+        )
+
+    # AT1: plan + Write → deny
+    async def test_plan_mode_denies_write(self) -> None:
+        """AT1: plan + Write → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/x.txt", "content": "x"}},
+            "tu-plan-write", {},
+        )
+        assert "hookSpecificOutput" in result
+        out = result["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert "plan" in out["permissionDecisionReason"].lower()
+
+    # AT2: plan + Edit → deny
+    async def test_plan_mode_denies_edit(self) -> None:
+        """AT2: plan + Edit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Edit",
+             "tool_input": {"file_path": "/tmp/x.txt", "old_string": "a", "new_string": "b"}},
+            "tu-plan-edit", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT3: plan + NotebookEdit → deny
+    async def test_plan_mode_denies_notebook_edit(self) -> None:
+        """AT3: plan + NotebookEdit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "NotebookEdit", "tool_input": {}},
+            "tu-plan-nbedit", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT4: plan + MultiEdit → deny
+    async def test_plan_mode_denies_multi_edit(self) -> None:
+        """AT4: plan + MultiEdit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "MultiEdit", "tool_input": {}},
+            "tu-plan-multi", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT5: plan + Read → NOT denied
+    async def test_plan_mode_allows_read(self) -> None:
+        """AT5: plan + Read → does NOT return deny (read-only not neutered)."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Read",
+             "tool_input": {"file_path": "/tmp/x.txt"}},
+            "tu-plan-read", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Read should NOT be denied under plan mode; got decision={decision!r}"
+        )
+
+    # AT6: plan + Bash → NOT denied
+    async def test_plan_mode_allows_bash(self) -> None:
+        """AT6: plan + Bash → does NOT return deny (read-only inspection allowed)."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash",
+             "tool_input": {"command": "ls /tmp"}},
+            "tu-plan-bash", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Bash should NOT be denied under plan mode; got decision={decision!r}"
+        )
+
+    # AT7: non-plan (None) + Write → NOT denied
+    async def test_non_plan_mode_allows_write(self) -> None:
+        """AT7: _effective_permission_mode=None + Write → gate does NOT fire."""
+        tm = self._make_teammate()
+        # _effective_permission_mode defaults to None; verify gate is silent
+        assert tm._effective_permission_mode is None
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/ok.txt", "content": "ok"}},
+            "tu-noplan-write", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Write should NOT be denied when not in plan mode; got decision={decision!r}"
+        )
+
+    # AT8: role-pack permissionMode feeds the gate
+    async def test_role_pack_permission_mode_feeds_gate(self) -> None:
+        """AT8: role-pack permissionMode='plan' (no spawn-arg override) → gate fires.
+
+        Simulates the resolution path: _permission_mode=None, role_def has
+        permissionMode='plan'. After _run() would compute effective_pm='plan',
+        we stash it manually (as _run() would) and verify _on_pre_tool_use denies.
+        """
+        from claude_agent_sdk.types import AgentDefinition
+        # Pack role-def with permissionMode="plan"
+        agent_def = AgentDefinition(
+            description="planner", prompt="plan only",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write"],
+            permissionMode="plan",
+        )
+        tm = SdkTeammate(
+            id="tm-rpack", name="rp", role="planner",
+            agents={"planner": agent_def},
+            pack_bodies={"planner": "plan only"},
+            # No spawn-time permission_mode override
+        )
+        # Simulate what _run() does: resolve effective_pm from role_def
+        role_def = agent_def
+        effective_pm = tm._permission_mode  # None (no spawn arg)
+        if effective_pm is None:
+            effective_pm = getattr(role_def, "permissionMode", None)
+        # Stash as _run() would
+        tm._effective_permission_mode = effective_pm
+
+        assert tm._effective_permission_mode == "plan", (
+            f"expected 'plan' from role-pack resolution; got {tm._effective_permission_mode!r}"
+        )
+
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/rpack.txt", "content": "x"}},
+            "tu-rpack-1", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny", (
+            "role-pack permissionMode='plan' should feed the gate and deny Write"
+        )
+
+    # AT10: structural guard — live test carries no xfail marker
+    def test_live_test_has_no_xfail_marker(self) -> None:
+        """AT10: test_plan_mode_blocks_file_write_and_cwd_works has no @pytest.mark.xfail."""
+        import ast
+        import os
+        test_file = os.path.join(
+            os.path.dirname(__file__), "test_live_sdk.py"
+        )
+        with open(test_file) as f:
+            source = f.read()
+        assert "xfail" not in source or "plan_mode" not in source.split("xfail")[0].split("\n")[-5:], (
+            "test_plan_mode_blocks_file_write_and_cwd_works must not have @pytest.mark.xfail; "
+            "the claude-crew gate makes this a hard pass"
+        )
+        # More precise check: grep for the function and verify no xfail decorator directly precedes it
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if "def test_plan_mode_blocks_file_write_and_cwd_works" in line:
+                # Look at the preceding 15 lines for xfail
+                window = lines[max(0, i - 15):i]
+                assert not any("xfail" in l for l in window), (
+                    f"Found xfail decorator before test_plan_mode_blocks_file_write_and_cwd_works "
+                    f"at line {i+1}; it must be removed"
+                )
+                return
+        raise AssertionError(
+            "test_plan_mode_blocks_file_write_and_cwd_works not found in tests/test_live_sdk.py"
+        )
+
+    # AT11: structural guard — CLAUDE.md mentions plan-mode write gate
+    def test_claude_md_documents_plan_mode_gate(self) -> None:
+        """AT11: CLAUDE.md 'Known limitations' contains 'plan-mode write gate'."""
+        import os
+        claude_md = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "CLAUDE.md"
+        )
+        with open(claude_md) as f:
+            content = f.read()
+        assert "plan-mode write gate" in content, (
+            "CLAUDE.md 'Known limitations' section must contain the literal "
+            "'plan-mode write gate' documenting the claude-crew-side enforcement"
+        )
+
+    # Verify the constant itself
+    def test_plan_mode_denied_tools_constant(self) -> None:
+        """Sanity: _PLAN_MODE_DENIED_TOOLS contains exactly the four mutators."""
+        assert "Write" in _PLAN_MODE_DENIED_TOOLS
+        assert "Edit" in _PLAN_MODE_DENIED_TOOLS
+        assert "NotebookEdit" in _PLAN_MODE_DENIED_TOOLS
+        assert "MultiEdit" in _PLAN_MODE_DENIED_TOOLS
+        # Read-only tools must NOT be in the set
+        assert "Read" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Bash" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Grep" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Task" not in _PLAN_MODE_DENIED_TOOLS

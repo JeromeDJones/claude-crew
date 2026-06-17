@@ -92,6 +92,13 @@ _SHUTDOWN_SENTINEL: object = object()
 _SEND_TO_MCP_SERVER_NAME: str = "crew-send"
 _SEND_TO_TOOL_ID: str = f"mcp__{_SEND_TO_MCP_SERVER_NAME}__send_to"
 
+# Plan-mode write gate: tools denied when effective_permission_mode == "plan".
+# Read-only and inspection tools (Read, Grep, Glob, Bash, WebFetch, Task) are
+# deliberately NOT included so plan-mode teammates can still explore the codebase.
+_PLAN_MODE_DENIED_TOOLS: frozenset[str] = frozenset(
+    {"Write", "Edit", "NotebookEdit", "MultiEdit"}
+)
+
 # Graceful flush constants (Feature: graceful-termination-memory-flush).
 # Budget matches the codebase's established hang-detection budget (90s).
 GRACEFUL_FLUSH_SECONDS: float = 90.0
@@ -618,6 +625,10 @@ class SdkTeammate(Teammate):
         )
         self._cwd = cwd
         self._permission_mode = permission_mode
+        # Resolved effective permission mode (spawn-arg-wins-then-role-pack).
+        # Stashed in _run() before the client context opens so _on_pre_tool_use
+        # can read it without recomputing. None until _run() resolves it.
+        self._effective_permission_mode: str | None = None
         self._allowed_tools = allowed_tools
         self._extra_tools = extra_tools
         self._mcp_servers_grant = mcp_servers_grant
@@ -795,6 +806,33 @@ class SdkTeammate(Teammate):
                                 "permissionDecisionReason": reason,
                             }
                         }
+            # Plan-mode write gate: deny mutating tools when the teammate was
+            # spawned (or role-pack-configured) with permission_mode="plan".
+            # This is a claude-crew-side enforcement layer that does not depend
+            # on the SDK's approval-UI gate (which is a no-op in headless sessions).
+            # Read-only tools (Read, Grep, Glob, Bash, WebFetch, Task) are NOT
+            # denied so plan-mode inspection still works.
+            if (
+                tool_name in _PLAN_MODE_DENIED_TOOLS
+                and self._effective_permission_mode == "plan"
+            ):
+                deny_reason = (
+                    f"claude-crew plan-mode write gate: '{tool_name}' is a mutating "
+                    f"tool and this teammate was spawned with permission_mode='plan'. "
+                    f"Read-only tools (Read, Grep, Glob, Bash, WebFetch, Task) remain "
+                    f"available. To write files, spawn without permission_mode='plan'."
+                )
+                logger.warning(
+                    "plan_mode_gate: blocked %s for teammate=%s role=%s",
+                    tool_name, self.id, self.role,
+                )
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": deny_reason,
+                    }
+                }
             # D3: subagent branch — activity stamped; spawn tracking path.
             if inp.get("agent_id") is not None:
                 agent_id = inp["agent_id"]
@@ -1450,6 +1488,9 @@ class SdkTeammate(Teammate):
             effective_pm = getattr(role_def, "permissionMode", None)
         if effective_pm is not None:
             opts_kwargs["permission_mode"] = effective_pm
+        # Stash resolved mode so _on_pre_tool_use can enforce the plan-mode
+        # write gate without recomputing the resolution logic.
+        self._effective_permission_mode = effective_pm
 
         # skills and disallowedTools: role-pack only (spawn-time override deferred).
         if role_def is not None:

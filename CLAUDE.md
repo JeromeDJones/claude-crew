@@ -94,6 +94,8 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 **Windows `\r\n` line endings rejected in pack frontmatter.** `_split_frontmatter` hard-codes `"---\n"`; Windows-authored agent files raise `PackLoadError`. Pre-existing limitation. Tracked in `doc/BACKLOG.md`.
 
+**plan-mode write gate is enforced client-side by claude-crew, not the SDK.** As of claude-agent-sdk 0.1.68 / Claude Code CLI 2.1.177, `permission_mode="plan"` presents an approval UI instead of silently blocking in headless (non-interactive) sessions, so Writes proceed without user approval. claude-crew compensates by denying `Write`, `Edit`, `NotebookEdit`, and `MultiEdit` in the `PreToolUse` hook whenever `_effective_permission_mode == "plan"`. Read-only tools (`Read`, `Grep`, `Glob`, `Bash`, `WebFetch`, `Task`) remain available. This enforcement fires before the SDK's plan-gate UI would appear, so the gate is reliable regardless of SDK behavior.
+
 ### Dashboard is a multi-instance LEADER — any new lazy-fetch endpoint MUST be crew-aware
 
 The Mission Control dashboard (`ui_server.py`) is **not** single-instance. One instance binds the leader port (`7821`); others become followers on ephemeral ports and register in `InstanceRegistry`. The leader **aggregates** every instance: `_build_state` calls `_fetch_remote_state` to pull each follower's `/api/state` and merges their agents + transcripts into one view keyed by `crew_id`. The operator almost always views the **leader**, which is showing rows that belong to **other instances' brokers**.
