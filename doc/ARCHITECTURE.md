@@ -1,7 +1,7 @@
 # Architecture: claude-crew
 
 **Created**: 2026-06-09 (harvested from project `CLAUDE.md` + `teammate-death-diagnostics` feature retro)
-**Last Updated**: 2026-06-13
+**Last Updated**: 2026-06-17
 
 claude-crew is a local multi-agent orchestrator. A Claude Code session (the **lead**) drives a crew of Agent-SDK teammates through an MCP server that acts as supervisor, message bus, and observability surface. Teammates can recursively spawn their own subagents.
 
@@ -11,7 +11,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### `claude_crew/server.py`
 
-FastMCP server. The only surface the lead touches. Exposes **16** MCP tools:
+FastMCP server. The only surface the lead touches. Exposes **17** MCP tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -31,6 +31,7 @@ FastMCP server. The only surface the lead touches. Exposes **16** MCP tools:
 | `resolve_shape` | Chat-channel approve/decline: `decision ∈ {"approve","decline"}` → `broker.resolve_proposal`; returns `{ok:True, shape_id, status}` or `{ok:False, error}` on unknown id / non-pending / invalid decision |
 | `list_pending_shapes` | Read pending proposals: returns `{ok:True, pending:[{shape_id, name, crew_id, mermaid, summary}]}`; empty list when none pending |
 | `instantiate_shape` | Spawn exactly the approved crew; pre-flight role resolution all-or-nothing via `factory.known_roles`; records a `Topology`; single-use per `shape_id` |
+| `adapt_shape` | Apply one adaptation verb (`add_node`/`swap`/`augment`/`set_gate`/`drop`) to a pre-instantiation base shape (pending/approved proposal or inline dict); resolves swap/augment roles via the same `factory.known_roles`/`resolve_role` seam as `instantiate_shape`; on success registers a new pending proposal with `adaptation_diff=diff.render()` — reusing the M1.5 gate verbatim; returns `{ok:True, shape_id, status:"pending", diff, shape}` or a staged `{ok:False, stage:...}` failure envelope; no proposal registered on any failure path |
 
 ### `claude_crew/shapes.py`
 
@@ -44,6 +45,22 @@ Shape schema. Added in `workflow-shape-composition-m0` (2026-06-11). Pure data m
 | `ShapeValidationError` | `ValueError` subclass | Raised on any malformation — no partial `Shape` returned |
 | `parse_shape(data, *, source)` | function | Accepts dict or YAML string; validates loudly (empty shape, dangling edges, duplicate slots, invalid mode, unknown keys at shape/node/edge level, self-loops, duplicate edges); `phases` recorded verbatim and exempt from the unknown-key guard |
 | `shape_to_mermaid(shape)` | function | Emits a `graph TD` source string (one node per slot labeled `slot\nrole`, one edge per `ShapeEdge` labeled by mode) for the dashboard's `mermaid.render()` pipeline. **Note:** the `\n` separator renders as a literal backslash-n in the browser label rather than a line break; `<br>` is the correct Mermaid syntax — tracked in BACKLOG (pre-existing M0 defect, fast-follow fix) |
+
+**Adaptation algebra additions (M3, `m3-adaptation-algebra` 2026-06-17):** `Shape`/`ShapeNode`/`ShapeEdge` are **unchanged**; the algebra is purely additive.
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `_UNSET` | module sentinel | Distinguishes "not supplied" from explicit `None` in `Swap`/`SetGate` optional fields; never crosses the public API surface |
+| `AdaptationDiff` | frozen dataclass | `verb: str`, `target: str`, `before: dict`, `after: dict` (`before`/`after` excluded from hash so the frozen dataclass stays hashable); `render() -> str` emits the human-readable gate string per verb (format defined in spec; powers AT 7 / AT 35 golden tests) |
+| `ShapeAdaptation` | ABC | Abstract base: `apply(shape: Shape) -> tuple[Shape, AdaptationDiff]` — pure, never mutates input, returns a new frozen `Shape` or raises `ShapeValidationError`; no silent no-op, no partial shape |
+| `AddNode` | frozen verb command | Appends a node (+ optional wiring edges) to a shape; rejects duplicate slot, dangling edge endpoints, self-loops, duplicate edges |
+| `Swap` | frozen verb command | Replaces a slot's `role` and optionally `model`/`extra_tools`/`extra_skills` (supplied → replace; omitted → retain via `_UNSET`); preserves incident edges; role resolved by `adapt_shape` in `server.py` via `factory.known_roles` before `apply` is called |
+| `Augment` | frozen verb command | Adds a node alongside an existing one with ≥1 wiring edge (`mode` defaults to `"gated"`); rejects if edge-list is empty (an edgeless augment is just `add_node`); role resolved at server layer |
+| `SetGate` | frozen verb command | Changes `mode` (and optionally `reverse_mode`) of an existing edge; validates mode ∈ `{gated, tee, direct}`; retains existing `reverse_mode` when omitted |
+| `Drop` | frozen verb command | Removes a node; rejects: slot absent, node has live in/out edges, result would have zero nodes |
+| `AdaptationStep` | frozen dataclass | `diff: AdaptationDiff`, `shape: Shape` — the shape produced by one step |
+| `AdaptationChain` | frozen dataclass | `base: Shape`, `steps: tuple[AdaptationStep, ...]`; `current` property = `steps[-1].shape` or `base`; `adapt(adaptation)` returns a NEW chain; errors propagate naturally (prior chain left untouched); in-process only — not persisted |
+| `shape_to_dict(shape)` | function | Inverse of `parse_shape`: `parse_shape(shape_to_dict(s)) == s` for all valid `Shape`s; preserves `phases`, node `cwd`/`model`/`extra_tools`/`extra_skills`, edge `reverse_mode` (omits `None`/empty where `parse_shape` reconstructs identically); serializes tuples→lists for JSON compatibility |
 
 ### `claude_crew/broker.py`
 
@@ -193,13 +210,15 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 
 ---
 
-## Workflow Shape Composition (M0 + M1.5 + M2)
+## Workflow Shape Composition (M0 + M1.5 + M2 + M3)
 
 **M0** added in `workflow-shape-composition-m0` (2026-06-11) — Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
 
 **M1.5** added in `m1-5-async-shape-gate` (2026-06-12) — Makes the gate **async/non-blocking** (lead stays free during approval; `wait=True` retains the M0 blocking path), adds a **chat-channel approval path** (`resolve_shape` + `list_pending_shapes`, tool count 14→16), **notifies the lead on resolve** via a single choke point in `broker.resolve_proposal`, promotes the gate to a **resurfaceable** `MCTopBar` badge/tray surface in the dashboard (survives instance-switch), and intentionally softens the human-in-the-loop guarantee from *mechanical* to *trust-enforced* (the bridge to M1 trusted-shape auto-approval).
 
 **M2** added in `m2-edge-routing` (2026-06-13) — Makes the approved graph **execute**: edge modes enforced, scoped `send_to` in-process MCP tool, neighbor injection, budget-only circuit breaker, and on-graph dashboard overlay. See [Edge Routing (M2)](#edge-routing-m2) below for full detail.
+
+**M3** added in `m3-adaptation-algebra` (2026-06-17) — Makes shape adaptation **computable**. Five typed verb commands in `shapes.py` (`AddNode`/`Swap`/`Augment`/`SetGate`/`Drop`), each pure: `apply(shape) -> tuple[Shape, AdaptationDiff]` — never mutates input, returns a new frozen `Shape` (satisfying all `parse_shape` invariants) or raises `ShapeValidationError`; no silent no-op, no partial shape. `AdaptationDiff.render()` produces the human-readable gate string that feeds the existing `adaptation_diff: str` broker channel — **no gate-signature change; `broker.py` is untouched** (`register_proposal` already carried the `adaptation_diff?` param). `AdaptationChain`/`AdaptationStep` carry in-process provenance (not persisted to broker). `adapt_shape` MCP tool in `server.py` resolves the base shape (pending/approved proposal or inline dict), resolves `swap`/`augment` roles via the same `factory.known_roles`/`resolve_role` seam as `instantiate_shape`, applies the verb command, and on success calls `broker.register_proposal(new_shape, adaptation_diff=diff.render())` — reusing the M1.5 gate verbatim. Every adapted shape re-satisfies `parse_shape`. Adaptation is **pre-instantiation only** — reshaping a running crew is the separately-milestoned M3.5.
 
 ### Data flow
 
@@ -235,6 +254,16 @@ instantiate_shape(shape_id)
   → (transactional)        server.py       on any spawn failure: kill already-spawned, ok:False, proposal stays "approved"
   → record_topology()      broker.py       Topology{edges, slot_to_teammate (immutable)} on BrokerSnapshot
   → broker.mark_instantiated()  broker.py  approved→instantiated under the broker boundary; single-use guard
+
+# M3 — pre-instantiation adaptation (adapt_shape)
+adapt_shape(verb, params, base_shape_id?/base_shape?)
+  → base resolution         server.py       exactly-one guard (neither/both → stage:"base"); base_shape_id must resolve to pending/approved proposal (instantiated/declined/timed_out rejected); inline base_shape parsed via parse_shape (failure → stage:"parse")
+  → verb guard              server.py       verb ∉ {add_node,swap,augment,set_gate,drop} → stage:"verb"
+  → role resolution         server.py       getattr(factory,"known_roles",None) + resolve_role for swap/augment only; skipped when known_roles absent (stub mode mirrors instantiate_shape)
+  → verb.apply(base)        shapes.py       pure: new frozen Shape + AdaptationDiff; raises ShapeValidationError on illegal mutation → stage:"adapt"; KeyError/TypeError on malformed params → stage:"adapt"
+  → register_proposal()     broker.py       adaptation_diff=diff.render(); same gate path as propose_shape; returns shape_id
+  → returns                 server.py       {ok:True, shape_id, status:"pending", diff, shape=shape_to_dict(new_shape)}
+  # failure paths all return before register_proposal; no proposal registered on any failure
 ```
 
 ### Edge modes: recorded in M0, enforced from M2
