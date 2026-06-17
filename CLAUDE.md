@@ -21,6 +21,16 @@ Live SDK tests are gated and skipped by default:
 CLAUDE_CREW_LIVE_TESTS=1 uv run pytest tests/test_live_sdk.py
 ```
 
+### Run live tests before merging
+
+This project's whole job is real SDK orchestration, so **stub-mode tests can pass while live behavior regresses** — role resolution against the real merged pack, real teammate spawn/instantiate, real subprocess lifecycle. The default `uv run pytest` (stub) suite is necessary but **not sufficient**. Before merging a behavioral change, run the live SDK suite:
+
+```bash
+CLAUDE_CREW_LIVE_TESTS=1 uv run pytest tests/test_live*.py
+```
+
+These hit the real cloud Anthropic API (real `claude` subprocesses — they cost tokens and take minutes). Scope by judgment: at minimum run the live tests covering the surface you touched; run the **full** live suite before a release / version bump. Pure-documentation or config-only changes may skip. Any feature that adds behavior which only manifests live (SDK / teammate / factory / shape / instantiate paths) ships **with** a live test, and that test runs before merge — a green stub suite is not a merge signal on its own. (A live test must actually *exercise* the path: assert a real teammate turn/response, not just the synchronous structure a stub would also satisfy.)
+
 Run the MCP server directly:
 
 ```bash
@@ -53,7 +63,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 **`diagnostics.py`** — Startup-time diagnostic capture. `StartupDiagnostic` frozen dataclass + `StartupDiagCollector` `logging.Handler` subclass + `collect_startup_diagnostics()` context manager. `factories.default_factory()` wraps `build_merged_pack()` with the collector; the frozen tuple is threaded through `Broker(startup_diagnostics=...)` to `BrokerSnapshot.startup_diagnostics` and surfaced on the dashboard via the Startup Notices panel. Six-category classifier (shadow / unknown_skill / unknown_mcp_server / frontmatter / plugin / other). Stderr propagation preserved — additive handler, never silences.
 
-**`subagents/`** — Default subagent pack. Three agents (`explorer`, `planner`, `general-purpose`) defined as markdown files with YAML frontmatter (model, tools, effort, maxTurns). No Bash or Task tool — leaf nodes that cannot recurse further.
+**`subagents/`** — Default subagent pack. Three agents (`explorer`, `planner`, `general`) defined as markdown files with YAML frontmatter (model, tools, effort, maxTurns). No Bash or Task tool — leaf nodes that cannot recurse further.
 
 ### Test conventions
 
