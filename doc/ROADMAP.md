@@ -16,14 +16,21 @@ The arc delivers **declarative, human-gated, and live-executing crew graphs** �
 | **M0** — Shape as first-class data | ✅ done (2026-06-11) | `shapes.py` (NEW), `broker.py` (+6 methods), `server.py` (+2 tools), `ui_server.py` (+1 route), `dashboard.html` (+2 components) | `propose_shape` + `instantiate_shape`. Crew shapes as frozen dataclasses (`Shape` / `ShapeNode` / `ShapeEdge`). Human approval gate (asyncio.Condition). All-or-nothing pre-flight. `Topology` recorded on `BrokerSnapshot`. Graphical DAG in Mission Control. |
 | **M1.5** — Async non-blocking gate | ✅ done (2026-06-12) | `server.py` (+2 tools), `broker.py` (lead-notify choke-point), `ui_server.py` (name/summary on proposals), `dashboard.html` (MCTopBar badge + resurfaceable tray) | `propose_shape` non-blocking by default; dual-channel approval (dashboard + `resolve_shape` chat tool); notify-lead-on-resolve; resurfaceable MCTopBar badge that survives instance-switch. 14→16 tools. |
 | **M2** — Routing enforcement | ✅ done (2026-06-13) | `broker.py` (routing engine + circuit breaker + `EdgeStat`), `sdk_teammate.py` (in-process `send_to` MCP), `factories.py` (`neighbors=`), `teammate_prompt.py` (neighbor section), `ui_server.py` (+3 routes), `dashboard.html` (`TopologyEdgePanel`) | Edge modes enforced (`gated`/`tee`/`direct`). Scoped `send_to` in-process MCP tool (moat choke-point). Neighbor injection (same `shape.edges` source as authorization — cannot drift). Budget-only circuit breaker (8 exchanges; no deadlock detector). On-graph overlay + promote control in dashboard. |
-| **M1** — Blessed shape library | 🔜 next | — | Blessed shape library + lead router/classifier. `micro-fix`, `standard-feature`, `heavy-feature` template shapes in a `shapes/` dir. `propose_shape` accepts a file path. Lead classifies a problem and selects a shape. Independent of M2's routing logic. |
-| **M3** — Adaptation algebra | ⏳ deferred | — | `add_node` / `swap` / `augment` / `set_gate` / `drop` verbs + structured `adaptation_diff`. Makes shape adaptation computable. |
-| **M4** — RepoReactor as shape | ⏳ deferred | — | Re-author the RR workflow as a declared shape using M1 templates + M2 routing enforcement. |
+| **M3** — Adaptation algebra | 🔜 next | — | `add_node` / `swap` / `augment` / `set_gate` / `drop` verbs, each a pure `Shape → (Shape, AdaptationDiff)` command, iteratively human-gated. Pre-instantiation only. Brief: `doc/design/m3-adaptation-algebra.md`. |
+| **M3.5** — Reshape crew while running | ⏳ deferred | — | Adapt a LIVE (already-instantiated) topology: kill/respawn teammates on `swap`/`drop`, rewire live routing mid-flight. Touches the broker live registry + M2 routing engine — materially bigger than M3's pure-data algebra. Carved out 2026-06-17. |
+| **M1** — Blessed shape library | ↪ reframed → repo-react | — | Blessed shapes + right-sizing/classification is **policy**, now owned by repo-react (it already is the canonical heavy-feature shape + has the tiering escape hatch). claude-crew provides the *mechanism* (M0/M2/M3); repo-react picks/right-sizes. extensible-roles Slice 1 (FDE v0.16.0) shipped the role-pluggability foundation. |
+| **M4** — RepoReactor as shape | ⏳ deferred | — | Re-author the RR workflow as a declared shape using M2 routing + M3 adaptation. The convergence point where repo-react's blessed shapes meet claude-crew's shape substrate. |
 | **M5** — Memory-informed adaptation | ⏳ deferred | — | Lead-autonomous shape adaptation informed by prior crew memory. |
 
 ---
 
-## Next: M1 — Blessed Shape Library
+## Next: M3 — Adaptation Algebra
+
+**Design brief (locked 2026-06-17):** `doc/design/m3-adaptation-algebra.md`. Five verbs (`add_node`/`swap`/`augment`/`set_gate`/`drop`), each a pure `Shape → (Shape, AdaptationDiff)` command in `shapes.py`, iteratively human-gated via the existing M1.5 gate, pre-instantiation only. `swap`/`augment` resolve roles through the extensible-roles seam. The brief is the SDD/repo-react input.
+
+> **Reframe (2026-06-17):** the former "M1 — blessed shape library + classifier" is **policy** and now belongs to **repo-react**, not claude-crew. The substrate (M0/M2/M3) provides the mechanism; repo-react picks and right-sizes shapes. The section below is retained for historical context only — superseded by the table above.
+
+### (superseded) M1 — Blessed Shape Library
 
 **Goal**: a `shapes/` library of reusable template shapes + a classifier so the lead can pick the right crew topology by describing the task, not by constructing a shape from scratch.
 
