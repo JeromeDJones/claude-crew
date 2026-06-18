@@ -1402,7 +1402,7 @@ class TestSubagentActivityEnvelopes:
         assert tm._recently_closed_subagent_use_ids.maxlen == 64
         assert len(tm._recently_closed_subagent_use_ids) == 0
         assert tm._last_subagent_completed is None
-        assert tm._task_notifs_by_tool_use_id == {}
+        assert tm._task_notifs_ordered == []
 
     # SC2: status_snapshot includes subagent fields with no subagents
     def test_status_snapshot_includes_subagent_fields_empty(self) -> None:
@@ -1484,9 +1484,14 @@ class TestSubagentActivityEnvelopes:
         # last_subagent_completed is still None — nothing populated it.
         assert snap["last_subagent_completed"] is None
 
-    # SC5: _record_task_notif stores by tool_use_id
-    def test_record_task_notif_stores_by_tool_use_id(self) -> None:
-        """SC5: _record_task_notif stores the TaskNotificationMessage keyed by tool_use_id."""
+    # SC5: _record_task_notif appends to ordered list
+    def test_record_task_notif_appends_in_arrival_order(self) -> None:
+        """SC5: _record_task_notif appends TNMs to _task_notifs_ordered in arrival order.
+
+        After the TNM-correlation fix, key-based lookup is replaced by
+        arrival-order correlation. The task_id arg is accepted for interface
+        compatibility but not used as a storage key.
+        """
         tm = self._make_teammate()
 
         tnm = TaskNotificationMessage(
@@ -1499,10 +1504,10 @@ class TestSubagentActivityEnvelopes:
             uuid="tn-sc5",
             session_id="default",
         )
-        tm._record_task_notif("tu-1", tnm)
+        tm._record_task_notif("task-1", tnm)
 
-        assert "tu-1" in tm._task_notifs_by_tool_use_id
-        assert tm._task_notifs_by_tool_use_id["tu-1"] is tnm
+        assert len(tm._task_notifs_ordered) == 1
+        assert tm._task_notifs_ordered[0] is tnm
 
 
 # ---------- T3: subagent hook extension BDD scenarios ----------
@@ -1630,8 +1635,15 @@ class TestSubagentHookExtensions:
             finished_at_wallclock=now,
             hook_outcome="ok",
         )
-        tnm = self._make_tnm(status="completed", summary="Done.", tool_use_id="tu-emit-1", uuid="tn-emit-1")
-        tm._task_notifs_by_tool_use_id["tu-emit-1"] = tnm
+        # Arrival-order correlation: the TNM is stored in _task_notifs_ordered;
+        # _end_turn matches by position (i-th entry ↔ i-th TNM).
+        tnm = self._make_tnm(
+            status="completed", summary="Done.",
+            task_id="task-internal-xyz",    # different from hook's tool_use_id
+            tool_use_id="tnm-internal-999",  # also different — arrival-order needed
+            uuid="tn-emit-1",
+        )
+        tm._task_notifs_ordered.append(tnm)
 
         tm._end_turn()
 
@@ -1645,9 +1657,9 @@ class TestSubagentHookExtensions:
         assert fields["summary"] == "Done."
         assert fields["tnm_missing"] is False
         assert fields["duration_seconds"] >= 0.0
-        # Both dicts cleared after _end_turn.
+        # Both state structures cleared after _end_turn.
         assert tm._closed_subagent_scratch == {}
-        assert tm._task_notifs_by_tool_use_id == {}
+        assert tm._task_notifs_ordered == []
 
     def test_end_turn_emits_subagent_result_tnm_missing(self) -> None:
         """SC4: _end_turn with scratch entry, no TNM → subagent_result with tnm_missing=True, outcome from hook."""
@@ -1835,12 +1847,13 @@ class TestCollectResponseTextT2:
         assert result.failed_task_notifs[1] is tnm_stopped
 
     async def test_record_task_notif_callback_fires_for_all_statuses(self) -> None:
-        """SC-T2-2: record_task_notif callback fires for all TNM statuses.
+        """SC-T2-2: record_task_notif callback fires for all TNM statuses, keyed by task_id.
 
         Given client yields TNMs with statuses: completed, failed, stopped;
-        And a callback recording (tool_use_id, tnm) pairs;
+        And a callback recording (task_id, tnm) pairs;
         When _collect_response_text called with that callback;
-        Then callback called three times; failed_task_notifs has two (failed, stopped only).
+        Then callback called three times, each keyed by task_id (not tool_use_id);
+        failed_task_notifs has two (failed, stopped only).
         """
         tnm_completed = self._make_tnm("completed", task_id="t1", uuid="tn-c", tool_use_id="tu-1")
         tnm_failed = self._make_tnm("failed", task_id="t2", uuid="tn-f", tool_use_id="tu-2")
@@ -1854,52 +1867,53 @@ class TestCollectResponseTextT2:
 
         recorded: list[tuple[str, TaskNotificationMessage]] = []
 
-        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-            recorded.append((tool_use_id, tnm))
+        def capture(task_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((task_id, tnm))
 
         result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
 
-        # Callback fires for all 3 statuses
+        # Callback fires for all 3 statuses, keyed by task_id (not tool_use_id)
         assert len(recorded) == 3
-        assert recorded[0] == ("tu-1", tnm_completed)
-        assert recorded[1] == ("tu-2", tnm_failed)
-        assert recorded[2] == ("tu-3", tnm_stopped)
+        assert recorded[0] == ("t1", tnm_completed)
+        assert recorded[1] == ("t2", tnm_failed)
+        assert recorded[2] == ("t3", tnm_stopped)
 
         # Only failed+stopped go into failed_task_notifs
         assert len(result.failed_task_notifs) == 2
         assert result.failed_task_notifs[0] is tnm_failed
         assert result.failed_task_notifs[1] is tnm_stopped
 
-    async def test_record_task_notif_skips_tnm_with_null_tool_use_id(self) -> None:
-        """SC-T2-3: record_task_notif callback is NOT called when tool_use_id is None.
+    async def test_record_task_notif_callback_fires_for_tnm_with_null_tool_use_id(self) -> None:
+        """SC-T2-3: record_task_notif callback fires even when tool_use_id is None, keyed by task_id.
 
-        Given TNM with tool_use_id=None;
-        When callback would otherwise fire;
-        Then callback NOT called for that TNM.
-        TNM still counted in failed_task_notifs if status is failed.
+        After the TNM-correlation fix, the callback is keyed by task_id (always
+        present) — not tool_use_id. A TNM with tool_use_id=None still triggers
+        the callback because task_id is always non-null.
+        TNM with null tool_use_id AND failed status still counted in failed_task_notifs.
         """
-        tnm_no_id = self._make_tnm("failed", task_id="t1", uuid="tn-noid", tool_use_id=None)
-        tnm_with_id = self._make_tnm("completed", task_id="t2", uuid="tn-withid", tool_use_id="tu-x")
+        tnm_no_tool_id = self._make_tnm("failed", task_id="t1", uuid="tn-noid", tool_use_id=None)
+        tnm_with_tool_id = self._make_tnm("completed", task_id="t2", uuid="tn-withid", tool_use_id="tu-x")
 
         class _FakeClient:
             async def receive_response(self):
-                yield tnm_no_id
-                yield tnm_with_id
+                yield tnm_no_tool_id
+                yield tnm_with_tool_id
 
         recorded: list[tuple[str, TaskNotificationMessage]] = []
 
-        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-            recorded.append((tool_use_id, tnm))
+        def capture(task_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((task_id, tnm))
 
         result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
 
-        # Only the TNM with a tool_use_id triggers the callback
-        assert len(recorded) == 1
-        assert recorded[0] == ("tu-x", tnm_with_id)
+        # Both TNMs trigger the callback, keyed by task_id (not tool_use_id)
+        assert len(recorded) == 2
+        assert recorded[0] == ("t1", tnm_no_tool_id)
+        assert recorded[1] == ("t2", tnm_with_tool_id)
 
         # failed TNM (null tool_use_id) still counted in failed_task_notifs
         assert len(result.failed_task_notifs) == 1
-        assert result.failed_task_notifs[0] is tnm_no_id
+        assert result.failed_task_notifs[0] is tnm_no_tool_id
 
     async def test_last_assistant_model_captures_api_model(self) -> None:
         """active-model-display: TurnDrainResult.last_assistant_model carries
@@ -3989,3 +4003,161 @@ class TestPlanModeWriteGate:
         assert "Bash" not in _PLAN_MODE_DENIED_TOOLS
         assert "Grep" not in _PLAN_MODE_DENIED_TOOLS
         assert "Task" not in _PLAN_MODE_DENIED_TOOLS
+
+
+# ---------- TNM correlation (ATs 12-13, 16) ----------
+
+
+class TestTNMCorrelation:
+    """BDD scenarios for TaskNotificationMessage↔hook correlation fix.
+
+    ATs 12-13: implementation-level, stub. Directly populate
+    _closed_subagent_scratch and call _record_task_notif, then call
+    _end_turn() to verify correlation.
+
+    AT 16: structural guard — the narrowing NOTE literal 'intentionally
+    excluded here' is absent from both narrowed live test files.
+
+    AT 14-15 (live, gated) live in test_live_subagents.py::test_pack_end_to_end
+    and test_user_loader_live.py::test_user_and_project_agents_invokable.
+    """
+
+    def _make_teammate(self) -> SdkTeammate:
+        """Build a minimal SdkTeammate for direct _end_turn invocation."""
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+        )
+        return SdkTeammate(
+            id="tm-tnm", name="tnm", role="worker",
+            agents={"worker": agent_def},
+            pack_bodies={"worker": "b"},
+        )
+
+    def _make_tnm(
+        self,
+        task_id: str,
+        tool_use_id: str | None = None,
+        status: str = "completed",
+        summary: str = "done",
+    ) -> TaskNotificationMessage:
+        """Build a TaskNotificationMessage with configurable fields."""
+        return TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id=task_id,
+            status=status,
+            output_file="/tmp/out",
+            summary=summary,
+            uuid="uuid-test",
+            session_id="sess-test",
+            tool_use_id=tool_use_id,
+        )
+
+    # AT12: TNM with differing tool_use_id is correlated via arrival-order, no warning
+    def test_tnm_correlated_by_arrival_order_no_warning(self, caplog) -> None:
+        """AT12: TNM with differing tool_use_id is correlated by arrival-order → no 'no TNM' warning.
+
+        Models SDK 0.1.68 where tnm.tool_use_id ≠ hook.tool_use_id AND
+        tnm.task_id ≠ hook.tool_use_id. The fix uses arrival-order correlation:
+        the i-th TNM in _task_notifs_ordered matches the i-th closed-scratch entry.
+        With 1 scratch entry and 1 TNM, position 0 matches position 0 → found.
+        """
+        tm = self._make_teammate()
+        hook_tool_use_id = "hook-tu-AABBCC"
+        tnm_tool_use_id = "tnm-internal-XXYYZZ"  # different from hook!
+        tnm_task_id = "task-internal-9999"         # also different from hook!
+
+        # Populate scratch as the PostSubagentUse hook would
+        now = time.time()
+        tm._closed_subagent_scratch[hook_tool_use_id] = _ClosedSubagentEntry(
+            agent_id="general",
+            tool_use_id=hook_tool_use_id,
+            spawned_at_wallclock=now - 1.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+
+        # Record TNM via _record_task_notif (which appends to _task_notifs_ordered).
+        # Neither tnm.tool_use_id nor tnm.task_id matches hook_tool_use_id —
+        # but arrival-order correlation matches position 0 ↔ position 0.
+        tnm = self._make_tnm(
+            task_id=tnm_task_id,            # does NOT match hook's tool_use_id
+            tool_use_id=tnm_tool_use_id,    # does NOT match hook's tool_use_id
+            status="completed",
+            summary="done",
+        )
+        tm._record_task_notif(tnm.task_id, tnm)
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tm._end_turn(close_tools=False)
+
+        no_tnm_warnings = [
+            r for r in caplog.records
+            if "no TNM for subagent" in r.getMessage()
+        ]
+        assert no_tnm_warnings == [], (
+            f"Expected no 'no TNM for subagent' warnings with arrival-order correlation; "
+            f"got: {[r.getMessage() for r in no_tnm_warnings]}"
+        )
+        # Verify _last_subagent_completed was set (TNM was found)
+        assert tm._last_subagent_completed is not None
+        assert tm._last_subagent_completed["outcome"] == "ok"
+        assert tm._last_subagent_completed["summary"] == "done"
+
+    # AT13: genuinely-missing TNM → warning fires, fallback to hook outcome
+    def test_genuinely_missing_tnm_logs_warning_and_falls_back(self, caplog) -> None:
+        """AT13: closed entry with no TNM → 'no TNM' warning fires, falls back to hook_outcome.
+
+        Preserves the true-missing diagnostic: the fix eliminates false misses
+        (arrival-order mismatch in prior version), but genuine TNM absence
+        (no TNM arrived at all) still emits the warning and falls back.
+        """
+        tm = self._make_teammate()
+        hook_tool_use_id = "hook-tu-MISSING"
+
+        now = time.time()
+        tm._closed_subagent_scratch[hook_tool_use_id] = _ClosedSubagentEntry(
+            agent_id="planner",
+            tool_use_id=hook_tool_use_id,
+            spawned_at_wallclock=now - 2.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+        # No TNM recorded — simulates a genuinely missing TaskNotificationMessage
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tm._end_turn(close_tools=False)
+
+        no_tnm_warnings = [
+            r for r in caplog.records
+            if "no TNM for subagent" in r.getMessage()
+        ]
+        assert len(no_tnm_warnings) == 1, (
+            f"Expected exactly 1 'no TNM for subagent' warning; "
+            f"got: {[r.getMessage() for r in no_tnm_warnings]}"
+        )
+        # Fallback: outcome derives from hook_outcome ("ok"), summary is None
+        assert tm._last_subagent_completed is not None
+        assert tm._last_subagent_completed["outcome"] == "ok"
+        assert tm._last_subagent_completed["summary"] is None
+
+    # AT16: structural guard — narrowing NOTE is absent from both live test files
+    def test_narrowing_note_absent_from_live_tests(self) -> None:
+        """AT16: 'intentionally excluded here' must not appear in live test files.
+
+        Deletion-detector: exits non-zero if the narrowing NOTE is reintroduced.
+        """
+        import os
+        tests_dir = os.path.dirname(__file__)
+        sentinel = "intentionally excluded here"
+        for fname in ("test_live_subagents.py", "test_user_loader_live.py"):
+            fpath = os.path.join(tests_dir, fname)
+            with open(fpath) as f:
+                content = f.read()
+            assert sentinel not in content, (
+                f"{fname} contains the narrowing NOTE literal {sentinel!r}; "
+                "it must be removed as part of the TNM-correlation fix (AT16)"
+            )

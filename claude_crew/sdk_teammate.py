@@ -240,8 +240,10 @@ async def _collect_response_text(
       RateLimitEvent and TaskNotificationMessage events also stamp activity.
     - Ignores tool-use, thinking, and other non-text blocks (Assumption A2).
     - On RateLimitEvent (status=rejected), raises RateLimitedError.
-    - Calls record_task_notif(tool_use_id, tnm) for ALL TNM statuses when
-      tnm.tool_use_id is not None (enables correlation in _handle_one_turn).
+    - Calls record_task_notif(task_id, tnm) for ALL TNM statuses (enables
+      correlation in _handle_one_turn; arrival-order is the correlation
+      strategy in SDK 0.1.68 where neither task_id nor tnm.tool_use_id
+      matches the hook's tool_use_id — see _record_task_notif).
     - Tracks all TaskNotificationMessages with a failure-shaped status in
       failed_task_notifs; logs a WARNING for *every* such notification.
     - Terminates when the SDK iterator terminates (typically at ResultMessage).
@@ -366,10 +368,11 @@ async def _collect_response_text(
             continue
         if isinstance(msg, TaskNotificationMessage):
             # Fire callback for ALL statuses (completed/failed/stopped) so
-            # _handle_one_turn can correlate TNMs with tool_use_ids. Skip if
-            # tool_use_id is absent (can't correlate).
-            if record_task_notif is not None and msg.tool_use_id is not None:
-                record_task_notif(msg.tool_use_id, msg)
+            # _handle_one_turn can correlate TNMs with subagent dispatches.
+            # Keyed by task_id (always present, str) — in SDK 0.1.68 task_id
+            # matches the hook's tool_use_id while tnm.tool_use_id does not.
+            if record_task_notif is not None:
+                record_task_notif(msg.task_id, msg)
             if msg.status in ("failed", "stopped"):
                 failed_task_notifs.append(msg)
                 logger.warning(
@@ -691,7 +694,7 @@ class SdkTeammate(Teammate):
         self._closed_subagent_scratch: dict[str, _ClosedSubagentEntry] = {}
         self._recently_closed_subagent_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_subagent_completed: dict[str, Any] | None = None
-        self._task_notifs_by_tool_use_id: dict[str, TaskNotificationMessage] = {}
+        self._task_notifs_ordered: list[TaskNotificationMessage] = []
 
         # Liveness state (T4/D2/D4).
         self._death_suspected: bool = False
@@ -1135,18 +1138,32 @@ class SdkTeammate(Teammate):
         error_text = inp.get("error", "")
         return await self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
 
-    def _record_task_notif(self, tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-        """Store a TaskNotificationMessage keyed by tool_use_id (F7)."""
-        self._task_notifs_by_tool_use_id[tool_use_id] = tnm
+    def _record_task_notif(self, task_id: str, tnm: TaskNotificationMessage) -> None:
+        """Append a TaskNotificationMessage in arrival order (F7).
+
+        The task_id parameter is not used as a storage key — in SDK 0.1.68,
+        neither tnm.task_id nor tnm.tool_use_id matches the hook's tool_use_id,
+        so key-based lookup fails. TNMs are instead stored in _task_notifs_ordered
+        (arrival order) and correlated with closed-subagent-scratch entries by
+        position in _end_turn: the i-th TNM matches the i-th closed entry.
+        """
+        self._task_notifs_ordered.append(tnm)
 
     def _end_turn(self, *, close_tools: bool = True) -> None:
         """Extend base _end_turn with F7 subagent-result JSONL emit."""
         super()._end_turn(close_tools=close_tools)
         # Emit subagent_result for each entry that PostToolUse closed into scratch.
+        # Correlation uses arrival-order: the i-th TNM in _task_notifs_ordered
+        # matches the i-th entry in _closed_subagent_scratch (completion order).
+        # In SDK 0.1.68, neither tnm.task_id nor tnm.tool_use_id matches the
+        # hook's tool_use_id, so key-based lookup is unreliable — arrival-order
+        # is the stable fallback for single-dispatch-per-turn turns (the common
+        # case). Concurrent Tasks are inherently ambiguous under arrival-order;
+        # the "no TNM" warning still fires if TNMs are fewer than scratch entries.
         entries = list(self._closed_subagent_scratch.values())
         try:
-            for closed in entries:
-                tnm = self._task_notifs_by_tool_use_id.get(closed.tool_use_id)
+            for i, closed in enumerate(entries):
+                tnm = self._task_notifs_ordered[i] if i < len(self._task_notifs_ordered) else None
                 tnm_missing = tnm is None
                 if tnm_missing:
                     logger.warning(
@@ -1192,7 +1209,7 @@ class SdkTeammate(Teammate):
                 }
         finally:
             self._closed_subagent_scratch.clear()
-            self._task_notifs_by_tool_use_id.clear()
+            self._task_notifs_ordered.clear()
 
     def _close_open_subagents(self, reason: Literal["death", "kill"]) -> None:
         """Emit subagent_abandoned_batch and clear in-flight subagent state on death/kill.
