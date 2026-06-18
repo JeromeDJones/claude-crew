@@ -92,6 +92,13 @@ _SHUTDOWN_SENTINEL: object = object()
 _SEND_TO_MCP_SERVER_NAME: str = "crew-send"
 _SEND_TO_TOOL_ID: str = f"mcp__{_SEND_TO_MCP_SERVER_NAME}__send_to"
 
+# Plan-mode write gate: tools denied when effective_permission_mode == "plan".
+# Read-only and inspection tools (Read, Grep, Glob, Bash, WebFetch, Task) are
+# deliberately NOT included so plan-mode teammates can still explore the codebase.
+_PLAN_MODE_DENIED_TOOLS: frozenset[str] = frozenset(
+    {"Write", "Edit", "NotebookEdit", "MultiEdit"}
+)
+
 # Graceful flush constants (Feature: graceful-termination-memory-flush).
 # Budget matches the codebase's established hang-detection budget (90s).
 GRACEFUL_FLUSH_SECONDS: float = 90.0
@@ -233,8 +240,10 @@ async def _collect_response_text(
       RateLimitEvent and TaskNotificationMessage events also stamp activity.
     - Ignores tool-use, thinking, and other non-text blocks (Assumption A2).
     - On RateLimitEvent (status=rejected), raises RateLimitedError.
-    - Calls record_task_notif(tool_use_id, tnm) for ALL TNM statuses when
-      tnm.tool_use_id is not None (enables correlation in _handle_one_turn).
+    - Calls record_task_notif(task_id, tnm) for ALL TNM statuses (enables
+      correlation in _handle_one_turn; arrival-order is the correlation
+      strategy in SDK 0.1.68 where neither task_id nor tnm.tool_use_id
+      matches the hook's tool_use_id — see _record_task_notif).
     - Tracks all TaskNotificationMessages with a failure-shaped status in
       failed_task_notifs; logs a WARNING for *every* such notification.
     - Terminates when the SDK iterator terminates (typically at ResultMessage).
@@ -359,10 +368,12 @@ async def _collect_response_text(
             continue
         if isinstance(msg, TaskNotificationMessage):
             # Fire callback for ALL statuses (completed/failed/stopped) so
-            # _handle_one_turn can correlate TNMs with tool_use_ids. Skip if
-            # tool_use_id is absent (can't correlate).
-            if record_task_notif is not None and msg.tool_use_id is not None:
-                record_task_notif(msg.tool_use_id, msg)
+            # _handle_one_turn can correlate TNMs with subagent dispatches.
+            # Passed with task_id for identity, but correlation is arrival-order:
+            # in SDK 0.1.68 neither task_id nor tnm.tool_use_id matches the hook's
+            # tool_use_id, so _record_task_notif appends in arrival order (see there).
+            if record_task_notif is not None:
+                record_task_notif(msg.task_id, msg)
             if msg.status in ("failed", "stopped"):
                 failed_task_notifs.append(msg)
                 logger.warning(
@@ -618,6 +629,10 @@ class SdkTeammate(Teammate):
         )
         self._cwd = cwd
         self._permission_mode = permission_mode
+        # Resolved effective permission mode (spawn-arg-wins-then-role-pack).
+        # Stashed in _run() before the client context opens so _on_pre_tool_use
+        # can read it without recomputing. None until _run() resolves it.
+        self._effective_permission_mode: str | None = None
         self._allowed_tools = allowed_tools
         self._extra_tools = extra_tools
         self._mcp_servers_grant = mcp_servers_grant
@@ -680,7 +695,7 @@ class SdkTeammate(Teammate):
         self._closed_subagent_scratch: dict[str, _ClosedSubagentEntry] = {}
         self._recently_closed_subagent_use_ids: collections.deque[str] = collections.deque(maxlen=64)
         self._last_subagent_completed: dict[str, Any] | None = None
-        self._task_notifs_by_tool_use_id: dict[str, TaskNotificationMessage] = {}
+        self._task_notifs_ordered: list[TaskNotificationMessage] = []
 
         # Liveness state (T4/D2/D4).
         self._death_suspected: bool = False
@@ -795,6 +810,33 @@ class SdkTeammate(Teammate):
                                 "permissionDecisionReason": reason,
                             }
                         }
+            # Plan-mode write gate: deny mutating tools when the teammate was
+            # spawned (or role-pack-configured) with permission_mode="plan".
+            # This is a claude-crew-side enforcement layer that does not depend
+            # on the SDK's approval-UI gate (which is a no-op in headless sessions).
+            # Read-only tools (Read, Grep, Glob, Bash, WebFetch, Task) are NOT
+            # denied so plan-mode inspection still works.
+            if (
+                tool_name in _PLAN_MODE_DENIED_TOOLS
+                and self._effective_permission_mode == "plan"
+            ):
+                deny_reason = (
+                    f"claude-crew plan-mode write gate: '{tool_name}' is a mutating "
+                    f"tool and this teammate was spawned with permission_mode='plan'. "
+                    f"Read-only tools (Read, Grep, Glob, Bash, WebFetch, Task) remain "
+                    f"available. To write files, spawn without permission_mode='plan'."
+                )
+                logger.warning(
+                    "plan_mode_gate: blocked %s for teammate=%s role=%s",
+                    tool_name, self.id, self.role,
+                )
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": deny_reason,
+                    }
+                }
             # D3: subagent branch — activity stamped; spawn tracking path.
             if inp.get("agent_id") is not None:
                 agent_id = inp["agent_id"]
@@ -1097,18 +1139,32 @@ class SdkTeammate(Teammate):
         error_text = inp.get("error", "")
         return await self._on_post_common(inp, tool_use_id, outcome=outcome, error_text=error_text)
 
-    def _record_task_notif(self, tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-        """Store a TaskNotificationMessage keyed by tool_use_id (F7)."""
-        self._task_notifs_by_tool_use_id[tool_use_id] = tnm
+    def _record_task_notif(self, task_id: str, tnm: TaskNotificationMessage) -> None:
+        """Append a TaskNotificationMessage in arrival order (F7).
+
+        The task_id parameter is not used as a storage key — in SDK 0.1.68,
+        neither tnm.task_id nor tnm.tool_use_id matches the hook's tool_use_id,
+        so key-based lookup fails. TNMs are instead stored in _task_notifs_ordered
+        (arrival order) and correlated with closed-subagent-scratch entries by
+        position in _end_turn: the i-th TNM matches the i-th closed entry.
+        """
+        self._task_notifs_ordered.append(tnm)
 
     def _end_turn(self, *, close_tools: bool = True) -> None:
         """Extend base _end_turn with F7 subagent-result JSONL emit."""
         super()._end_turn(close_tools=close_tools)
         # Emit subagent_result for each entry that PostToolUse closed into scratch.
+        # Correlation uses arrival-order: the i-th TNM in _task_notifs_ordered
+        # matches the i-th entry in _closed_subagent_scratch (completion order).
+        # In SDK 0.1.68, neither tnm.task_id nor tnm.tool_use_id matches the
+        # hook's tool_use_id, so key-based lookup is unreliable — arrival-order
+        # is the stable fallback for single-dispatch-per-turn turns (the common
+        # case). Concurrent Tasks are inherently ambiguous under arrival-order;
+        # the "no TNM" warning still fires if TNMs are fewer than scratch entries.
         entries = list(self._closed_subagent_scratch.values())
         try:
-            for closed in entries:
-                tnm = self._task_notifs_by_tool_use_id.get(closed.tool_use_id)
+            for i, closed in enumerate(entries):
+                tnm = self._task_notifs_ordered[i] if i < len(self._task_notifs_ordered) else None
                 tnm_missing = tnm is None
                 if tnm_missing:
                     logger.warning(
@@ -1154,7 +1210,7 @@ class SdkTeammate(Teammate):
                 }
         finally:
             self._closed_subagent_scratch.clear()
-            self._task_notifs_by_tool_use_id.clear()
+            self._task_notifs_ordered.clear()
 
     def _close_open_subagents(self, reason: Literal["death", "kill"]) -> None:
         """Emit subagent_abandoned_batch and clear in-flight subagent state on death/kill.
@@ -1450,6 +1506,9 @@ class SdkTeammate(Teammate):
             effective_pm = getattr(role_def, "permissionMode", None)
         if effective_pm is not None:
             opts_kwargs["permission_mode"] = effective_pm
+        # Stash resolved mode so _on_pre_tool_use can enforce the plan-mode
+        # write gate without recomputing the resolution logic.
+        self._effective_permission_mode = effective_pm
 
         # skills and disallowedTools: role-pack only (spawn-time override deferred).
         if role_def is not None:

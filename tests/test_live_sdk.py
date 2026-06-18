@@ -229,19 +229,6 @@ class TestPermissionModeAndCwdLive:
     → ClaudeAgentOptions → SDK behavior.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "claude-agent-sdk 0.1.68 / Claude Code CLI 2.1.177: permission_mode='plan' "
-            "no longer blocks Write tool execution in non-interactive SDK subprocess "
-            "sessions — plan mode now presents an approval UI rather than silently "
-            "blocking, and in headless sessions the Write proceeds without blocking. "
-            "This is a production permission-gate regression affecting all teammates "
-            "declared permission_mode: plan. Wiring is correct (--permission-mode plan "
-            "reaches the CLI); the behavioral contract changed. See backlog: "
-            ".rr/reports/m3-live-suite-greening-backlog.md"
-        ),
-        strict=False,
-    )
     async def test_plan_mode_blocks_file_write_and_cwd_works(
         self, broker: Broker, tmp_path,
     ) -> None:
@@ -293,10 +280,16 @@ class TestPermissionModeAndCwdLive:
             ),
         )
 
+        # Use explicit absolute paths so the model knows exactly where to write.
+        # "current directory" is ambiguous to the model — it may resolve to HOME
+        # or some other default. Absolute paths remove that ambiguity.
+        plan_probe_path = plan_dir / "probe.txt"
+        ctrl_probe_path = ctrl_dir / "probe.txt"
+
         # Task for plan teammate: try to write a file (should be blocked by plan mode).
         plan_task = (
-            "Write the string 'probe' to a file named probe.txt in the current directory. "
-            "Use the Write tool."
+            f"Write the string 'probe' to the file {plan_probe_path}. "
+            "Use the Write tool with that exact path."
         )
         await broker.send(Envelope(
             id=new_message_id(), seq=0,
@@ -306,8 +299,8 @@ class TestPermissionModeAndCwdLive:
 
         # Task for control teammate: write a file (should succeed).
         ctrl_task = (
-            "Write the string 'probe' to a file named probe.txt in the current directory. "
-            "Use the Write tool."
+            f"Write the string 'probe' to the file {ctrl_probe_path}. "
+            "Use the Write tool with that exact path."
         )
         await broker.send(Envelope(
             id=new_message_id(), seq=0,

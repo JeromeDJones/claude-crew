@@ -40,6 +40,7 @@ from claude_crew.sdk_teammate import (
     RateLimitedError,
     _STDERR_RING_MAXLEN,
     _STDERR_RING_BYTE_CAP,
+    _PLAN_MODE_DENIED_TOOLS,
 )
 from tests.fakes.sdk import FakeSDKClient, text_response, text_response_with_usage
 from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
@@ -1401,7 +1402,7 @@ class TestSubagentActivityEnvelopes:
         assert tm._recently_closed_subagent_use_ids.maxlen == 64
         assert len(tm._recently_closed_subagent_use_ids) == 0
         assert tm._last_subagent_completed is None
-        assert tm._task_notifs_by_tool_use_id == {}
+        assert tm._task_notifs_ordered == []
 
     # SC2: status_snapshot includes subagent fields with no subagents
     def test_status_snapshot_includes_subagent_fields_empty(self) -> None:
@@ -1483,9 +1484,14 @@ class TestSubagentActivityEnvelopes:
         # last_subagent_completed is still None — nothing populated it.
         assert snap["last_subagent_completed"] is None
 
-    # SC5: _record_task_notif stores by tool_use_id
-    def test_record_task_notif_stores_by_tool_use_id(self) -> None:
-        """SC5: _record_task_notif stores the TaskNotificationMessage keyed by tool_use_id."""
+    # SC5: _record_task_notif appends to ordered list
+    def test_record_task_notif_appends_in_arrival_order(self) -> None:
+        """SC5: _record_task_notif appends TNMs to _task_notifs_ordered in arrival order.
+
+        After the TNM-correlation fix, key-based lookup is replaced by
+        arrival-order correlation. The task_id arg is accepted for interface
+        compatibility but not used as a storage key.
+        """
         tm = self._make_teammate()
 
         tnm = TaskNotificationMessage(
@@ -1498,10 +1504,10 @@ class TestSubagentActivityEnvelopes:
             uuid="tn-sc5",
             session_id="default",
         )
-        tm._record_task_notif("tu-1", tnm)
+        tm._record_task_notif("task-1", tnm)
 
-        assert "tu-1" in tm._task_notifs_by_tool_use_id
-        assert tm._task_notifs_by_tool_use_id["tu-1"] is tnm
+        assert len(tm._task_notifs_ordered) == 1
+        assert tm._task_notifs_ordered[0] is tnm
 
 
 # ---------- T3: subagent hook extension BDD scenarios ----------
@@ -1629,8 +1635,15 @@ class TestSubagentHookExtensions:
             finished_at_wallclock=now,
             hook_outcome="ok",
         )
-        tnm = self._make_tnm(status="completed", summary="Done.", tool_use_id="tu-emit-1", uuid="tn-emit-1")
-        tm._task_notifs_by_tool_use_id["tu-emit-1"] = tnm
+        # Arrival-order correlation: the TNM is stored in _task_notifs_ordered;
+        # _end_turn matches by position (i-th entry ↔ i-th TNM).
+        tnm = self._make_tnm(
+            status="completed", summary="Done.",
+            task_id="task-internal-xyz",    # different from hook's tool_use_id
+            tool_use_id="tnm-internal-999",  # also different — arrival-order needed
+            uuid="tn-emit-1",
+        )
+        tm._task_notifs_ordered.append(tnm)
 
         tm._end_turn()
 
@@ -1644,9 +1657,9 @@ class TestSubagentHookExtensions:
         assert fields["summary"] == "Done."
         assert fields["tnm_missing"] is False
         assert fields["duration_seconds"] >= 0.0
-        # Both dicts cleared after _end_turn.
+        # Both state structures cleared after _end_turn.
         assert tm._closed_subagent_scratch == {}
-        assert tm._task_notifs_by_tool_use_id == {}
+        assert tm._task_notifs_ordered == []
 
     def test_end_turn_emits_subagent_result_tnm_missing(self) -> None:
         """SC4: _end_turn with scratch entry, no TNM → subagent_result with tnm_missing=True, outcome from hook."""
@@ -1834,12 +1847,13 @@ class TestCollectResponseTextT2:
         assert result.failed_task_notifs[1] is tnm_stopped
 
     async def test_record_task_notif_callback_fires_for_all_statuses(self) -> None:
-        """SC-T2-2: record_task_notif callback fires for all TNM statuses.
+        """SC-T2-2: record_task_notif callback fires for all TNM statuses, keyed by task_id.
 
         Given client yields TNMs with statuses: completed, failed, stopped;
-        And a callback recording (tool_use_id, tnm) pairs;
+        And a callback recording (task_id, tnm) pairs;
         When _collect_response_text called with that callback;
-        Then callback called three times; failed_task_notifs has two (failed, stopped only).
+        Then callback called three times, each keyed by task_id (not tool_use_id);
+        failed_task_notifs has two (failed, stopped only).
         """
         tnm_completed = self._make_tnm("completed", task_id="t1", uuid="tn-c", tool_use_id="tu-1")
         tnm_failed = self._make_tnm("failed", task_id="t2", uuid="tn-f", tool_use_id="tu-2")
@@ -1853,52 +1867,53 @@ class TestCollectResponseTextT2:
 
         recorded: list[tuple[str, TaskNotificationMessage]] = []
 
-        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-            recorded.append((tool_use_id, tnm))
+        def capture(task_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((task_id, tnm))
 
         result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
 
-        # Callback fires for all 3 statuses
+        # Callback fires for all 3 statuses, keyed by task_id (not tool_use_id)
         assert len(recorded) == 3
-        assert recorded[0] == ("tu-1", tnm_completed)
-        assert recorded[1] == ("tu-2", tnm_failed)
-        assert recorded[2] == ("tu-3", tnm_stopped)
+        assert recorded[0] == ("t1", tnm_completed)
+        assert recorded[1] == ("t2", tnm_failed)
+        assert recorded[2] == ("t3", tnm_stopped)
 
         # Only failed+stopped go into failed_task_notifs
         assert len(result.failed_task_notifs) == 2
         assert result.failed_task_notifs[0] is tnm_failed
         assert result.failed_task_notifs[1] is tnm_stopped
 
-    async def test_record_task_notif_skips_tnm_with_null_tool_use_id(self) -> None:
-        """SC-T2-3: record_task_notif callback is NOT called when tool_use_id is None.
+    async def test_record_task_notif_callback_fires_for_tnm_with_null_tool_use_id(self) -> None:
+        """SC-T2-3: record_task_notif callback fires even when tool_use_id is None, keyed by task_id.
 
-        Given TNM with tool_use_id=None;
-        When callback would otherwise fire;
-        Then callback NOT called for that TNM.
-        TNM still counted in failed_task_notifs if status is failed.
+        After the TNM-correlation fix, the callback is keyed by task_id (always
+        present) — not tool_use_id. A TNM with tool_use_id=None still triggers
+        the callback because task_id is always non-null.
+        TNM with null tool_use_id AND failed status still counted in failed_task_notifs.
         """
-        tnm_no_id = self._make_tnm("failed", task_id="t1", uuid="tn-noid", tool_use_id=None)
-        tnm_with_id = self._make_tnm("completed", task_id="t2", uuid="tn-withid", tool_use_id="tu-x")
+        tnm_no_tool_id = self._make_tnm("failed", task_id="t1", uuid="tn-noid", tool_use_id=None)
+        tnm_with_tool_id = self._make_tnm("completed", task_id="t2", uuid="tn-withid", tool_use_id="tu-x")
 
         class _FakeClient:
             async def receive_response(self):
-                yield tnm_no_id
-                yield tnm_with_id
+                yield tnm_no_tool_id
+                yield tnm_with_tool_id
 
         recorded: list[tuple[str, TaskNotificationMessage]] = []
 
-        def capture(tool_use_id: str, tnm: TaskNotificationMessage) -> None:
-            recorded.append((tool_use_id, tnm))
+        def capture(task_id: str, tnm: TaskNotificationMessage) -> None:
+            recorded.append((task_id, tnm))
 
         result = await _collect_response_text(_FakeClient(), record_task_notif=capture)
 
-        # Only the TNM with a tool_use_id triggers the callback
-        assert len(recorded) == 1
-        assert recorded[0] == ("tu-x", tnm_with_id)
+        # Both TNMs trigger the callback, keyed by task_id (not tool_use_id)
+        assert len(recorded) == 2
+        assert recorded[0] == ("t1", tnm_no_tool_id)
+        assert recorded[1] == ("t2", tnm_with_tool_id)
 
         # failed TNM (null tool_use_id) still counted in failed_task_notifs
         assert len(result.failed_task_notifs) == 1
-        assert result.failed_task_notifs[0] is tnm_no_id
+        assert result.failed_task_notifs[0] is tnm_no_tool_id
 
     async def test_last_assistant_model_captures_api_model(self) -> None:
         """active-model-display: TurnDrainResult.last_assistant_model carries
@@ -3765,3 +3780,384 @@ class TestDeathSiteWarning:
         # Control flow must be unchanged — death handoff vars set
         assert tm._death_suspected is True
         assert tm._death_in_flight_envelope is env
+
+
+# ---------- plan-mode write gate (ATs 1-11) ----------
+
+
+class TestPlanModeWriteGate:
+    """BDD scenarios for the plan-mode write gate in _on_pre_tool_use.
+
+    ATs 1-8: implementation-level, stub. No SDK subprocess spawned — the hook
+    is called directly after setting self._effective_permission_mode on the
+    teammate instance.
+
+    ATs 10-11 are structural guards (no live SDK needed).
+    AT 9 (live) lives in tests/test_live_sdk.py::TestPermissionModeAndCwdLive.
+    """
+
+    def _make_teammate(self, role: str = "builder") -> SdkTeammate:
+        """Build a minimal SdkTeammate for direct hook invocation."""
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write", "Edit", "Bash", "NotebookEdit"],
+        )
+        return SdkTeammate(
+            id="tm-gate", name="gate", role=role,
+            agents={role: agent_def},
+            pack_bodies={role: "b"},
+        )
+
+    # AT1: plan + Write → deny
+    async def test_plan_mode_denies_write(self) -> None:
+        """AT1: plan + Write → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/x.txt", "content": "x"}},
+            "tu-plan-write", {},
+        )
+        assert "hookSpecificOutput" in result
+        out = result["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert "plan" in out["permissionDecisionReason"].lower()
+
+    # AT2: plan + Edit → deny
+    async def test_plan_mode_denies_edit(self) -> None:
+        """AT2: plan + Edit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Edit",
+             "tool_input": {"file_path": "/tmp/x.txt", "old_string": "a", "new_string": "b"}},
+            "tu-plan-edit", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT3: plan + NotebookEdit → deny
+    async def test_plan_mode_denies_notebook_edit(self) -> None:
+        """AT3: plan + NotebookEdit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "NotebookEdit", "tool_input": {}},
+            "tu-plan-nbedit", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT4: plan + MultiEdit → deny
+    async def test_plan_mode_denies_multi_edit(self) -> None:
+        """AT4: plan + MultiEdit → permissionDecision == 'deny'."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "MultiEdit", "tool_input": {}},
+            "tu-plan-multi", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    # AT5: plan + Read → NOT denied
+    async def test_plan_mode_allows_read(self) -> None:
+        """AT5: plan + Read → does NOT return deny (read-only not neutered)."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Read",
+             "tool_input": {"file_path": "/tmp/x.txt"}},
+            "tu-plan-read", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Read should NOT be denied under plan mode; got decision={decision!r}"
+        )
+
+    # AT6: plan + Bash → NOT denied
+    async def test_plan_mode_allows_bash(self) -> None:
+        """AT6: plan + Bash → does NOT return deny (read-only inspection allowed)."""
+        tm = self._make_teammate()
+        tm._effective_permission_mode = "plan"
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Bash",
+             "tool_input": {"command": "ls /tmp"}},
+            "tu-plan-bash", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Bash should NOT be denied under plan mode; got decision={decision!r}"
+        )
+
+    # AT7: non-plan (None) + Write → NOT denied
+    async def test_non_plan_mode_allows_write(self) -> None:
+        """AT7: _effective_permission_mode=None + Write → gate does NOT fire."""
+        tm = self._make_teammate()
+        # _effective_permission_mode defaults to None; verify gate is silent
+        assert tm._effective_permission_mode is None
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/ok.txt", "content": "ok"}},
+            "tu-noplan-write", {},
+        )
+        decision = result.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", (
+            f"Write should NOT be denied when not in plan mode; got decision={decision!r}"
+        )
+
+    # AT8: role-pack permissionMode feeds the gate
+    async def test_role_pack_permission_mode_feeds_gate(self) -> None:
+        """AT8: role-pack permissionMode='plan' (no spawn-arg override) → gate fires.
+
+        Simulates the resolution path: _permission_mode=None, role_def has
+        permissionMode='plan'. After _run() would compute effective_pm='plan',
+        we stash it manually (as _run() would) and verify _on_pre_tool_use denies.
+        """
+        from claude_agent_sdk.types import AgentDefinition
+        # Pack role-def with permissionMode="plan"
+        agent_def = AgentDefinition(
+            description="planner", prompt="plan only",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read", "Write"],
+            permissionMode="plan",
+        )
+        tm = SdkTeammate(
+            id="tm-rpack", name="rp", role="planner",
+            agents={"planner": agent_def},
+            pack_bodies={"planner": "plan only"},
+            # No spawn-time permission_mode override
+        )
+        # Simulate what _run() does: resolve effective_pm from role_def
+        role_def = agent_def
+        effective_pm = tm._permission_mode  # None (no spawn arg)
+        if effective_pm is None:
+            effective_pm = getattr(role_def, "permissionMode", None)
+        # Stash as _run() would
+        tm._effective_permission_mode = effective_pm
+
+        assert tm._effective_permission_mode == "plan", (
+            f"expected 'plan' from role-pack resolution; got {tm._effective_permission_mode!r}"
+        )
+
+        result = await tm._on_pre_tool_use(
+            {"agent_id": None, "tool_name": "Write",
+             "tool_input": {"file_path": "/tmp/rpack.txt", "content": "x"}},
+            "tu-rpack-1", {},
+        )
+        assert result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny", (
+            "role-pack permissionMode='plan' should feed the gate and deny Write"
+        )
+
+    # AT10: structural guard — live test carries no xfail marker
+    def test_live_test_has_no_xfail_marker(self) -> None:
+        """AT10: test_plan_mode_blocks_file_write_and_cwd_works has no @pytest.mark.xfail."""
+        import ast
+        import os
+        test_file = os.path.join(
+            os.path.dirname(__file__), "test_live_sdk.py"
+        )
+        with open(test_file) as f:
+            source = f.read()
+        assert "xfail" not in source or "plan_mode" not in source.split("xfail")[0].split("\n")[-5:], (
+            "test_plan_mode_blocks_file_write_and_cwd_works must not have @pytest.mark.xfail; "
+            "the claude-crew gate makes this a hard pass"
+        )
+        # More precise check: grep for the function and verify no xfail decorator directly precedes it
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if "def test_plan_mode_blocks_file_write_and_cwd_works" in line:
+                # Look at the preceding 15 lines for xfail
+                window = lines[max(0, i - 15):i]
+                assert not any("xfail" in l for l in window), (
+                    f"Found xfail decorator before test_plan_mode_blocks_file_write_and_cwd_works "
+                    f"at line {i+1}; it must be removed"
+                )
+                return
+        raise AssertionError(
+            "test_plan_mode_blocks_file_write_and_cwd_works not found in tests/test_live_sdk.py"
+        )
+
+    # AT11: structural guard — CLAUDE.md mentions plan-mode write gate
+    def test_claude_md_documents_plan_mode_gate(self) -> None:
+        """AT11: CLAUDE.md 'Known limitations' contains 'plan-mode write gate'."""
+        import os
+        claude_md = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "CLAUDE.md"
+        )
+        with open(claude_md) as f:
+            content = f.read()
+        assert "plan-mode write gate" in content, (
+            "CLAUDE.md 'Known limitations' section must contain the literal "
+            "'plan-mode write gate' documenting the claude-crew-side enforcement"
+        )
+
+    # Verify the constant itself
+    def test_plan_mode_denied_tools_constant(self) -> None:
+        """Sanity: _PLAN_MODE_DENIED_TOOLS contains exactly the four mutators."""
+        assert "Write" in _PLAN_MODE_DENIED_TOOLS
+        assert "Edit" in _PLAN_MODE_DENIED_TOOLS
+        assert "NotebookEdit" in _PLAN_MODE_DENIED_TOOLS
+        assert "MultiEdit" in _PLAN_MODE_DENIED_TOOLS
+        # Read-only tools must NOT be in the set
+        assert "Read" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Bash" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Grep" not in _PLAN_MODE_DENIED_TOOLS
+        assert "Task" not in _PLAN_MODE_DENIED_TOOLS
+
+
+# ---------- TNM correlation (ATs 12-13, 16) ----------
+
+
+class TestTNMCorrelation:
+    """BDD scenarios for TaskNotificationMessage↔hook correlation fix.
+
+    ATs 12-13: implementation-level, stub. Directly populate
+    _closed_subagent_scratch and call _record_task_notif, then call
+    _end_turn() to verify correlation.
+
+    AT 16: structural guard — the narrowing NOTE literal 'intentionally
+    excluded here' is absent from both narrowed live test files.
+
+    AT 14-15 (live, gated) live in test_live_subagents.py::test_pack_end_to_end
+    and test_user_loader_live.py::test_user_and_project_agents_invokable.
+    """
+
+    def _make_teammate(self) -> SdkTeammate:
+        """Build a minimal SdkTeammate for direct _end_turn invocation."""
+        from claude_agent_sdk.types import AgentDefinition
+        agent_def = AgentDefinition(
+            description="t", prompt="b",
+            model="claude-haiku-4-5-20251001",
+            tools=["Read"],
+        )
+        return SdkTeammate(
+            id="tm-tnm", name="tnm", role="worker",
+            agents={"worker": agent_def},
+            pack_bodies={"worker": "b"},
+        )
+
+    def _make_tnm(
+        self,
+        task_id: str,
+        tool_use_id: str | None = None,
+        status: str = "completed",
+        summary: str = "done",
+    ) -> TaskNotificationMessage:
+        """Build a TaskNotificationMessage with configurable fields."""
+        return TaskNotificationMessage(
+            subtype="task_notification",
+            data={},
+            task_id=task_id,
+            status=status,
+            output_file="/tmp/out",
+            summary=summary,
+            uuid="uuid-test",
+            session_id="sess-test",
+            tool_use_id=tool_use_id,
+        )
+
+    # AT12: TNM with differing tool_use_id is correlated via arrival-order, no warning
+    def test_tnm_correlated_by_arrival_order_no_warning(self, caplog) -> None:
+        """AT12: TNM with differing tool_use_id is correlated by arrival-order → no 'no TNM' warning.
+
+        Models SDK 0.1.68 where tnm.tool_use_id ≠ hook.tool_use_id AND
+        tnm.task_id ≠ hook.tool_use_id. The fix uses arrival-order correlation:
+        the i-th TNM in _task_notifs_ordered matches the i-th closed-scratch entry.
+        With 1 scratch entry and 1 TNM, position 0 matches position 0 → found.
+        """
+        tm = self._make_teammate()
+        hook_tool_use_id = "hook-tu-AABBCC"
+        tnm_tool_use_id = "tnm-internal-XXYYZZ"  # different from hook!
+        tnm_task_id = "task-internal-9999"         # also different from hook!
+
+        # Populate scratch as the PostSubagentUse hook would
+        now = time.time()
+        tm._closed_subagent_scratch[hook_tool_use_id] = _ClosedSubagentEntry(
+            agent_id="general",
+            tool_use_id=hook_tool_use_id,
+            spawned_at_wallclock=now - 1.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+
+        # Record TNM via _record_task_notif (which appends to _task_notifs_ordered).
+        # Neither tnm.tool_use_id nor tnm.task_id matches hook_tool_use_id —
+        # but arrival-order correlation matches position 0 ↔ position 0.
+        tnm = self._make_tnm(
+            task_id=tnm_task_id,            # does NOT match hook's tool_use_id
+            tool_use_id=tnm_tool_use_id,    # does NOT match hook's tool_use_id
+            status="completed",
+            summary="done",
+        )
+        tm._record_task_notif(tnm.task_id, tnm)
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tm._end_turn(close_tools=False)
+
+        no_tnm_warnings = [
+            r for r in caplog.records
+            if "no TNM for subagent" in r.getMessage()
+        ]
+        assert no_tnm_warnings == [], (
+            f"Expected no 'no TNM for subagent' warnings with arrival-order correlation; "
+            f"got: {[r.getMessage() for r in no_tnm_warnings]}"
+        )
+        # Verify _last_subagent_completed was set (TNM was found)
+        assert tm._last_subagent_completed is not None
+        assert tm._last_subagent_completed["outcome"] == "ok"
+        assert tm._last_subagent_completed["summary"] == "done"
+
+    # AT13: genuinely-missing TNM → warning fires, fallback to hook outcome
+    def test_genuinely_missing_tnm_logs_warning_and_falls_back(self, caplog) -> None:
+        """AT13: closed entry with no TNM → 'no TNM' warning fires, falls back to hook_outcome.
+
+        Preserves the true-missing diagnostic: the fix eliminates false misses
+        (arrival-order mismatch in prior version), but genuine TNM absence
+        (no TNM arrived at all) still emits the warning and falls back.
+        """
+        tm = self._make_teammate()
+        hook_tool_use_id = "hook-tu-MISSING"
+
+        now = time.time()
+        tm._closed_subagent_scratch[hook_tool_use_id] = _ClosedSubagentEntry(
+            agent_id="planner",
+            tool_use_id=hook_tool_use_id,
+            spawned_at_wallclock=now - 2.0,
+            finished_at_wallclock=now,
+            hook_outcome="ok",
+        )
+        # No TNM recorded — simulates a genuinely missing TaskNotificationMessage
+
+        with caplog.at_level(logging.WARNING, logger="claude_crew.sdk_teammate"):
+            tm._end_turn(close_tools=False)
+
+        no_tnm_warnings = [
+            r for r in caplog.records
+            if "no TNM for subagent" in r.getMessage()
+        ]
+        assert len(no_tnm_warnings) == 1, (
+            f"Expected exactly 1 'no TNM for subagent' warning; "
+            f"got: {[r.getMessage() for r in no_tnm_warnings]}"
+        )
+        # Fallback: outcome derives from hook_outcome ("ok"), summary is None
+        assert tm._last_subagent_completed is not None
+        assert tm._last_subagent_completed["outcome"] == "ok"
+        assert tm._last_subagent_completed["summary"] is None
+
+    # AT16: structural guard — narrowing NOTE is absent from both live test files
+    def test_narrowing_note_absent_from_live_tests(self) -> None:
+        """AT16: 'intentionally excluded here' must not appear in live test files.
+
+        Deletion-detector: exits non-zero if the narrowing NOTE is reintroduced.
+        """
+        import os
+        tests_dir = os.path.dirname(__file__)
+        sentinel = "intentionally excluded here"
+        for fname in ("test_live_subagents.py", "test_user_loader_live.py"):
+            fpath = os.path.join(tests_dir, fname)
+            with open(fpath) as f:
+                content = f.read()
+            assert sentinel not in content, (
+                f"{fname} contains the narrowing NOTE literal {sentinel!r}; "
+                "it must be removed as part of the TNM-correlation fix (AT16)"
+            )

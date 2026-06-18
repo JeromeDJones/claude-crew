@@ -61,3 +61,4 @@ See `doc/PRODUCT-VISION.md § Product Journal` for the full history. Key substra
 | Workflow Shape Composition M0 | 2026-06-11 | Arc foundation |
 | Async shape gate M1.5 | 2026-06-12 | Gate interaction model |
 | Edge routing M2 | 2026-06-13 | Live execution |
+| plan-gate-and-telemetry-hardening | 2026-06-17 | Closes silent safety regression (plan-mode write gate now enforced client-side); restores F7 TNM telemetry (arrival-order correlation); adds forced-crash coverage; fixes shutdown-signal flake. Substrate hardening for M3.5 and beyond. |

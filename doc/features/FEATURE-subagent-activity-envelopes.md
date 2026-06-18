@@ -86,6 +86,8 @@ No new files. No new MCP tools (SC-6: pull model via existing `get_teammate_stat
 
 ### Data / API Contracts
 
+> **Implementation update — 2026-06-17 (`plan-gate-and-telemetry-hardening`):** In SDK 0.1.68 neither `tnm.task_id` nor `tnm.tool_use_id` matches the PostSubagentUse hook's `tool_use_id` for the same dispatch (verified by runtime probe). The dict-keyed field `_task_notifs_by_tool_use_id: dict[str, TaskNotificationMessage]` was renamed to **`_task_notifs_ordered: list[TaskNotificationMessage]`** and the correlation strategy changed from key-based lookup to **arrival-order indexing** (i-th TNM ↔ i-th closed-scratch entry). `_record_task_notif` now appends rather than stores by key. The `"no TNM for subagent"` WARNING is preserved for the genuinely-missing case. All references to `_task_notifs_by_tool_use_id` below describe the **original shipped design**; the current implementation uses `_task_notifs_ordered`.
+
 **New dataclass — `_SubagentUseEntry` (sdk_teammate.py):**
 ```python
 @dataclass(frozen=True)
