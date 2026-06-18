@@ -199,7 +199,8 @@ class TestDefaultPackEndToEnd:
 
         # No subagent WARNINGs across the four turns — neither subagent
         # failure (status in {failed, stopped}) nor TNM correlation misses.
-        # TNM correlation now keys by task_id (fixed for SDK 0.1.68).
+        # TNM correlation now uses arrival-order (fixed for SDK 0.1.68; neither
+        # task_id nor tnm.tool_use_id matches the hook's tool_use_id).
         sdk_warnings = [
             r for r in caplog.records
             if r.name == "claude_crew.sdk_teammate"

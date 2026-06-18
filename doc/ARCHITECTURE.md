@@ -107,6 +107,10 @@ Also owns the **stderr ring buffer subsystem** and **death-site telemetry** — 
 
 Also owns the **scoped `send_to` in-process MCP server** (added in `m2-edge-routing` 2026-06-13): each spawned `SdkTeammate` runs a private FastMCP server (`_build_send_to_mcp_server()`) exposing a single `send_to(recipient, message)` tool whose handler calls `broker.send_scoped`. This is the sole channel by which a teammate can address the broker for non-lead sends — see [Edge Routing (M2)](#edge-routing-m2) below.
 
+Also owns the **plan-mode write gate** (added in `plan-gate-and-telemetry-hardening` 2026-06-17): `_PLAN_MODE_DENIED_TOOLS: frozenset = {"Write","Edit","NotebookEdit","MultiEdit"}` (module-level); `self._effective_permission_mode: str | None` (stashed at options-build time from spawn-arg-wins-then-role-pack resolution, before the SDK client context opens, so the hook always sees the same value the SDK received). In `_on_pre_tool_use`, AFTER the memory-write guard and BEFORE the subagent/main tracking branches: when `_effective_permission_mode == "plan"` and `tool_name in _PLAN_MODE_DENIED_TOOLS`, returns `permissionDecision: "deny"`. Read-only tools (`Read`, `Grep`, `Glob`, `Bash`, `WebFetch`, `Task`) are NOT denied — a plan-mode teammate is gated, not neutered. This is a claude-crew-side enforcement that does not depend on the SDK's plan gate (which as of claude-agent-sdk 0.1.68 / CLI 2.1.177 presents an approval UI instead of silently blocking in headless sessions — see Verified SDK Behavioral Invariants).
+
+Also owns the **TNM arrival-order correlation** (updated in `plan-gate-and-telemetry-hardening` 2026-06-17): `_task_notifs_ordered: list[TaskNotificationMessage]` replaces the former `_task_notifs_by_tool_use_id: dict` field. `_record_task_notif` appends TNMs in stream-arrival order (neither `task_id` nor `tool_use_id` matched the PostSubagentUse hook id in SDK 0.1.68 — verified by runtime probe). `_end_turn` correlates the i-th TNM with the i-th closed-scratch entry. The `"no TNM for subagent"` WARNING is preserved for the genuinely-missing case (TNM count < scratch count). Re-verify field correlation when upgrading `claude-agent-sdk`.
+
 ### `claude_crew/envelope.py`
 
 Wire format. Fields: `id` (caller-provided UUID for retry safety), `seq` (broker-stamped monotonic), `sender`, `recipient`, `timestamp`, `payload`.
@@ -378,6 +382,10 @@ These are empirically confirmed facts about the `claude-agent-sdk` / Claude CLI 
 
 **Claude CLI emits no stderr during normal turns.** All output, including verbose/debug messages, routes to stdout as a JSON stream (`--output-format stream-json`). Verified empirically (teammate-death-diagnostics, 2026-06-09): `subprocess.Popen` with `stderr=PIPE` on `claude --output-format stream-json --verbose` produces 0 stderr bytes. `SdkTeammate._stderr_ring` therefore only populates during error/crash scenarios. Live tests verifying ring population must inject via `_on_stderr_line` directly; they cannot rely on a healthy turn producing stderr output.
 
+**`permission_mode="plan"` does not block Writes in headless SDK sessions (as of claude-agent-sdk 0.1.68 / CLI 2.1.177).** Verified live 2026-06-17: plan mode presents an approval UI in interactive sessions but is a no-op headless — Writes proceed without approval (`test_plan_mode_blocks_file_write_and_cwd_works`). claude-crew compensates client-side via the `_on_pre_tool_use` deny-hook (`_PLAN_MODE_DENIED_TOOLS` + `_effective_permission_mode == "plan"` check). Gate is reliable regardless of SDK behavior. Re-verify when upgrading `claude-agent-sdk`.
+
+**TNM/hook `tool_use_id` mismatch in SDK 0.1.68.** `TaskNotificationMessage.tool_use_id` and `TaskNotificationMessage.task_id` both differ from the PostSubagentUse hook's `tool_use_id` for the same dispatch (verified by runtime probe 2026-06-17: e.g. `toolu_01ARWn4Z…` vs `toolu_01Bxnup…`). claude-crew uses arrival-order correlation (`_task_notifs_ordered: list`) instead of key-based lookup. Re-verify field correlation when upgrading `claude-agent-sdk`.
+
 ---
 
 ## Dashboard: Multi-Instance Architecture Note
@@ -397,3 +405,4 @@ The Mission Control dashboard (`ui_server.py`) is not single-instance. One insta
 - HOME-monkeypatch tests must copy `~/.claude/.credentials.json` and `~/.claude.json` into the tmp HOME.
 - LLM-relayed sentinels: ≤12 hex characters (preferred) to avoid truncation/paraphrasing across the LLM relay boundary.
 - Full `uv run pytest` (not `-k` subset) when changing widely-consumed behavior.
+- **Tests that spawn a `claude_crew.cli` subprocess must allocate a free TCP port** using the `_get_free_port()` pattern (bind socket to port 0, read assigned ephemeral port, close; pass result as `CLAUDE_CREW_UI_PORT=<port>` in the subprocess environment). Do NOT rely on the default port 7821 — a live claude-crew MCP session holds it, preventing the subprocess from binding `UIServer` and completing registration. Canonical helper: `_get_free_port()` in `tests/test_shutdown_signals.py`.

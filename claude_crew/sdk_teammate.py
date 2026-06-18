@@ -369,8 +369,9 @@ async def _collect_response_text(
         if isinstance(msg, TaskNotificationMessage):
             # Fire callback for ALL statuses (completed/failed/stopped) so
             # _handle_one_turn can correlate TNMs with subagent dispatches.
-            # Keyed by task_id (always present, str) — in SDK 0.1.68 task_id
-            # matches the hook's tool_use_id while tnm.tool_use_id does not.
+            # Passed with task_id for identity, but correlation is arrival-order:
+            # in SDK 0.1.68 neither task_id nor tnm.tool_use_id matches the hook's
+            # tool_use_id, so _record_task_notif appends in arrival order (see there).
             if record_task_notif is not None:
                 record_task_notif(msg.task_id, msg)
             if msg.status in ("failed", "stopped"):
