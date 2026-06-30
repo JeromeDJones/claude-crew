@@ -6,6 +6,24 @@ Format per workflow.md: `## [YYYY-MM-DD] Feature: <name>` then bulleted entries 
 
 ---
 
+## [2026-06-29] Feature: shape-graphic-redesign
+
+### [Low, skill] `dashboard.html`-touching task testCommands must run the full `-m dashboard` suite; "pre-existing" baselines must be master, not `git stash`
+
+- **What**: In the `unified-node-language-proposal` task (cycle 0), the implementor used `git stash` to simulate the pre-task baseline. The stash baseline was the post-task-1 worktree (which already contained the expand-button SVG icon added by `shared-zoom-pan-modal`), not true master. As a result, 4 Playwright `.rail-topology svg` strict-mode failures introduced by task 1 were mis-classified as "pre-existing." The per-task `testCommand` was also scoped (`-m dashboard tests/test_unified_proposal_language.py ...`) rather than the full `-m dashboard` suite, so the sibling-file failures were never run. Cycle-1 fixed all 4 occurrences across `test_edge_dashboard.py` and `test_dashboard_render.py`.
+- **Where**: `rr-implementor` / `rr-coordinator` skill contracts; any task whose `taskTouches` includes `claude_crew/ui/dashboard.html` or another single-file widely-consumed UI artifact.
+- **Why it matters**: Two rules were violated independently and compound: (1) the "pre-existing" classification used the wrong reference point — `git stash` pops to the post-prior-tasks state in a serial chain, which already contains earlier-task regressions; (2) the scoped `testCommand` never exercised the sibling test files that exercise the same `.rail-topology` / `#topo-host` selector surface. The green scoped slice result gave false confidence. This is the same family of gap as the `multi-scope-agent-memory` lesson in CLAUDE.md ("full `uv run pytest`, not a keyword-filtered subset, when changing widely-consumed behavior").
+- **Suggested action**: Add to the rr-implementor / rr-coordinator skill contract: (a) *For any task that edits `dashboard.html`, the `testCommand` MUST include `uv run pytest -m dashboard` (full dashboard suite, not a scoped subset)* — the marker is cheap and selects exactly the Playwright suite for the artifact. (b) *"Pre-existing" classification requires a master baseline — run `git stash` against master or check out a clean master branch; never use the post-prior-tasks worktree as the baseline.* XS process note; co-locate with the existing multi-scope-agent-memory lesson.
+
+### [Low, prompt] Proposal modal missing explicit `fit` button (has −/+ only; topology modal has −/fit/+)
+
+- **What**: The topology expand modal exposes three footer controls — `−` / `fit` / `+` — while the proposal expand modal exposes only `−` / `+` (no explicit `fit` button). Auto-fit fires on open via the double-rAF path in both modals, so the initial view is always fitted. But after the user pans/zooms, there is no single-click path to return to the fitted view in the proposal modal. The feature reviewer flagged it as an Info finding (no AT violated; pan/zoom + auto-fit-on-open both work).
+- **Where**: `claude_crew/ui/dashboard.html` — `openProposalModal` footer controls / `#proposal-modal` DOM.
+- **Why it matters**: UX asymmetry. The `fit` button in the topology modal calls `resetZoom(hostId)` → `fitToHost`, the same function as the auto-fit path. Adding it to the proposal modal is additive and trivial (no new JS needed).
+- **Suggested action**: Add a `fit` button to the proposal modal's footer control row (same `.topo-btn` class, same `resetZoom` target). XS UX polish; pairs naturally with any future `ShapeProposalCard` or proposal modal enhancement.
+
+---
+
 ## [2026-06-18] Feature: plan-gate-and-telemetry-hardening
 
 ### [Low, test-convention] Tests that spawn a real `claude_crew.cli` must use a free leader port, not the default 7821
