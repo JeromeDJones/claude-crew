@@ -1,0 +1,2435 @@
+diff --git a/claude_crew/ui/dashboard.html b/claude_crew/ui/dashboard.html
+index f6e38be..52f8bbc 100644
+--- a/claude_crew/ui/dashboard.html
++++ b/claude_crew/ui/dashboard.html
+@@ -66,6 +66,8 @@
+     .nodecard.waiting  { border-color: var(--st-waiting); }
+     .nodecard.idle     { border-color: var(--line); }
+     .nodecard.lead     { border-color: var(--accent-line); background: var(--bg-2); }
++    .nodecard.proposed { border-color: var(--accent-line); border-style: dashed; background: var(--bg-1); }
++    .nodecard.proposed .ndot { background: var(--accent); opacity: 0.6; }
+     .nodecard .row1 {
+       display: flex; align-items: center; gap: 6px;
+       font-weight: 600; font-size: 12px; color: var(--fg-0);
+@@ -94,6 +96,131 @@
+       100% { stroke-width: var(--edge-stroke-w, 2.5px); }
+     }
+ 
++    /* === Zoom/Pan substrate — topo-head, topo-btn, zoom-surface, modal ===
++       Faithful to doc/design/mockups/shape-graphic-redesign-mock.html */
++
++    /* Control row above the in-rail topology host. */
++    .topo-head {
++      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
++    }
++    .topo-head .title {
++      font-size: 10.5px; font-weight: 600; text-transform: uppercase;
++      letter-spacing: 0.06em; color: var(--fg-2);
++    }
++    .topo-head .subtitle {
++      font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-2);
++      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
++      min-width: 0; flex: 1;
++    }
++    .topo-head .ctrls { display: flex; gap: 3px; flex-shrink: 0; }
++    .topo-btn {
++      width: 22px; height: 22px;
++      background: var(--bg-0); border: 1px solid var(--line-soft);
++      border-radius: 3px; cursor: pointer;
++      display: inline-flex; align-items: center; justify-content: center;
++      color: var(--fg-2); font-size: 13px; font-weight: 600;
++      transition: background 0.12s ease, color 0.12s ease;
++    }
++    .topo-btn:hover { background: var(--bg-2); color: var(--fg-0); }
++    .topo-btn.expand { width: 26px; }
++    .topo-btn svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.75; }
++
++    /* Pan/zoom behavior — shared by in-rail host AND the modal body.
++       Split from .topology-host so .modal-body can use flex:1 without
++       inheriting the in-rail height cap (the 340px-stuck-in-754px-modal bug). */
++    .zoom-surface {
++      position: relative;
++      overflow: hidden;
++      cursor: grab;
++    }
++    .zoom-surface.dragging { cursor: grabbing; }
++    .zoom-surface .pan-layer {
++      position: absolute; inset: 0;
++      display: flex; align-items: center; justify-content: center;
++      transform-origin: center center;
++      transition: transform 0.12s ease;
++      will-change: transform;
++    }
++    .zoom-surface.no-anim .pan-layer { transition: none; }
++    .zoom-surface svg { display: block; max-width: none; max-height: none; }
++
++    /* In-rail topology host — sizing-only (composes with .zoom-surface).
++       Grows from 220→340px with crew size; modal does NOT use this class. */
++    .topology-host {
++      background: var(--bg-0);
++      border: 1px solid var(--line-soft);
++      border-radius: 4px;
++      min-height: 220px;
++      max-height: 340px;
++    }
++
++    /* Zoom/Pan modal — reused by live-topology expand and shape-gate proposal. */
++    .modal-backdrop {
++      position: fixed; inset: 0; z-index: 1000;
++      background: oklch(0.10 0.04 240 / 0.55);
++      display: flex; align-items: center; justify-content: center;
++      padding: 32px;
++    }
++    .modal {
++      width: 100%; height: 100%;
++      max-width: 1480px; max-height: 92vh;
++      background: var(--bg-0); border: 1px solid var(--line);
++      border-radius: 8px; box-shadow: 0 16px 64px oklch(0.10 0.04 240 / 0.5);
++      display: flex; flex-direction: column;
++      overflow: hidden;
++    }
++    .modal-head {
++      height: 48px; flex-shrink: 0;
++      padding: 0 18px;
++      display: flex; align-items: center; gap: 12px;
++      border-bottom: 1px solid var(--line);
++      background: var(--bg-1);
++    }
++    .modal-head .title { font-size: 13px; font-weight: 600; color: var(--fg-0); }
++    .modal-head .subtitle { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-2); }
++    .modal-head .spacer { flex: 1; }
++    .modal-head .ctrls { display: flex; gap: 4px; align-items: center; }
++    .modal-head .ctrls .z-label {
++      width: 50px; text-align: center;
++      font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-1);
++    }
++    .modal-head .close-btn {
++      width: 28px; height: 28px;
++      background: none; border: 1px solid var(--line);
++      border-radius: 4px; cursor: pointer; color: var(--fg-2);
++      display: inline-flex; align-items: center; justify-content: center;
++      margin-left: 8px;
++    }
++    .modal-head .close-btn:hover { background: var(--bg-2); color: var(--fg-0); }
++    .modal-body {
++      flex: 1; position: relative;
++      background:
++        linear-gradient(var(--bg-1) 1px, transparent 1px) 0 0 / 24px 24px,
++        linear-gradient(90deg, var(--bg-1) 1px, transparent 1px) 0 0 / 24px 24px,
++        var(--bg-0);
++      overflow: hidden;
++      cursor: grab;
++      min-height: 0;
++    }
++    .modal-body.dragging { cursor: grabbing; }
++    .modal-body .pan-layer {
++      position: absolute; inset: 0;
++      display: flex; align-items: center; justify-content: center;
++      transform-origin: center center;
++      transition: transform 0.12s ease;
++      will-change: transform;
++    }
++    .modal-body.no-anim .pan-layer { transition: none; }
++    .modal-foot {
++      flex-shrink: 0; min-height: 56px; max-height: 50vh;
++      padding: 12px 18px;
++      border-top: 1px solid var(--line);
++      background: var(--bg-1);
++      display: flex; align-items: center; gap: 12px;
++      overflow-y: auto;
++    }
++    .modal-foot .actions { display: flex; gap: 8px; flex-shrink: 0; }
++
+     html, body, #root {
+       height: 100%;
+       background: var(--bg-0);
+@@ -513,6 +640,21 @@
+        sits over the panel edge rather than covering left-aligned content. */
+     .drawer-resize-handle { position: absolute; left: -3px; top: 0; height: 100%; width: 8px; cursor: ew-resize; z-index: 2; }
+     .drawer-resize-handle:hover, .drawer-resize-handle.dragging { background: var(--accent-soft); }
++    /* === Responsive two-pane grid (replaces MissionControlLayout hardcoded inline style) === */
++    /* Base: standard 320px left-rail at wide viewports. */
++    .dash-grid {
++      flex: 1; display: grid;
++      grid-template-columns: 320px minmax(0, 1fr);
++      min-height: 0;
++    }
++    /* At ≤1024px: fluidize the left rail — two-pane preserved, no drawer, no single-column. */
++    @media (max-width: 1024px) {
++      .dash-grid {
++        grid-template-columns: clamp(220px, 22vw, 260px) minmax(0, 1fr);
++      }
++      .dash-grid .nodecard { min-width: 72px; padding: 5px 8px 4px; }
++      .dash-grid .roster-row { padding: 6px 10px 6px 14px; }
++    }
+   </style>
+ </head>
+ <body>
+@@ -1785,18 +1927,24 @@
+           });
+           const svgEl = holder.querySelector('svg');
+           if (!svgEl) return;
+-          // Constrain SVG to its host (overflow:hidden on .topology-host)
+-          // so the mermaid graph cannot bleed UPWARD into the roster region
+-          // above (which would intercept .roster-row clicks).
+-          svgEl.style.width = '100%';
+-          svgEl.style.height = '100%';
+-          svgEl.style.maxWidth = '100%';
+-          svgEl.style.maxHeight = '100%';
++          // SVG is unconstrained — the .pan-layer centers it; .topology-host
++          // overflow:hidden clips it. Width/height attrs removed so the SVG
++          // takes its natural viewBox size and fitToHost can measure it at scale=1.
++          svgEl.style.maxWidth = 'none';
++          svgEl.style.maxHeight = 'none';
+           svgEl.removeAttribute('width');
+           svgEl.removeAttribute('height');
+           svgEl.style.display = 'block';
++          // Wrap in .pan-layer for the zoom/pan substrate.
++          const panDiv = document.createElement('div');
++          panDiv.className = 'pan-layer';
++          panDiv.appendChild(svgEl);
+           containerRef.current.innerHTML = '';
+-          containerRef.current.appendChild(svgEl);
++          containerRef.current.appendChild(panDiv);
++          // Re-apply current transform so zoom/pan state survives re-render.
++          if (typeof applyTransform === 'function') applyTransform(containerRef.current);
++          // Keep modal data fresh with latest state.
++          window._topoModalData = { mermaidSrc, edgeStats, subtitle, crewId, branch: cli.branch || '' };
+ 
+           // ── EDGE DECORATION ──
+           if (isRoster) {
+@@ -1864,6 +2012,20 @@
+         return () => { cancelled = true; };
+       }, [mermaidSrc, crewId, isRoster, displayEdges]);
+ 
++      // Once-on-mount: initialise pan/zoom on the in-rail topology host.
++      // Empty deps = runs once; the panZoomBoundRef guard prevents double-binding
++      // in React strict mode double-invoke.
++      const panZoomBoundRef = useRef(false);
++      useEffect(() => {
++        const container = containerRef.current;
++        if (!container || panZoomBoundRef.current) return;
++        panZoomBoundRef.current = true;
++        if (!container.dataset.zoom) container.dataset.zoom = '1';
++        if (!container.dataset.tx)   container.dataset.tx   = '0';
++        if (!container.dataset.ty)   container.dataset.ty   = '0';
++        if (typeof bindPanZoom === 'function') bindPanZoom(container);
++      }, []);  // eslint-disable-line react-hooks/exhaustive-deps
++
+       // POST /edge-promote. crewId in path = multi-instance correct.
+       const promoteEdge = (es) => {
+         const key = `${es.from_slot}→${es.to_slot}`;
+@@ -1888,15 +2050,24 @@
+         ['tripped', 'var(--edge-tripped)'],
+       ];
+ 
++      const railH = Math.min(340, Math.max(220, 240 + 18 * Math.max(0, agents.length - 3)));
+       return (
+         <div className="topology-graph" style={{ padding: "12px 16px", display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: 420, minHeight: 0 }}>
+-          <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-2)", marginBottom: 4 }}>
+-            Topology
+-          </div>
+-          <div className="topology-subtitle" style={{ fontSize: 12, color: "var(--fg-2)", marginBottom: 8, minHeight: 16 }}>
+-            {subtitle}
++          <div className="topo-head">
++            <span className="title">Topology</span>
++            <span className="subtitle">{subtitle}</span>
++            <span className="ctrls">
++              <button className="topo-btn" onClick={() => zoomBy('topo-host', 1/1.25)} title="Zoom out">−</button>
++              <button className="topo-btn" onClick={() => resetZoom('topo-host')} title="Fit to host">fit</button>
++              <span id="z-label-topo-host" style={{ minWidth: 40, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--fg-2)' }}>100%</span>
++              <button className="topo-btn" onClick={() => zoomBy('topo-host', 1.25)} title="Zoom in">+</button>
++              <button className="topo-btn expand" onClick={openTopologyModal} title="Expand to full view">
++                <svg viewBox="0 0 16 16"><path d="M3 3 L7 3 M3 3 L3 7 M13 3 L9 3 M13 3 L13 7 M3 13 L7 13 M3 13 L3 9 M13 13 L9 13 M13 13 L13 9"/></svg>
++              </button>
++            </span>
+           </div>
+-          <div ref={containerRef} className="topology-host" style={{ flex: "0 1 auto", overflow: "hidden", minHeight: 120, maxHeight: 240 }} />
++          <div ref={containerRef} id="topo-host" className="topology-host zoom-surface"
++               style={{ height: railH }} />
+           {/* Legend hidden in roster fallback (no modes to legend). */}
+           {!isRoster && (
+             <div className="topology-legend" style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+@@ -2023,6 +2194,287 @@
+     // (activity on node border, routing on edges). The mount-site in
+     // MissionControlLayout was retargeted to <TopologyGraph .../>.
+ 
++    // ═══════════════════════════════════════════════════════════════════════
++    // Shared Zoom/Pan Modal substrate
++    // Faithful to doc/design/mockups/shape-graphic-redesign-mock.html
++    // fitToHost floor=0.05 (NOT 0.3) so large crews fit in the modal body.
++    // ═══════════════════════════════════════════════════════════════════════
++
++    function updateZLabel(hostEl) {
++      const label = document.getElementById('z-label-' + hostEl.id);
++      if (label) {
++        const z = parseFloat(hostEl.dataset.zoom) || 1;
++        label.textContent = Math.round(z * 100) + '%';
++      }
++    }
++
++    function applyTransform(hostEl) {
++      const pan = hostEl.querySelector('.pan-layer');
++      if (!pan) return;
++      const z = parseFloat(hostEl.dataset.zoom) || 1;
++      const tx = parseFloat(hostEl.dataset.tx) || 0;
++      const ty = parseFloat(hostEl.dataset.ty) || 0;
++      pan.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
++      updateZLabel(hostEl);
++    }
++
++    function zoomBy(hostId, factor) {
++      const host = document.getElementById(hostId);
++      if (!host) return;
++      const cur = parseFloat(host.dataset.zoom) || 1;
++      host.dataset.zoom = Math.min(4, Math.max(0.1, cur * factor));
++      applyTransform(host);
++    }
++
++    function resetZoom(hostId) {
++      const host = document.getElementById(hostId);
++      if (!host) return;
++      host.dataset.zoom = 1; host.dataset.tx = 0; host.dataset.ty = 0;
++      applyTransform(host);
++      fitToHost(host);
++    }
++
++    // Floor 0.05 (NOT 0.3) — large crews must fit inside the modal body;
++    // 0.3 prevented full fit. Detail then comes from zoom-in/pan.
++    function fitToHost(hostEl) {
++      const pan = hostEl.querySelector('.pan-layer');
++      const svg = pan && pan.querySelector('svg');
++      if (!svg) return;
++      const hostBox = hostEl.getBoundingClientRect();
++      // Measure SVG at scale=1 so fit math sees the natural size.
++      const savedT = pan.style.transform;
++      pan.style.transform = 'scale(1)';
++      const svgBox = svg.getBoundingClientRect();
++      pan.style.transform = savedT;
++      if (svgBox.width === 0 || hostBox.width === 0) return;
++      const fitZ = Math.min(
++        (hostBox.width  - 24) / svgBox.width,
++        (hostBox.height - 24) / svgBox.height,
++        1.0
++      );
++      hostEl.dataset.zoom = Math.max(0.05, fitZ);
++      hostEl.dataset.tx = 0; hostEl.dataset.ty = 0;
++      applyTransform(hostEl);
++    }
++
++    function bindPanZoom(hostEl) {
++      hostEl.addEventListener('wheel', (ev) => {
++        ev.preventDefault();
++        const factor = ev.deltaY > 0 ? 1/1.1 : 1.1;
++        const cur = parseFloat(hostEl.dataset.zoom) || 1;
++        hostEl.dataset.zoom = Math.min(4, Math.max(0.25, cur * factor));
++        hostEl.classList.add('no-anim');
++        applyTransform(hostEl);
++        setTimeout(() => hostEl.classList.remove('no-anim'), 60);
++      }, { passive: false });
++      let dragging = false; let sx, sy, stx, sty;
++      hostEl.addEventListener('mousedown', (ev) => {
++        dragging = true; sx = ev.clientX; sy = ev.clientY;
++        stx = parseFloat(hostEl.dataset.tx) || 0;
++        sty = parseFloat(hostEl.dataset.ty) || 0;
++        hostEl.classList.add('dragging', 'no-anim');
++      });
++      window.addEventListener('mousemove', (ev) => {
++        if (!dragging) return;
++        hostEl.dataset.tx = stx + (ev.clientX - sx);
++        hostEl.dataset.ty = sty + (ev.clientY - sy);
++        applyTransform(hostEl);
++      });
++      window.addEventListener('mouseup', () => {
++        if (!dragging) return;
++        dragging = false;
++        hostEl.classList.remove('dragging', 'no-anim');
++      });
++    }
++
++    // renderInto: render mermaid src into hostEl wrapped in .pan-layer,
++    // decorate edges, auto-fit via double-rAF (modal flex layout settles first).
++    function renderInto(hostEl, src, edgeStats) {
++      const uid = 'modal-' + Math.random().toString(36).slice(2);
++      mermaid.render(uid, src).then(({ svg }) => {
++        const pan = document.createElement('div');
++        pan.className = 'pan-layer';
++        pan.innerHTML = DOMPurify.sanitize(svg, {
++          USE_PROFILES: { svg: true, svgFilters: true },
++          ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br', 'style'],
++          ADD_ATTR: ['style', 'class', 'xmlns'],
++          FORBID_TAGS: ['script', 'image', 'a', 'iframe', 'object', 'embed'],
++          FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur'],
++        });
++        const svgEl = pan.querySelector('svg');
++        if (svgEl) {
++          svgEl.style.maxWidth = 'none';
++          svgEl.style.maxHeight = 'none';
++          svgEl.removeAttribute('width');
++          svgEl.removeAttribute('height');
++        }
++        hostEl.innerHTML = '';
++        hostEl.appendChild(pan);
++
++        // Decorate edges: gated expansion + keyed lookup (same as in-rail).
++        if (svgEl && edgeStats && edgeStats.length > 0 && window.mapEdgeStatsToPaths) {
++          const displayEdges = [];
++          (edgeStats || []).forEach(es => {
++            if (es.mode === 'gated' && es.from_slot !== 'lead' && es.to_slot !== 'lead') {
++              displayEdges.push({ from_slot: es.from_slot, to_slot: 'lead', mode: 'gated', exchanges: es.exchanges, tripped: es.tripped, _source: es });
++              displayEdges.push({ from_slot: 'lead', to_slot: es.to_slot, mode: 'gated', exchanges: es.exchanges, tripped: es.tripped, _source: es });
++            } else {
++              displayEdges.push(es);
++            }
++          });
++          const pathToEdge = window.mapEdgeStatsToPaths(svgEl, displayEdges);
++          pathToEdge.forEach((segment, path) => {
++            const colour = segment.tripped              ? 'var(--edge-tripped)'
++                         : segment.mode === 'gated'     ? 'var(--edge-gated)'
++                         : segment.mode === 'tee'       ? 'var(--edge-tee)'
++                         :                                'var(--edge-direct)';
++            path.style.stroke = colour;
++            path.style.strokeWidth = segment.tripped ? '3px' : '2.5px';
++            path.style.cursor = 'pointer';
++          });
++        }
++
++        // Double-rAF: modal body lays out via flex:1 after head/foot resolve;
++        // a single rAF reads the host before its real height is in place.
++        requestAnimationFrame(() => requestAnimationFrame(() => fitToHost(hostEl)));
++      }).catch(err => { console.warn('[topology-modal] mermaid render failed', err); });
++    }
++
++    function openTopologyModal() {
++      const data = window._topoModalData || {};
++      const { mermaidSrc, edgeStats, subtitle: sub, crewId: crew, branch } = data;
++      const mount = document.getElementById('topology-modal');
++      if (!mount) return;
++      mount.style.display = '';
++      // Escape subtitle/branch for safe HTML injection
++      const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
++      mount.innerHTML = `
++        <div class="modal-backdrop" onclick="if(event.target===this)closeTopologyModal()">
++          <div class="modal">
++            <div class="modal-head">
++              <span class="title">Topology</span>
++              <span class="subtitle">${esc(sub)}</span>
++              <span class="spacer"></span>
++              <span class="ctrls">
++                <button class="topo-btn" onclick="zoomBy('modal-host',1/1.25)">−</button>
++                <button class="topo-btn" onclick="resetZoom('modal-host')">fit</button>
++                <span class="z-label" id="z-label-modal-host">100%</span>
++                <button class="topo-btn" onclick="zoomBy('modal-host',1.25)">+</button>
++              </span>
++              <button class="close-btn" onclick="closeTopologyModal()">✕</button>
++            </div>
++            <div class="modal-body zoom-surface" id="modal-host" data-zoom="1" data-tx="0" data-ty="0"></div>
++            <div class="modal-foot">
++              <div style="flex:1;font-family:var(--font-mono);font-size:11px;color:var(--fg-3);">
++                <span><strong style="color:var(--fg-1)">branch</strong> ${esc(branch)}</span>
++              </div>
++              <div class="actions">
++                <button class="topo-btn" style="width:auto;padding:0 12px;" onclick="closeTopologyModal()">Close</button>
++              </div>
++            </div>
++          </div>
++        </div>`;
++      const host = document.getElementById('modal-host');
++      if (!host) return;
++      bindPanZoom(host);
++      if (mermaidSrc) renderInto(host, mermaidSrc, edgeStats || []);
++      document.addEventListener('keydown', _escListenerTopology);
++    }
++
++    function closeTopologyModal() {
++      const m = document.getElementById('topology-modal');
++      if (!m) return;
++      m.innerHTML = ''; m.style.display = 'none';
++      document.removeEventListener('keydown', _escListenerTopology);
++    }
++
++    function _escListenerTopology(ev) { if (ev.key === 'Escape') closeTopologyModal(); }
++
++    // ── shapeToMermaidUnified ────────────────────────────────────────────────
++    // Generate mermaid source for a shape proposal using the same .nodecard
++    // foreignObject label HTML as the live TopologyGraph — both surfaces share
++    // one visual language. When proposed=true nodes carry .nodecard.proposed
++    // (dashed accent border). Edge colors use the same --edge-* CSS tokens.
++    function shapeToMermaidUnified(shape, { proposed = false } = {}) {
++      const nodeCls = proposed ? 'proposed' : 'idle';
++      function _nl(r1, r2, cls) {
++        return `<div class='nodecard ${cls}'><div class='row1'><span class='ndot'></span>${r1}</div><div class='row2'>${r2}</div></div>`;
++      }
++      // Gated edges route through lead (mirrors live topology displayEdges expansion).
++      const displayEdges = (shape.edges || []).flatMap(e =>
++        e.mode === 'gated'
++          ? [{ from: e.from, to: 'lead', mode: 'gated' }, { from: 'lead', to: e.to, mode: 'gated' }]
++          : [{ from: e.from, to: e.to, mode: e.mode }]
++      );
++      const lines = ['graph TD'];
++      lines.push(`  lead["${_nl('lead', '', 'lead')}"]`);
++      (shape.nodes || []).forEach(n => {
++        lines.push(`  ${n.slot}["${_nl(n.slot, n.role || '', nodeCls)}"]`);
++      });
++      displayEdges.forEach(e => {
++        lines.push(`  ${e.from} -->|"${e.mode}"| ${e.to}`);
++      });
++      return lines.join('\n');
++    }
++
++    // ── Proposal modal (shared zoom/pan substrate, proposal opener) ──────────
++    // Opens the shared zoom/pan modal for a shape proposal. Renders the
++    // structured shape via shapeToMermaidUnified + the existing renderInto
++    // pipeline (mermaid securityLevel:'strict' + DOMPurify unchanged).
++    // No new per-instance fetch — consumes the structured shape already on
++    // /api/state, preserving the multi-instance LEADER invariant.
++    function openProposalModal(proposal) {
++      const shape = proposal.shape || {};
++      const mount = document.getElementById('proposal-modal');
++      if (!mount) return;
++      const mermaidSrc = shapeToMermaidUnified(shape, { proposed: true });
++      // Convert shape edges to the EdgeStat-like format renderInto expects.
++      // Gated expansion happens inside renderInto; tripped is never set for proposals.
++      const edgeStats = (shape.edges || []).map(e => ({
++        from_slot: e.from,
++        to_slot: e.to,
++        mode: e.mode,
++        exchanges: 0,
++        tripped: false,
++      }));
++      mount.style.display = '';
++      mount.innerHTML = `
++        <div class="modal-backdrop" onclick="if(event.target===this)closeProposalModal()">
++          <div class="modal">
++            <div class="modal-head">
++              <span class="title">Shape Gate — proposal</span>
++              <span class="subtitle">${proposal.shape_id || ''}</span>
++              <span class="spacer"></span>
++              <span class="ctrls">
++                <button class="topo-btn" onclick="zoomBy('prop-host',1/1.25)">−</button>
++                <span class="z-label" id="z-label-prop-host">100%</span>
++                <button class="topo-btn" onclick="zoomBy('prop-host',1.25)">+</button>
++              </span>
++              <button class="close-btn" onclick="closeProposalModal()">✕</button>
++            </div>
++            <div class="modal-body zoom-surface" id="prop-host" data-zoom="1" data-tx="0" data-ty="0"></div>
++            <div class="modal-foot">
++              <div class="meta" style="font-size:11px;color:var(--fg-2);font-family:var(--font-mono);">
++                crew: ${proposal.crew_id || ''}
++              </div>
++            </div>
++          </div>
++        </div>`;
++      const host = document.getElementById('prop-host');
++      bindPanZoom(host);
++      renderInto(host, mermaidSrc, edgeStats);
++      document.addEventListener('keydown', _escListenerProposal);
++    }
++
++    function closeProposalModal() {
++      const m = document.getElementById('proposal-modal');
++      if (!m) return;
++      m.innerHTML = ''; m.style.display = 'none';
++      document.removeEventListener('keydown', _escListenerProposal);
++    }
++
++    function _escListenerProposal(ev) { if (ev.key === 'Escape') closeProposalModal(); }
++
+     // Render a stored tool-output body nicely. The body is the raw SDK tool
+     // response (often a JSON envelope). Parse it and surface the useful text;
+     // fall back to the raw string for non-JSON or truncated-unparseable bodies.
+@@ -2629,21 +3081,14 @@
+     }
+ 
+     // --- Shape Gate Panel ---
+-    // ShapeProposalCard: renders one pending proposal as a mermaid DAG with
+-    // Approve/Decline controls. Reuses the existing renderMermaidBlocks pipeline
+-    // (wraps the mermaid source in pre > code.language-mermaid so the function
+-    // finds it via its DOM walk, then calls it via a ref callback after mount).
++    // ShapeProposalCard: renders one pending proposal as a preview thumbnail.
++    // Clicking the thumbnail opens the shared zoom/pan modal via openProposalModal(),
++    // which renders the shape through shapeToMermaidUnified + the existing
++    // mermaid securityLevel:'strict' + DOMPurify pipeline unchanged.
+     function ShapeProposalCard({ proposal }) {
+       const [busy, setBusy] = React.useState(false);
+       const [resolved, setResolved] = React.useState(false);
+ 
+-      // Ref callback: fires once after mount when el is non-null. By then, the
+-      // pre > code.language-mermaid child is already in the DOM, so
+-      // renderMermaidBlocks can find and replace it with the rendered SVG.
+-      const mermaidRef = React.useCallback((el) => {
+-        if (el) renderMermaidBlocks(el);
+-      }, []);  // proposal.shape_id is stable per card; no dep needed
+-
+       if (resolved) return null;
+ 
+       const decide = (decision) => {
+@@ -2664,64 +3109,72 @@
+           className="shape-proposal-card"
+           data-shape-id={proposal.shape_id}
+           style={{
+-            display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 16,
++            display: 'flex', flexDirection: 'column', gap: 10,
+             padding: '12px 16px',
+             background: 'var(--bg-1)',
+             borderRadius: 6,
+             border: '1px solid var(--line)',
+           }}
+         >
+-          {/* Mermaid DAG — rendered via the existing renderMermaidBlocks pipeline */}
++          {/* Preview thumbnail — click opens the shared zoom/pan modal */}
+           <div
+-            className="shape-proposal-diagram"
+-            ref={mermaidRef}
+-            style={{ flex: '0 0 auto', minWidth: 180, maxWidth: 420 }}
++            className="shape-proposal-thumbnail"
++            onClick={() => openProposalModal(proposal)}
++            style={{
++              cursor: 'pointer',
++              border: '1px solid var(--line-soft)',
++              borderRadius: 4,
++              overflow: 'hidden',
++              background: 'var(--bg-0)',
++              minHeight: 80,
++              display: 'flex', alignItems: 'center', justifyContent: 'center',
++              fontSize: 11, color: 'var(--fg-3)',
++              userSelect: 'none',
++            }}
++            title="Click to preview shape"
+           >
+-            <pre style={{ margin: 0 }}>
+-              <code className="language-mermaid">{proposal.mermaid}</code>
+-            </pre>
++            Click to preview shape
+           </div>
+-          {/* Metadata + controls */}
+-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
+-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+-              crew: {proposal.crew_id}
+-            </div>
+-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+-              shape_id: {proposal.shape_id}
+-            </div>
+-            {proposal.adaptation_diff && (
+-              <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
+-                adaptation: {proposal.adaptation_diff}
+-              </div>
+-            )}
+-            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+-              <button
+-                className="shape-approve-btn"
+-                onClick={() => decide('approve')}
+-                disabled={busy}
+-                style={{
+-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
+-                  background: busy ? 'var(--bg-2)' : '#166534',
+-                  color: '#f0fdf4', border: 'none', borderRadius: 4,
+-                  cursor: busy ? 'not-allowed' : 'pointer',
+-                }}
+-              >
+-                Approve
+-              </button>
+-              <button
+-                className="shape-decline-btn"
+-                onClick={() => decide('decline')}
+-                disabled={busy}
+-                style={{
+-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
+-                  background: busy ? 'var(--bg-2)' : '#991b1b',
+-                  color: '#fff1f2', border: 'none', borderRadius: 4,
+-                  cursor: busy ? 'not-allowed' : 'pointer',
+-                }}
+-              >
+-                Decline
+-              </button>
++          {/* Metadata */}
++          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
++            crew: {proposal.crew_id}
++          </div>
++          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
++            shape_id: {proposal.shape_id}
++          </div>
++          {proposal.adaptation_diff && (
++            <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
++              adaptation: {proposal.adaptation_diff}
+             </div>
++          )}
++          {/* Controls */}
++          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
++            <button
++              className="shape-approve-btn"
++              onClick={() => decide('approve')}
++              disabled={busy}
++              style={{
++                padding: '4px 14px', fontSize: 12, fontWeight: 600,
++                background: busy ? 'var(--bg-2)' : '#166534',
++                color: '#f0fdf4', border: 'none', borderRadius: 4,
++                cursor: busy ? 'not-allowed' : 'pointer',
++              }}
++            >
++              Approve
++            </button>
++            <button
++              className="shape-decline-btn"
++              onClick={() => decide('decline')}
++              disabled={busy}
++              style={{
++                padding: '4px 14px', fontSize: 12, fontWeight: 600,
++                background: busy ? 'var(--bg-2)' : '#991b1b',
++                color: '#fff1f2', border: 'none', borderRadius: 4,
++                cursor: busy ? 'not-allowed' : 'pointer',
++              }}
++            >
++              Decline
++            </button>
+           </div>
+         </div>
+       );
+@@ -2903,7 +3356,7 @@
+           />
+           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId} readState={readState}/>
+           <ShapeGatePanel instances={instances} open={gateOpen} onClose={onCloseGate} />
+-          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
++          <div className="dash-grid">
+             <RosterRail
+               liveAgents={liveAgents}
+               selectedIds={selectedIds}
+@@ -2959,6 +3412,10 @@
+               onClose={() => setOpenArtifact(null)}
+             />
+           )}
++          {/* Topology expand modal mount — populated by openTopologyModal() */}
++          <div id="topology-modal" style={{ display: 'none' }} />
++          {/* Proposal modal mount — populated by openProposalModal() */}
++          <div id="proposal-modal" style={{ display: 'none' }} />
+         </div>
+       );
+     }
+diff --git a/claude_crew/ui_server.py b/claude_crew/ui_server.py
+index c5f506e..46de84e 100644
+--- a/claude_crew/ui_server.py
++++ b/claude_crew/ui_server.py
+@@ -31,7 +31,7 @@ from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
+ from claude_crew.ctx_window import resolve_ctx_window
+ from claude_crew.instance_registry import InstanceRegistry
+ from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
+-from claude_crew.shapes import shape_to_mermaid
++from claude_crew.shapes import shape_to_dict, shape_to_mermaid
+ from claude_crew.teammate import ToolEvent
+ 
+ _logger = logging.getLogger(__name__)
+@@ -451,6 +451,7 @@ class UIServer:
+                     "mermaid": shape_to_mermaid(p.shape),
+                     "name": p.shape.name,
+                     "summary": p.shape.description,
++                    "shape": shape_to_dict(p.shape),
+                 }
+                 for p in snapshot.shape_proposals
+             ],
+diff --git a/tests/dashboard/test_roster_spotlight.py b/tests/dashboard/test_roster_spotlight.py
+index e2184a9..0681c2e 100644
+--- a/tests/dashboard/test_roster_spotlight.py
++++ b/tests/dashboard/test_roster_spotlight.py
+@@ -268,9 +268,11 @@ def test_topology_pinned_in_left_rail(five_agent_url, page):
+     assert "TOPOLOGY" in rail_text.upper(), (
+         f"Expected Topology label in rail; got: {rail_text!r}"
+     )
+-    # Wait for mermaid render to produce the SVG (async).
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=10000)
+-    assert page.locator(".rail-topology svg").count() == 1
++    # Wait for mermaid render to produce the flowchart SVG (async).
++    # Use #topo-host svg (not .rail-topology svg) to avoid ambiguity with the
++    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal).
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=10000)
++    assert page.locator("#topo-host svg").count() == 1
+ 
+ 
+ # ── AT-4 — Roster fallback (empty topology_edge_stats) ───────────────────────
+@@ -292,8 +294,8 @@ def test_at4_roster_fallback_subtitle_and_legend_hidden(five_agent_url, page):
+     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+     page.goto(five_agent_url)
+     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+-    # Wait for mermaid SVG so post-render decoration has settled.
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=10000)
++    # Wait for mermaid flowchart SVG so post-render decoration has settled.
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=10000)
+     # Give mermaid a beat to finish foreignObject sanitization.
+     page.wait_for_timeout(500)
+ 
+@@ -313,7 +315,7 @@ def test_at4_roster_fallback_subtitle_and_legend_hidden(five_agent_url, page):
+ def test_at4_roster_fallback_neutral_edges_no_click_no_badges(five_agent_url, page):
+     """AT-4: roster fallback edges are neutral grey, no click handler, no mode badge."""
+     page.goto(five_agent_url)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(800)  # let mermaid + post-render decoration finish
+ 
+     # All flowchart-link paths must render with neutral stroke and cursor:default.
+diff --git a/tests/dashboard/test_shape_resurface.py b/tests/dashboard/test_shape_resurface.py
+index 1294e17..f2fbc9a 100644
+--- a/tests/dashboard/test_shape_resurface.py
++++ b/tests/dashboard/test_shape_resurface.py
+@@ -181,28 +181,31 @@ class TestShapeGateResurface:
+         assert "Gate" in pill_text
+ 
+     def test_open_modal_shows_dag(self, page, gate_server):
+-        """Clicking the gate pill opens the modal containing the mermaid DAG."""
++        """Clicking the gate pill opens the panel; clicking the thumbnail opens the proposal modal with the mermaid DAG."""
+         url, broker, shape_id = gate_server
+         page.goto(url)
+         pill = page.locator('[data-testid="pending-gate-pill"]')
+         pill.wait_for(state="visible", timeout=15_000)
+         pill.click()
+-        # Shape gate modal is visible
++        # Shape gate panel is visible
+         panel = page.locator(".shape-gate-panel")
+         panel.wait_for(state="visible", timeout=5_000)
+-        # The proposal card with the diagram container is present
++        # The proposal card with the thumbnail is present
+         card = panel.locator(".shape-proposal-card")
+         card.wait_for(state="visible", timeout=5_000)
+-        # The diagram div is present (renderMermaidBlocks replaces code → SVG async)
+-        diagram = panel.locator(".shape-proposal-diagram")
+-        diagram.wait_for(state="visible", timeout=5_000)
++        # The thumbnail div is present (replaces the old inline diagram; click opens zoom/pan modal)
++        thumbnail = panel.locator(".shape-proposal-thumbnail")
++        thumbnail.wait_for(state="visible", timeout=5_000)
++        # Click the thumbnail to open the proposal zoom/pan modal
++        thumbnail.click()
++        # The proposal modal must become visible
++        page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
+         # Wait for mermaid render to complete (async replacement of code block with SVG)
+         page.wait_for_timeout(3_000)
+-        # Either the rendered SVG or the source code element must be present
+-        has_svg = panel.locator(".shape-proposal-diagram svg").count() >= 1
+-        has_code = panel.locator(".shape-proposal-diagram code").count() >= 1
+-        assert has_svg or has_code, (
+-            "Expected either rendered SVG or mermaid source code element in the diagram"
++        # The rendered SVG must be present in the proposal modal
++        has_svg = page.locator("#proposal-modal svg").count() >= 1
++        assert has_svg, (
++            "Expected rendered SVG in the proposal modal"
+         )
+ 
+     def test_badge_persists_after_modal_closed(self, page, gate_server):
+diff --git a/tests/test_dashboard_render.py b/tests/test_dashboard_render.py
+index 53232ff..fe30e2f 100644
+--- a/tests/test_dashboard_render.py
++++ b/tests/test_dashboard_render.py
+@@ -1024,7 +1024,9 @@ def test_at7_unified_topology_preserves_crew_id_in_edge_log_path(
+     url, crew_id = at7_unified_topology_url
+     page.goto(url)
+     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    # Use #topo-host svg (not .rail-topology svg) to avoid strict-mode collision
++    # with the expand-button SVG added by the shared-zoom-pan-modal task.
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(800)  # mermaid render + post-render decoration
+ 
+     # Capture every fetch URL the dashboard issues from now on.
+@@ -1037,7 +1039,7 @@ def test_at7_unified_topology_preserves_crew_id_in_edge_log_path(
+     # Diagnostic — what paths does mermaid emit?
+     diag = page.evaluate(
+         """() => {
+-          const all = document.querySelectorAll('.rail-topology svg path');
++          const all = document.querySelectorAll('#topo-host svg path');
+           const out = [];
+           all.forEach(p => out.push({
+             cls: p.getAttribute('class') || '',
+diff --git a/tests/test_edge_dashboard.py b/tests/test_edge_dashboard.py
+index 93bfd94..172179c 100644
+--- a/tests/test_edge_dashboard.py
++++ b/tests/test_edge_dashboard.py
+@@ -646,20 +646,22 @@ def test_at3_unified_topology_renders_single_graph_with_lead_node(at3_active_top
+     """
+     page.goto(at3_active_topology_url)
+     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    # Use #topo-host svg (not .rail-topology svg) to avoid strict-mode collision
++    # with the expand-button SVG added by the shared-zoom-pan-modal task.
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(800)  # mermaid render + post-render decoration
+ 
+     # Header reads "Topology" (CSS uppercases).
+     rail_text = page.locator(".rail-topology").inner_text()
+     assert "TOPOLOGY" in rail_text.upper(), f"Expected Topology header; got: {rail_text!r}"
+ 
+-    # Exactly one SVG in the rail-topology subtree — the unified graph.
+-    svgs = page.locator(".rail-topology svg")
++    # Exactly one mermaid-rendered SVG in #topo-host (excludes expand-button SVG).
++    svgs = page.locator("#topo-host svg")
+     assert svgs.count() == 1, f"Expected exactly 1 topology SVG; found {svgs.count()}"
+ 
+     # The legacy MiniGraph radial SVG had a <radialGradient id="mcCenter">.
+     # Its absence is a strong signal that the hand-drawn roster hub is gone.
+-    legacy_radial = page.locator(".rail-topology svg defs radialGradient#mcCenter")
++    legacy_radial = page.locator("#topo-host svg defs radialGradient#mcCenter")
+     assert legacy_radial.count() == 0, "Legacy MiniGraph radial gradient must not render"
+ 
+     # The unified graph contains the `lead` node as a first-class node.
+@@ -744,7 +746,7 @@ def test_at8_activity_joins_via_slot_to_teammate(at8_divergent_slot_role_url, pa
+     """
+     page.goto(at8_divergent_slot_role_url)
+     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     # Mermaid foreignObject HTML is the slow path — give it a beat.
+     page.wait_for_timeout(1000)
+ 
+@@ -828,12 +830,12 @@ def test_gated_edge_bridges_through_lead_with_two_amber_segments(gated_bridge_ur
+     single peer edge)."""
+     url, crew_id = gated_bridge_url
+     page.goto(url)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(1000)
+ 
+     paths_info = page.evaluate(
+         """() => {
+-          const paths = document.querySelectorAll('.rail-topology path.flowchart-link');
++          const paths = document.querySelectorAll('#topo-host path.flowchart-link');
+           return [...paths].map(p => ({
+             id: p.id || '',
+             cls: p.getAttribute('class') || '',
+@@ -893,7 +895,7 @@ def test_clicking_gated_segment_fetches_source_endpoints_with_crew_id(
+     404 on follower-owned rows.)"""
+     url, crew_id = gated_bridge_url
+     page.goto(url)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(1000)
+ 
+     captured: list[str] = []
+diff --git a/tests/test_responsive_grid.py b/tests/test_responsive_grid.py
+new file mode 100644
+index 0000000..5f750de
+--- /dev/null
++++ b/tests/test_responsive_grid.py
+@@ -0,0 +1,249 @@
++"""
++Playwright + structural tests for the responsive .dash-grid layout.
++Maps to spec acceptance tests AT 16–18 (task: responsive-grid-1024).
++
++AT 16 (Playwright): At viewport width 1024, left rail <= 260px, two-pane preserved
++AT 17 (Playwright): At viewport width 1440, left rail > 260px (320px base track)
++AT 18 (structural grep): dash-grid + clamp present; old inline JSX grid style removed
++
++Run prerequisite: ``uv run playwright install chromium`` (one-time).
++asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
++
++Fixture design: each Playwright test has a function-scoped URL fixture (one
++UIServer per test).  The module-scoped Playwright page/browser come from
++tests/conftest.py.  The structural AT 18 needs no browser at all.
++"""
++from __future__ import annotations
++
++import asyncio
++import socket
++import threading
++import time
++from pathlib import Path
++from typing import Any
++
++import httpx
++import pytest
++import uvicorn
++
++from claude_crew.broker import (
++    Broker,
++    BrokerSnapshot,
++    LiveTeammateInfo,
++    TeammateInfo,
++)
++from claude_crew.ui_server import UIServer
++
++# ── Constants ────────────────────────────────────────────────────────────────
++
++DASHBOARD_HTML = (
++    Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++)
++
++# ── Private helpers ──────────────────────────────────────────────────────────
++
++
++def _alive_info(idx: int, role: str = "builder") -> TeammateInfo:
++    return TeammateInfo(
++        id=f"tid-{idx}",
++        name=f"agent-{idx}",
++        role=role,
++        spawned_at=time.time() - 60,
++        alive=True,
++    )
++
++
++def _live_entry(info: TeammateInfo) -> LiveTeammateInfo:
++    status: dict[str, Any] = {
++        "current_tool_count": 0,
++        "current_turn_started_at_wallclock": None,
++        "total_input_tokens": 100,
++        "total_output_tokens": 50,
++        "total_cost_usd": 0.05,
++        "current_tools": [],
++        "current_tool": None,
++        "last_activity_at_wallclock": None,
++    }
++    return LiveTeammateInfo(info=info, status=status, model="claude-sonnet-4-6")
++
++
++def _stub_snapshot(
++    *,
++    crew_id: str = "crew-responsive-test",
++    live: tuple[LiveTeammateInfo, ...],
++) -> BrokerSnapshot:
++    infos = tuple(le.info for le in live)
++    return BrokerSnapshot(
++        crew_id=crew_id,
++        teammates=infos,
++        live=live,
++        log=(),
++        topology_edge_stats=(),
++        topology_slot_to_teammate={},
++    )
++
++
++def _patched_broker(snapshot: BrokerSnapshot) -> Broker:
++    b = Broker()
++    b.snapshot = lambda log_limit=None: snapshot  # type: ignore[method-assign]
++    b.crew_id = snapshot.crew_id  # type: ignore[misc]
++    return b
++
++
++def _spin_dashboard(broker: Broker):
++    """Start UIServer on a free port in a daemon thread.
++    Returns (url, server, thread). Caller must set server.should_exit = True.
++    """
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
++        s.bind(("127.0.0.1", 0))
++        port = s.getsockname()[1]
++
++    ui = UIServer(broker, port=port)
++    app = ui._make_app()
++    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
++    server = uvicorn.Server(config)
++    server.install_signal_handlers = lambda: None
++
++    def run() -> None:
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
++        loop.run_until_complete(server.serve())
++
++    t = threading.Thread(target=run, daemon=True)
++    t.start()
++
++    deadline = time.time() + 10
++    while time.time() < deadline:
++        try:
++            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
++            if resp.status_code == 200:
++                break
++        except Exception:
++            time.sleep(0.1)
++    else:
++        pytest.fail("UIServer did not start within 10 seconds")
++
++    return f"http://127.0.0.1:{port}", server, t
++
++
++def _make_2_agent_snapshot() -> BrokerSnapshot:
++    """Minimal 2-teammate crew sufficient for responsive-grid tests."""
++    agents = [_alive_info(i, role=f"role-{i}") for i in range(1, 3)]
++    live = tuple(_live_entry(a) for a in agents)
++    return _stub_snapshot(crew_id="crew-responsive", live=live)
++
++
++# ── Fixtures ─────────────────────────────────────────────────────────────────
++
++
++@pytest.fixture
++def simple_dashboard_url():
++    """Spin up a minimal dashboard server for responsive-grid Playwright tests."""
++    snap = _make_2_agent_snapshot()
++    broker = _patched_broker(snap)
++    url, server, t = _spin_dashboard(broker)
++    yield url
++    server.should_exit = True
++    t.join(timeout=3)
++
++
++# ── AT 16: Responsive ≤1024px — rail clamped, two-pane preserved ─────────────
++
++
++@pytest.mark.dashboard
++def test_at16_responsive_1024px_rail_clamped(simple_dashboard_url, page):
++    """AT 16: At viewport width 1024, the left rail column computed width is
++    <= 260px and the main pane (right column) is still present — two-pane
++    is preserved, no drawer, no single-column.
++    """
++    page.set_viewport_size({"width": 1024, "height": 768})
++    page.goto(simple_dashboard_url)
++    # Wait for the React app to mount the .dash-grid container
++    page.locator(".dash-grid").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(400)
++
++    result = page.evaluate(
++        """() => {
++          const grid = document.querySelector('.dash-grid');
++          if (!grid) return { error: 'no .dash-grid element found — className not applied' };
++          const leftRail  = grid.firstElementChild;
++          const rightPane = grid.children[1];
++          if (!leftRail) return { error: 'no first child in .dash-grid' };
++          const leftWidth   = leftRail.getBoundingClientRect().width;
++          const rightWidth  = rightPane ? rightPane.getBoundingClientRect().width : 0;
++          const rightPresent = rightWidth > 0;
++          return { leftWidth, rightPresent, rightWidth };
++        }"""
++    )
++
++    assert "error" not in result, f"Evaluation error: {result.get('error')}"
++    assert result["leftWidth"] <= 260, (
++        f"At 1024px viewport, left rail width ({result['leftWidth']:.1f}px) is > 260px — "
++        "the @media (max-width:1024px) rule with clamp(220px,22vw,260px) is not active. "
++        "Check that the .dash-grid CSS class and @media rule are present in dashboard.html."
++    )
++    assert result["rightPresent"], (
++        f"At 1024px viewport, the main pane (right column) is absent or zero-width "
++        f"(rightWidth={result.get('rightWidth', '?'):.1f}px) — "
++        "two-pane layout must be preserved (no drawer, no single-column collapse)."
++    )
++
++
++# ── AT 17: Responsive ≥1440px — left rail wider (base 320px track) ───────────
++
++
++@pytest.mark.dashboard
++def test_at17_responsive_1440px_rail_wider(simple_dashboard_url, page):
++    """AT 17: At viewport width 1440, the left rail column computed width is
++    > 260px (the default 320px base track applies; the clamp is not active).
++    """
++    page.set_viewport_size({"width": 1440, "height": 900})
++    page.goto(simple_dashboard_url)
++    page.locator(".dash-grid").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(400)
++
++    result = page.evaluate(
++        """() => {
++          const grid = document.querySelector('.dash-grid');
++          if (!grid) return { error: 'no .dash-grid element found — className not applied' };
++          const leftRail = grid.firstElementChild;
++          if (!leftRail) return { error: 'no first child in .dash-grid' };
++          const leftWidth = leftRail.getBoundingClientRect().width;
++          return { leftWidth };
++        }"""
++    )
++
++    assert "error" not in result, f"Evaluation error: {result.get('error')}"
++    assert result["leftWidth"] > 260, (
++        f"At 1440px viewport, left rail width ({result['leftWidth']:.1f}px) is <= 260px — "
++        "the narrow-rail clamp must NOT apply at 1440px (expected 320px base track from "
++        ".dash-grid base CSS). Check the @media (max-width:1024px) rule is not bleeding over."
++    )
++
++
++# ── AT 18: Structural deletion-detector ──────────────────────────────────────
++
++
++@pytest.mark.dashboard
++def test_at18_structural_dash_grid_clamp_present_inline_removed():
++    """AT 18: dashboard.html contains the named literals 'dash-grid' and
++    'clamp(220px, 22vw, 260px)', AND no longer contains the old hardcoded
++    inline JSX gridTemplateColumns style string.
++    """
++    text = DASHBOARD_HTML.read_text(encoding="utf-8")
++
++    assert "dash-grid" in text, (
++        "dashboard.html does not contain 'dash-grid' — "
++        "the .dash-grid CSS class was not added or the className prop was not applied "
++        "to the MissionControlLayout two-pane container"
++    )
++    assert "clamp(220px, 22vw, 260px)" in text, (
++        "dashboard.html does not contain 'clamp(220px, 22vw, 260px)' — "
++        "the responsive @media (max-width:1024px) clamp rule is missing from the "
++        ".dash-grid CSS declaration"
++    )
++    assert 'gridTemplateColumns: "320px minmax(0, 1fr)"' not in text, (
++        "dashboard.html still contains the old hardcoded inline JSX grid style "
++        "'gridTemplateColumns: \"320px minmax(0, 1fr)\"' — "
++        "this inline style must be replaced by className='dash-grid' on the container div"
++    )
+diff --git a/tests/test_shape_proposal_payload.py b/tests/test_shape_proposal_payload.py
+new file mode 100644
+index 0000000..0856551
+--- /dev/null
++++ b/tests/test_shape_proposal_payload.py
+@@ -0,0 +1,126 @@
++"""AT 9, AT 10: Proposal payload carries structured shape with edge modes.
++
++AT 9  — Given a BrokerSnapshot with one pending shape proposal whose shape has
++        a gated edge, when /api/state is fetched via _build_local_instance, then
++        shape_proposals[0] contains both "mermaid" (unchanged) and a "shape"
++        object whose nodes is non-empty and whose edges[0].mode == "gated".
++        (pytest backend, no browser.)
++
++AT 10 — claude_crew/ui_server.py references the NAMED LITERAL ``shape_to_dict``
++        within the shape-proposal serialization.
++        (grep; fails if the wiring is removed.)
++"""
++from __future__ import annotations
++
++from pathlib import Path
++
++from claude_crew.broker import Broker, BrokerSnapshot, ShapeProposal
++from claude_crew.shapes import Shape, ShapeEdge, ShapeNode
++from claude_crew.ui_server import UIServer
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++def _make_shape_with_gated_edge() -> Shape:
++    """Return a minimal two-node, one-gated-edge Shape."""
++    return Shape(
++        name="test-shape",
++        description="A shape used in the proposal-payload test.",
++        nodes=(
++            ShapeNode(slot="planner", role="planner"),
++            ShapeNode(slot="builder", role="builder"),
++        ),
++        edges=(
++            ShapeEdge(from_slot="planner", to_slot="builder", mode="gated"),
++        ),
++    )
++
++
++def _make_snapshot(shape: Shape) -> BrokerSnapshot:
++    """Return a BrokerSnapshot carrying one pending ShapeProposal."""
++    proposal = ShapeProposal(
++        shape_id="test-shape-id-001",
++        shape=shape,
++        adaptation_diff=None,
++        status="pending",
++    )
++    return BrokerSnapshot(
++        crew_id="test-crew-001",
++        teammates=(),
++        live=(),
++        log=(),
++        shape_proposals=(proposal,),
++    )
++
++
++# ---------------------------------------------------------------------------
++# AT 9: Proposal payload carries structured shape with edge modes
++# ---------------------------------------------------------------------------
++
++class TestProposalPayloadStructuredShape:
++    """Verify that /api/state shape_proposals include the structured shape dict."""
++
++    def test_proposal_carries_mermaid_and_shape(self):
++        """AT 9: shape_proposals[0] has both 'mermaid' and 'shape' keys; edges[0].mode == 'gated'."""
++        shape = _make_shape_with_gated_edge()
++        snap = _make_snapshot(shape)
++
++        broker = Broker()
++        ui = UIServer(broker=broker, port=0)
++        instance, _ = ui._build_local_instance(snap)
++
++        proposals = instance["shape_proposals"]
++        assert len(proposals) == 1, "Expected exactly one shape proposal in the instance dict"
++
++        entry = proposals[0]
++
++        # Both mermaid (pre-existing) and shape (new) must be present.
++        assert "mermaid" in entry, "shape_proposals[0] missing 'mermaid' key"
++        assert "shape" in entry, "shape_proposals[0] missing 'shape' key"
++
++        # The mermaid value must be a non-empty string.
++        assert isinstance(entry["mermaid"], str) and entry["mermaid"], \
++            f"'mermaid' should be a non-empty string, got {entry['mermaid']!r}"
++
++        # The structured shape must have non-empty nodes.
++        shape_dict = entry["shape"]
++        assert isinstance(shape_dict, dict), f"'shape' should be a dict, got {type(shape_dict)}"
++        assert shape_dict.get("nodes"), f"'shape.nodes' should be non-empty, got {shape_dict.get('nodes')!r}"
++
++        # edges[0].mode must equal "gated".
++        edges = shape_dict.get("edges", [])
++        assert edges, f"'shape.edges' should be non-empty, got {edges!r}"
++        assert edges[0]["mode"] == "gated", \
++            f"edges[0]['mode'] expected 'gated', got {edges[0].get('mode')!r}"
++
++    def test_existing_keys_preserved(self):
++        """AT 9 additive contract: 'shape' is added; shape_id, crew_id, status, mermaid, name, summary remain."""
++        shape = _make_shape_with_gated_edge()
++        snap = _make_snapshot(shape)
++
++        broker = Broker()
++        ui = UIServer(broker=broker, port=0)
++        instance, _ = ui._build_local_instance(snap)
++
++        entry = instance["shape_proposals"][0]
++        for key in ("shape_id", "crew_id", "status", "mermaid", "name", "summary", "shape"):
++            assert key in entry, f"Expected key '{key}' in proposal entry, got keys: {list(entry.keys())}"
++
++
++# ---------------------------------------------------------------------------
++# AT 10: shape_to_dict wired in proposal serialization — structural grep
++# ---------------------------------------------------------------------------
++
++class TestShapeToDictWiredInUiServer:
++    """AT 10: ui_server.py references shape_to_dict in the shape-proposal serialization."""
++
++    def test_shape_to_dict_referenced_in_ui_server(self):
++        """Grep: NAMED LITERAL 'shape_to_dict' must appear in claude_crew/ui_server.py."""
++        ui_server_path = Path(__file__).parent.parent / "claude_crew" / "ui_server.py"
++        source = ui_server_path.read_text(encoding="utf-8")
++        assert "shape_to_dict" in source, (
++            f"NAMED LITERAL 'shape_to_dict' not found in {ui_server_path}. "
++            "The structured-shape payload wiring may have been removed."
++        )
+diff --git a/tests/test_shape_render.py b/tests/test_shape_render.py
+index 610e69c..bbf2587 100644
+--- a/tests/test_shape_render.py
++++ b/tests/test_shape_render.py
+@@ -154,28 +154,39 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
+         panel = page.locator(".shape-gate-panel")
+         panel.wait_for(state="visible", timeout=15_000)
+ 
+-        # Wait for the async mermaid.render() call to complete and replace the
+-        # pre block with the SVG.  The existing tests use 2-3 s here.
++        # ── 1. Proposal card and thumbnail are present ───────────────────────
++        # The new ShapeProposalCard renders a clickable thumbnail that opens
++        # the shared zoom/pan modal; the SVG is no longer rendered inline.
++        card = panel.locator(".shape-proposal-card")
++        card.wait_for(state="visible", timeout=5_000)
++        thumbnail = panel.locator(".shape-proposal-thumbnail")
++        thumbnail.wait_for(state="visible", timeout=5_000)
++
++        # ── 2. Click thumbnail to open the proposal modal with the DAG ───────
++        thumbnail.click()
++        page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
++        # Wait for the async mermaid.render() call to complete.
+         page.wait_for_timeout(3_000)
+ 
+-        # ── 1. SVG is present ────────────────────────────────────────────────
+-        svg_locator = page.locator(".shape-gate-panel svg")
++        # ── 3. SVG is present inside the proposal modal ───────────────────────
++        svg_locator = page.locator("#proposal-modal svg")
+         assert svg_locator.count() >= 1, (
+-            f"Expected >=1 SVG inside .shape-gate-panel, got {svg_locator.count()}"
++            f"Expected >=1 SVG inside #proposal-modal, got {svg_locator.count()}"
+         )
+ 
+-        # ── 2. Labels are visible (not black boxes) ──────────────────────────
++        # ── 4. Labels are visible (not black boxes) ──────────────────────────
+         # Mermaid (securityLevel:'strict') renders diagram labels as HTML
+-        # inside <foreignObject>, so inner_text() on the panel will capture
++        # inside <foreignObject>, so inner_text() on the modal will capture
+         # them if the pipeline is correctly wired.
+-        panel_text = panel.inner_text()
+-        assert "implementor" in panel_text, (
+-            f"Slot 'implementor' not visible in shape-gate panel. "
+-            f"Panel text (first 500): {panel_text[:500]!r}"
++        modal_el = page.locator("#proposal-modal")
++        modal_text = modal_el.inner_text()
++        assert "implementor" in modal_text, (
++            f"Slot 'implementor' not visible in proposal modal. "
++            f"Modal text (first 500): {modal_text[:500]!r}"
+         )
+-        assert "reviewer" in panel_text, (
+-            f"Slot 'reviewer' not visible in shape-gate panel. "
+-            f"Panel text (first 500): {panel_text[:500]!r}"
++        assert "reviewer" in modal_text, (
++            f"Slot 'reviewer' not visible in proposal modal. "
++            f"Modal text (first 500): {modal_text[:500]!r}"
+         )
+ 
+         # Also verify via JS that the SVG carries text/foreignObject nodes
+@@ -183,7 +194,7 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
+         label_content = page.evaluate(
+             """() => {
+                 const labels = [];
+-                for (const svg of document.querySelectorAll('.shape-gate-panel svg')) {
++                for (const svg of document.querySelectorAll('#proposal-modal svg')) {
+                     // foreignObject-based labels (securityLevel:'strict' path):
+                     for (const el of svg.querySelectorAll('foreignObject *')) {
+                         const t = el.textContent.trim();
+@@ -198,13 +209,14 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
+                 return labels.join(' ');
+             }"""
+         )
+-        combined = f"{label_content} {panel_text}"
++        combined = f"{label_content} {modal_text}"
+         assert "implementor" in combined, (
+-            f"'implementor' not found in SVG labels or panel text. "
++            f"'implementor' not found in SVG labels or modal text. "
+             f"SVG labels: {label_content!r}"
+         )
+ 
+-        # ── 3. Approve / Decline controls ────────────────────────────────────
++        # ── 5. Approve / Decline controls ────────────────────────────────────
++        # These live in the gate panel (card), not in the proposal modal.
+         approve = page.locator(".shape-gate-panel button.shape-approve-btn")
+         decline = page.locator(".shape-gate-panel button.shape-decline-btn")
+         assert approve.count() >= 1, "Approve button not found in shape-gate panel"
+diff --git a/tests/test_topology_zoom_modal.py b/tests/test_topology_zoom_modal.py
+new file mode 100644
+index 0000000..2c9aa1e
+--- /dev/null
++++ b/tests/test_topology_zoom_modal.py
+@@ -0,0 +1,596 @@
++"""
++Playwright + structural tests for the shared zoom/pan modal substrate.
++Maps to spec acceptance tests AT 1–8 (task: shared-zoom-pan-modal).
++
++AT 1 (Playwright): Roomier in-rail topology + topo-head controls
++AT 2 (structural grep): topo-head + openTopologyModal present in dashboard.html
++AT 3 (Playwright): Topology expand modal fits the whole graph (8-teammate crew)
++AT 4 (Playwright): Modal footer pinned + body fills via zoom-surface class
++AT 5 (Playwright): Zoom label reflects actual zoom percentage
++AT 6 (Playwright): Modal sad path — empty topology degrades gracefully
++AT 7 (structural grep): zoom-surface + fitToHost + double-rAF present in dashboard.html
++AT 8 (structural grep): keyed lookup + gated-bridge + /edge-log + promote-to-gated preserved
++
++Run prerequisite: `uv run playwright install chromium` (one-time).
++asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
++
++Fixture design: each Playwright test has a function-scoped URL fixture (one
++UIServer per test).  The module-scoped Playwright page/browser come from
++tests/conftest.py.  Structural tests need no browser at all.
++"""
++from __future__ import annotations
++
++import asyncio
++import socket
++import threading
++import time
++from pathlib import Path
++from typing import Any
++
++import httpx
++import pytest
++import uvicorn
++
++from claude_crew.broker import (
++    Broker,
++    BrokerSnapshot,
++    EdgeStat,
++    LiveTeammateInfo,
++    TeammateInfo,
++)
++from claude_crew.ui_server import UIServer
++
++
++# ── Constants ────────────────────────────────────────────────────────────────
++
++DASHBOARD_HTML = (
++    Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++)
++
++
++# ── Private helpers ──────────────────────────────────────────────────────────
++
++
++def _alive_info(idx: int, role: str = "builder") -> TeammateInfo:
++    return TeammateInfo(
++        id=f"tid-{idx}",
++        name=f"agent-{idx}",
++        role=role,
++        spawned_at=time.time() - 60,
++        alive=True,
++    )
++
++
++def _live_entry(info: TeammateInfo) -> LiveTeammateInfo:
++    status: dict[str, Any] = {
++        "current_tool_count": 0,
++        "current_turn_started_at_wallclock": None,
++        "total_input_tokens": 100,
++        "total_output_tokens": 50,
++        "total_cost_usd": 0.05,
++        "current_tools": [],
++        "current_tool": None,
++        "last_activity_at_wallclock": None,
++    }
++    return LiveTeammateInfo(info=info, status=status, model="claude-sonnet-4-6")
++
++
++def _stub_snapshot(
++    *,
++    crew_id: str = "crew-modal-test",
++    live: tuple[LiveTeammateInfo, ...],
++    edge_stats: tuple[EdgeStat, ...] = (),
++    slot_to_teammate: dict[str, str] | None = None,
++) -> BrokerSnapshot:
++    infos = tuple(le.info for le in live)
++    return BrokerSnapshot(
++        crew_id=crew_id,
++        teammates=infos,
++        live=live,
++        log=(),
++        topology_edge_stats=edge_stats,
++        topology_slot_to_teammate=dict(slot_to_teammate or {}),
++    )
++
++
++def _patched_broker(snapshot: BrokerSnapshot) -> Broker:
++    b = Broker()
++    b.snapshot = lambda log_limit=None: snapshot  # type: ignore[method-assign]
++    b.crew_id = snapshot.crew_id  # type: ignore[misc]
++    return b
++
++
++def _spin_dashboard(broker: Broker):
++    """Start UIServer on a free port in a daemon thread.
++    Returns (url, server, thread). Caller must set server.should_exit = True.
++    """
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
++        s.bind(("127.0.0.1", 0))
++        port = s.getsockname()[1]
++
++    ui = UIServer(broker, port=port)
++    app = ui._make_app()
++    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
++    server = uvicorn.Server(config)
++    server.install_signal_handlers = lambda: None
++
++    def run() -> None:
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
++        loop.run_until_complete(server.serve())
++
++    t = threading.Thread(target=run, daemon=True)
++    t.start()
++
++    deadline = time.time() + 10
++    while time.time() < deadline:
++        try:
++            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
++            if resp.status_code == 200:
++                break
++        except Exception:
++            time.sleep(0.1)
++    else:
++        pytest.fail("UIServer did not start within 10 seconds")
++
++    return f"http://127.0.0.1:{port}", server, t
++
++
++def _make_6_agent_snapshot() -> BrokerSnapshot:
++    """6-teammate crew with topology_edge_stats (active topology)."""
++    agents = [_alive_info(i, role=f"role-{i}") for i in range(1, 7)]
++    live = tuple(_live_entry(a) for a in agents)
++    edges = (
++        EdgeStat(from_slot="slot1", to_slot="slot2", mode="direct", exchanges=3, tripped=False),
++        EdgeStat(from_slot="slot2", to_slot="slot3", mode="tee",    exchanges=1, tripped=False),
++        EdgeStat(from_slot="slot3", to_slot="slot4", mode="gated",  exchanges=5, tripped=False),
++        EdgeStat(from_slot="slot4", to_slot="slot5", mode="direct", exchanges=2, tripped=True),
++        EdgeStat(from_slot="slot5", to_slot="slot6", mode="tee",    exchanges=4, tripped=False),
++        EdgeStat(from_slot="slot6", to_slot="slot1", mode="direct", exchanges=1, tripped=False),
++    )
++    s2t = {f"slot{i}": f"tid-{i}" for i in range(1, 7)}
++    return _stub_snapshot(
++        crew_id="crew-6agent",
++        live=live,
++        edge_stats=edges,
++        slot_to_teammate=s2t,
++    )
++
++
++def _make_8_agent_snapshot() -> BrokerSnapshot:
++    """8-teammate crew with topology_edge_stats (large crew for AT3)."""
++    agents = [_alive_info(i, role=f"role-{i}") for i in range(1, 9)]
++    live = tuple(_live_entry(a) for a in agents)
++    edges = tuple(
++        EdgeStat(
++            from_slot=f"slot{i}",
++            to_slot=f"slot{(i % 8) + 1}",
++            mode="direct",
++            exchanges=i,
++            tripped=False,
++        )
++        for i in range(1, 9)
++    )
++    s2t = {f"slot{i}": f"tid-{i}" for i in range(1, 9)}
++    return _stub_snapshot(
++        crew_id="crew-8agent",
++        live=live,
++        edge_stats=edges,
++        slot_to_teammate=s2t,
++    )
++
++
++def _make_empty_snapshot() -> BrokerSnapshot:
++    """3-teammate crew with NO topology_edge_stats (roster fallback)."""
++    agents = [_alive_info(i) for i in range(1, 4)]
++    live = tuple(_live_entry(a) for a in agents)
++    return _stub_snapshot(
++        crew_id="crew-empty",
++        live=live,
++        edge_stats=(),
++    )
++
++
++# ── Fixtures ─────────────────────────────────────────────────────────────────
++
++
++@pytest.fixture
++def six_agent_url():
++    snap = _make_6_agent_snapshot()
++    broker = _patched_broker(snap)
++    url, server, t = _spin_dashboard(broker)
++    yield url
++    server.should_exit = True
++    t.join(timeout=3)
++
++
++@pytest.fixture
++def eight_agent_url():
++    snap = _make_8_agent_snapshot()
++    broker = _patched_broker(snap)
++    url, server, t = _spin_dashboard(broker)
++    yield url
++    server.should_exit = True
++    t.join(timeout=3)
++
++
++@pytest.fixture
++def empty_topology_url():
++    snap = _make_empty_snapshot()
++    broker = _patched_broker(snap)
++    url, server, t = _spin_dashboard(broker)
++    yield url
++    server.should_exit = True
++    t.join(timeout=3)
++
++
++# ── AT 1: Roomier in-rail topology + topo-head controls ───────────────────
++
++
++@pytest.mark.dashboard
++def test_at1_topo_head_controls_and_host_height(six_agent_url, page):
++    """AT 1: 6-agent crew renders .topo-head with zoom controls + expand button.
++    The .topology-host rendered height must be > 240px and <= 340px.
++    """
++    page.goto(six_agent_url)
++    # Wait for topology to render
++    page.locator(".rail-topology").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(500)
++
++    # Check .topo-head exists
++    topo_head = page.locator(".topo-head").first
++    assert topo_head.count() > 0, ".topo-head row not found in the rendered dashboard"
++
++    # Check three zoom controls (−, fit, +) exist inside topo-head
++    buttons = page.locator(".topo-head .topo-btn")
++    btn_count = buttons.count()
++    assert btn_count >= 3, (
++        f"Expected at least 3 .topo-btn inside .topo-head (−/fit/+ + expand); got {btn_count}"
++    )
++
++    # Check expand button exists
++    expand_btn = page.locator(".topo-head .topo-btn.expand")
++    assert expand_btn.count() > 0, ".topo-btn.expand (expand button) not found in .topo-head"
++
++    # Check host height: clamp(220, 240 + 18*(6-3), 340) = clamp(220, 294, 340) = 294
++    host_rect = page.evaluate(
++        """() => {
++          const host = document.querySelector('#topo-host');
++          if (!host) return null;
++          const rect = host.getBoundingClientRect();
++          return { width: rect.width, height: rect.height };
++        }"""
++    )
++    assert host_rect is not None, "#topo-host element not found"
++    h = host_rect["height"]
++    assert h > 240, f".topology-host height must be > 240px (got {h:.1f}px)"
++    assert h <= 340, f".topology-host height must be <= 340px (got {h:.1f}px)"
++
++
++# ── AT 2: Structural deletion-detector ────────────────────────────────────
++
++
++@pytest.mark.dashboard
++def test_at2_structural_topo_head_and_open_topology_modal():
++    """AT 2: dashboard.html contains the named literals 'topo-head' and
++    'openTopologyModal'. Fails if the redesign is absent.
++    """
++    text = DASHBOARD_HTML.read_text(encoding="utf-8")
++    assert "topo-head" in text, (
++        "dashboard.html does not contain 'topo-head' — the topo-head redesign is missing"
++    )
++    assert "openTopologyModal" in text, (
++        "dashboard.html does not contain 'openTopologyModal' — the expand modal is missing"
++    )
++
++
++# ── AT 3: Modal fits the whole graph (8-agent crew) ───────────────────────
++
++
++@pytest.mark.dashboard
++def test_at3_topology_expand_modal_fits_large_crew(eight_agent_url, page):
++    """AT 3: 8-agent crew expand modal shows the whole graph (all nodecards
++    visible within modal body bounds after auto-fit).
++    """
++    js_errors: list[str] = []
++    page.on("pageerror", lambda e: js_errors.append(str(e)))
++
++    page.goto(eight_agent_url)
++    page.locator(".rail-topology").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(1000)  # mermaid render + decoration
++
++    # Click expand button
++    expand_btn = page.locator(".topo-head .topo-btn.expand").first
++    expand_btn.click()
++
++    # Wait for modal to appear and mermaid to render inside it
++    page.locator("#modal-host").wait_for(state="attached", timeout=10000)
++    # Wait for SVG to render inside modal (double-rAF auto-fit needs time)
++    page.locator("#modal-host svg").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(600)  # allow double-rAF + fitToHost to complete
++
++    # Check that the modal body has class zoom-surface (AT 4 partially tested here too)
++    modal_body_classes: str = page.evaluate(
++        "() => document.querySelector('.modal-body') ? document.querySelector('.modal-body').className : ''"
++    )
++    assert "zoom-surface" in modal_body_classes, (
++        f".modal-body must carry class 'zoom-surface'; got classes: {modal_body_classes!r}"
++    )
++
++    # Check that all nodecard elements are within modal body bounds
++    result = page.evaluate(
++        """() => {
++          const body = document.querySelector('.modal-body');
++          if (!body) return { error: 'no .modal-body' };
++          const bodyRect = body.getBoundingClientRect();
++
++          // Get all nodecards inside the modal
++          const nodecards = [...document.querySelectorAll('#modal-host .nodecard')];
++          if (nodecards.length === 0) {
++            // No .nodecard foreignObject elements — check if SVG at least rendered
++            const svg = document.querySelector('#modal-host svg');
++            return { nodecardCount: 0, svgPresent: !!svg, bodyRect: {
++              top: bodyRect.top, bottom: bodyRect.bottom,
++              left: bodyRect.left, right: bodyRect.right
++            }};
++          }
++
++          const rects = nodecards.map(nc => nc.getBoundingClientRect());
++          const topmost    = Math.min(...rects.map(r => r.top));
++          const bottommost = Math.max(...rects.map(r => r.bottom));
++
++          return {
++            nodecardCount: nodecards.length,
++            topmost,
++            bottommost,
++            bodyTop:    bodyRect.top,
++            bodyBottom: bodyRect.bottom,
++            fitsTop:    topmost    >= bodyRect.top    - 2,
++            fitsBottom: bottommost <= bodyRect.bottom + 2,
++          };
++        }"""
++    )
++
++    # Verify no JS errors occurred during the modal open + render
++    assert not js_errors, f"JS errors raised during modal open: {js_errors}"
++
++    assert "error" not in result, f"Evaluation error: {result.get('error')}"
++
++    if result.get("nodecardCount", 0) == 0:
++        # If DOMPurify strips foreignObject/nodecard, at minimum verify SVG rendered
++        assert result.get("svgPresent"), (
++            "Modal opened but no SVG rendered inside #modal-host (mermaid render failed)"
++        )
++    else:
++        assert result["fitsTop"], (
++            f"Top nodecard (y={result['topmost']:.0f}) is above modal body top "
++            f"({result['bodyTop']:.0f}) — graph is clipped at top"
++        )
++        assert result["fitsBottom"], (
++            f"Bottom nodecard (y={result['bottommost']:.0f}) is below modal body bottom "
++            f"({result['bodyBottom']:.0f}) — graph is clipped at bottom (fitToHost/auto-fit failed)"
++        )
++
++
++# ── AT 4: Modal footer pinned + body fills via zoom-surface ──────────────
++
++
++@pytest.mark.dashboard
++def test_at4_modal_body_zoom_surface_footer_pinned(six_agent_url, page):
++    """AT 4: .modal-body carries class 'zoom-surface' and NOT 'topology-host'.
++    Footer bottom ≈ modal bottom (abs <= 2px, no dead band).
++    """
++    page.goto(six_agent_url)
++    page.locator(".rail-topology").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(500)
++
++    page.locator(".topo-head .topo-btn.expand").first.click()
++    page.locator("#modal-host").wait_for(state="attached", timeout=10000)
++    page.wait_for_timeout(300)
++
++    result = page.evaluate(
++        """() => {
++          const body = document.querySelector('.modal-body');
++          const foot = document.querySelector('.modal-foot');
++          const modal = document.querySelector('.modal');
++          if (!body || !foot || !modal) return { error: 'missing elements' };
++
++          const bodyClasses = body.className;
++          const footRect  = foot.getBoundingClientRect();
++          const modalRect = modal.getBoundingClientRect();
++
++          return {
++            bodyClasses,
++            hasZoomSurface:    bodyClasses.includes('zoom-surface'),
++            hasTopologyHost:   bodyClasses.includes('topology-host'),
++            footBottom:  footRect.bottom,
++            modalBottom: modalRect.bottom,
++            diff: Math.abs(footRect.bottom - modalRect.bottom),
++          };
++        }"""
++    )
++
++    assert "error" not in result, f"Evaluation error: {result.get('error')}"
++
++    assert result["hasZoomSurface"], (
++        f".modal-body must carry class 'zoom-surface'; got: {result['bodyClasses']!r}"
++    )
++    assert not result["hasTopologyHost"], (
++        f".modal-body must NOT carry class 'topology-host' (it caps height); "
++        f"got: {result['bodyClasses']!r}"
++    )
++    assert result["diff"] <= 2, (
++        f"Footer bottom ({result['footBottom']:.1f}px) is not pinned to modal bottom "
++        f"({result['modalBottom']:.1f}px) — diff is {result['diff']:.1f}px (expected ≤ 2px). "
++        "The modal body is not filling via flex:1 (possible topology-host height cap present)."
++    )
++
++
++# ── AT 5: Zoom label reflects actual zoom percentage ──────────────────────
++
++
++@pytest.mark.dashboard
++def test_at5_zoom_label_reflects_actual_zoom(six_agent_url, page):
++    """AT 5: After opening the modal and auto-fitting, clicking + changes the
++    zoom label to the actual applied transform scale (not a hardcoded value).
++    """
++    page.goto(six_agent_url)
++    page.locator(".rail-topology").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(500)
++
++    page.locator(".topo-head .topo-btn.expand").first.click()
++    page.locator("#modal-host").wait_for(state="attached", timeout=10000)
++    # Wait for SVG to render + auto-fit
++    page.locator("#modal-host .pan-layer").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(400)  # allow double-rAF + fitToHost
++
++    # Record pre-click zoom label
++    pre_label: str = page.evaluate(
++        "() => { const el = document.getElementById('z-label-modal-host'); return el ? el.textContent : ''; }"
++    )
++
++    # Click the + zoom button
++    plus_btn = page.locator(".modal-head .topo-btn").filter(has_text="+").first
++    plus_btn.click()
++    page.wait_for_timeout(100)
++
++    # Get post-click values: label + actual transform scale
++    result = page.evaluate(
++        """() => {
++          const label = document.getElementById('z-label-modal-host');
++          const host  = document.getElementById('modal-host');
++          if (!label || !host) return { error: 'missing elements' };
++          const z = parseFloat(host.dataset.zoom) || 1;
++          const expectedLabel = Math.round(z * 100) + '%';
++          return {
++            labelText:     label.textContent,
++            actualZoom:    z,
++            expectedLabel: expectedLabel,
++          };
++        }"""
++    )
++
++    assert "error" not in result, f"Evaluation error: {result.get('error')}"
++
++    post_label = result["labelText"]
++    expected   = result["expectedLabel"]
++
++    assert post_label == expected, (
++        f"Zoom label ({post_label!r}) does not match Math.round(actualZoom*100)+'%' "
++        f"({expected!r}) — label is hardcoded or not updated by applyTransform"
++    )
++    assert post_label != pre_label, (
++        f"Zoom label did not change after clicking + (before={pre_label!r}, after={post_label!r}) "
++        "— zoom controls are not updating the label"
++    )
++
++
++# ── AT 6: Modal sad path — empty topology degrades gracefully ─────────────
++
++
++@pytest.mark.dashboard
++def test_at6_modal_sad_path_empty_topology(empty_topology_url, page):
++    """AT 6: A crew snapshot with empty topology_edge_stats (roster fallback).
++    Opening the expand modal must raise no JS error and render the roster graph
++    fully within the modal body.
++    """
++    js_errors: list[str] = []
++    page.on("pageerror", lambda e: js_errors.append(str(e)))
++
++    page.goto(empty_topology_url)
++    page.locator(".rail-topology").wait_for(state="attached", timeout=15000)
++    page.wait_for_timeout(800)
++
++    # Click expand
++    expand_btn = page.locator(".topo-head .topo-btn.expand").first
++    expand_btn.click()
++
++    page.locator("#modal-host").wait_for(state="attached", timeout=10000)
++    # Wait for mermaid to render the roster graph
++    page.wait_for_timeout(800)
++
++    # No JS errors must have been raised
++    assert not js_errors, (
++        f"JS errors raised during roster-mode expand modal: {js_errors}"
++    )
++
++    # Modal body must be visible
++    modal_visible: bool = page.evaluate(
++        "() => { const m = document.querySelector('.modal'); return m ? m.offsetParent !== null || m.style.display !== 'none' : false; }"
++    )
++    assert modal_visible, "Modal is not visible after clicking expand on empty topology"
++
++    # SVG or pan-layer must have rendered (roster graph)
++    has_content: bool = page.evaluate(
++        """() => {
++          const host = document.getElementById('modal-host');
++          if (!host) return false;
++          // Accept either: pan-layer populated or SVG directly
++          return host.children.length > 0;
++        }"""
++    )
++    assert has_content, (
++        "modal-host is empty after expand on empty/roster topology — mermaid render failed silently"
++    )
++
++
++# ── AT 7: Structural deletion-detectors ───────────────────────────────────
++
++
++@pytest.mark.dashboard
++def test_at7_structural_zoom_surface_fittohost_double_raf():
++    """AT 7: dashboard.html contains the named literals:
++    - 'zoom-surface'
++    - 'fitToHost'
++    - 'requestAnimationFrame(() => requestAnimationFrame('  (double-rAF anchor)
++    Fails if those elements are removed.
++    """
++    text = DASHBOARD_HTML.read_text(encoding="utf-8")
++
++    assert "zoom-surface" in text, (
++        "dashboard.html does not contain 'zoom-surface' — the modal body class is missing"
++    )
++    assert "fitToHost" in text, (
++        "dashboard.html does not contain 'fitToHost' — the auto-fit function is missing"
++    )
++    assert "requestAnimationFrame(() => requestAnimationFrame(" in text, (
++        "dashboard.html does not contain the double-rAF auto-fit pattern "
++        "'requestAnimationFrame(() => requestAnimationFrame(' — the modal auto-fit on open is missing"
++    )
++
++
++# ── AT 8: Non-regression structural — keyed lookup + gated-bridge + edge-log + promote ──
++
++
++@pytest.mark.dashboard
++def test_at8_structural_keyed_lookup_gated_bridge_edge_log_promote():
++    """AT 8: dashboard.html still contains the named literals:
++    - 'window.mapEdgeStatsToPaths'   (keyed edge lookup)
++    - '_source'                       (gated-bridge back-ref)
++    - '/edge-log/'                   (edge-log fetch)
++    - 'promote-to-gated' OR 'Promote to gated'  (promote control)
++    Proves the keyed edge lookup, displayEdges expansion, /edge-log fetch +
++    selected-edge panel, and promote-to-gated control were not deleted by the
++    modal rework.
++    """
++    text = DASHBOARD_HTML.read_text(encoding="utf-8")
++
++    assert "window.mapEdgeStatsToPaths" in text, (
++        "dashboard.html no longer contains 'window.mapEdgeStatsToPaths' — "
++        "the keyed edge lookup helper was deleted"
++    )
++    assert "_source" in text, (
++        "dashboard.html no longer contains '_source' — "
++        "the gated-bridge back-ref (displayEdges expansion) was deleted"
++    )
++    assert "/edge-log/" in text, (
++        "dashboard.html no longer contains '/edge-log/' — "
++        "the selected-edge panel fetch was deleted"
++    )
++    # The promote-to-gated control can appear as either the button label
++    # or the function call — check for either form.
++    has_promote = "Promote to gated" in text or "promote-to-gated" in text or "promoteEdge" in text
++    assert has_promote, (
++        "dashboard.html no longer contains the promote-to-gated control "
++        "('Promote to gated' / 'promote-to-gated' / 'promoteEdge') — it was deleted"
++    )
+diff --git a/tests/test_unified_proposal_language.py b/tests/test_unified_proposal_language.py
+new file mode 100644
+index 0000000..50d99ed
+--- /dev/null
++++ b/tests/test_unified_proposal_language.py
+@@ -0,0 +1,416 @@
++"""AT 11, 12, 13, 14, 15 — Unified node language for shape proposals.
++
++AT-11 — Unified language: proposal and live share --edge-* stroke tokens.
++         Given a live topology with a direct edge AND a proposal whose shape has
++         a gated edge, when each is rendered, the live direct path's stroke equals
++         var(--edge-direct) and the proposal gated path's stroke equals
++         var(--edge-gated).
++
++AT-12 — Proposed variant: proposal nodes carry .nodecard.proposed with dashed border.
++         Given a pending proposal rendered in the proposal modal, the proposal node
++         cards carry both the nodecard and proposed classes and their computed
++         border-style is dashed.
++
++AT-13 — Structural deletion-detector: shapeToMermaidUnified + .nodecard.proposed
++         named literals present in dashboard.html.
++
++AT-14 — Proposal card is a preview thumbnail that opens the unified modal.
++         The static maxWidth: 420 side-by-side diagram is gone; clicking the preview
++         thumbnail opens the shared zoom/pan modal (.modal with .zoom-surface).
++
++AT-15 — Non-regression: securityLevel: 'strict' literal preserved in dashboard.html.
++         The existing XSS suite tests/dashboard/test_dashboard_artifact_xss.py
++         passes unchanged (covered by the test command invoking that file directly).
++
++Playwright tests carry @pytest.mark.dashboard.
++Structural tests (AT-13, AT-15) are pure greps — no browser needed but still
++marked @pytest.mark.dashboard so they run under the test command's -m filter.
++
++Run prerequisite: ``uv run playwright install chromium``.
++asyncio_mode="auto" (pyproject.toml) — no @pytest.mark.asyncio needed.
++"""
++from __future__ import annotations
++
++import asyncio
++import socket
++import threading
++import time
++from pathlib import Path
++from typing import Any
++
++import httpx
++import pytest
++import uvicorn
++
++from claude_crew.broker import (
++    Broker,
++    BrokerSnapshot,
++    EdgeStat,
++    LiveTeammateInfo,
++    ShapeProposal,
++    TeammateInfo,
++)
++from claude_crew.shapes import Shape, ShapeEdge, ShapeNode
++from claude_crew.ui_server import UIServer
++
++
++# ---------------------------------------------------------------------------
++# Private helpers (mirrors test_unified_topology_keyed_lookup.py pattern)
++# ---------------------------------------------------------------------------
++
++
++def _alive_info(idx: int, role: str = "builder") -> TeammateInfo:
++    return TeammateInfo(
++        id=f"tid-{idx}",
++        name=f"agent-{idx}",
++        role=role,
++        spawned_at=time.time() - 60,
++        alive=True,
++    )
++
++
++def _live_entry(info: TeammateInfo) -> LiveTeammateInfo:
++    status: dict[str, Any] = {
++        "current_tool_count": 0,
++        "current_turn_started_at_wallclock": None,
++        "total_input_tokens": 100,
++        "total_output_tokens": 50,
++        "total_cost_usd": 0.05,
++        "current_tools": [],
++        "current_tool": None,
++        "last_activity_at_wallclock": None,
++    }
++    return LiveTeammateInfo(info=info, status=status, model="claude-sonnet-4-6")
++
++
++def _make_proposal(shape_id: str = "test-shape-001") -> ShapeProposal:
++    """Return a pending proposal whose shape has one gated edge."""
++    shape = Shape(
++        name="test-shape",
++        description="Proposal used in AT-11/12/14 tests.",
++        nodes=(
++            ShapeNode(slot="sender", role="builder"),
++            ShapeNode(slot="receiver", role="builder"),
++        ),
++        edges=(
++            ShapeEdge(from_slot="sender", to_slot="receiver", mode="gated"),
++        ),
++    )
++    return ShapeProposal(
++        shape_id=shape_id,
++        shape=shape,
++        adaptation_diff=None,
++        status="pending",
++    )
++
++
++def _spin_dashboard(broker: Broker) -> tuple[str, Any, threading.Thread]:
++    """Start a UIServer on a free port in a daemon thread.
++
++    Returns (url, server, thread).
++    """
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
++        s.bind(("127.0.0.1", 0))
++        port = s.getsockname()[1]
++
++    ui = UIServer(broker, port=port)
++    app = ui._make_app()
++    config = uvicorn.Config(
++        app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
++    )
++    server = uvicorn.Server(config)
++    server.install_signal_handlers = lambda: None
++
++    def run() -> None:
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
++        loop.run_until_complete(server.serve())
++
++    t = threading.Thread(target=run, daemon=True)
++    t.start()
++
++    deadline = time.time() + 10
++    while time.time() < deadline:
++        try:
++            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=0.5)
++            if resp.status_code == 200:
++                break
++        except Exception:
++            time.sleep(0.1)
++    else:
++        pytest.fail("UIServer did not start within 10 seconds")
++
++    return f"http://127.0.0.1:{port}", server, t
++
++
++# ---------------------------------------------------------------------------
++# Fixture: dashboard with a direct topology edge + pending gated proposal
++# ---------------------------------------------------------------------------
++
++
++@pytest.fixture
++def proposal_dashboard_url():
++    """Dashboard with:
++    - 2 live teammates with a direct edge in the topology (for AT-11 live check)
++    - 1 pending shape proposal with a gated edge (for AT-11/12/14)
++    """
++    a_info = _alive_info(1, role="sender")
++    b_info = _alive_info(2, role="receiver")
++    live = (_live_entry(a_info), _live_entry(b_info))
++    edges = (
++        EdgeStat(from_slot="a", to_slot="b", mode="direct", exchanges=5, tripped=False),
++    )
++    s2t = {"a": "tid-1", "b": "tid-2"}
++    proposal = _make_proposal()
++
++    b = Broker()
++    snap = BrokerSnapshot(
++        crew_id="crew-at11-14",
++        teammates=tuple(le.info for le in live),
++        live=live,
++        log=(),
++        topology_edge_stats=edges,
++        topology_slot_to_teammate=s2t,
++        shape_proposals=(proposal,),
++    )
++    b.snapshot = lambda log_limit=None: snap  # type: ignore[method-assign]
++    b.crew_id = snap.crew_id  # type: ignore[misc]
++
++    url, server, t = _spin_dashboard(b)
++    yield url
++    server.should_exit = True
++    t.join(timeout=3)
++
++
++# ---------------------------------------------------------------------------
++# AT-13: Structural deletion-detector (no browser required)
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.dashboard
++class TestAT13StructuralDeletionDetector:
++    """AT-13: dashboard.html contains both shapeToMermaidUnified and .nodecard.proposed."""
++
++    def test_shapeToMermaidUnified_named_literal(self):
++        dashboard = (
++            Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++        )
++        src = dashboard.read_text(encoding="utf-8")
++        assert "shapeToMermaidUnified" in src, (
++            "NAMED LITERAL 'shapeToMermaidUnified' not found in dashboard.html — "
++            "shapeToMermaidUnified function may have been removed."
++        )
++
++    def test_nodecard_proposed_named_literal(self):
++        dashboard = (
++            Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++        )
++        src = dashboard.read_text(encoding="utf-8")
++        assert ".nodecard.proposed" in src, (
++            "NAMED LITERAL '.nodecard.proposed' not found in dashboard.html — "
++            ".nodecard.proposed CSS class or usage may have been removed."
++        )
++
++
++# ---------------------------------------------------------------------------
++# AT-15: XSS non-regression structural check (no browser required)
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.dashboard
++class TestAT15SecurityLevelPreserved:
++    """AT-15 structural: securityLevel: 'strict' is still present in dashboard.html.
++
++    The browser-level XSS non-regression is covered by running
++    tests/dashboard/test_dashboard_artifact_xss.py in the test command.
++    """
++
++    def test_security_level_strict_named_literal(self):
++        dashboard = (
++            Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++        )
++        src = dashboard.read_text(encoding="utf-8")
++        assert "securityLevel: 'strict'" in src, (
++            "NAMED LITERAL \"securityLevel: 'strict'\" not found in dashboard.html — "
++            "XSS hardening may have been relaxed."
++        )
++
++
++# ---------------------------------------------------------------------------
++# AT-11: Unified edge token language — live direct + proposal gated
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.dashboard
++def test_at11_unified_edge_token_language(proposal_dashboard_url, page):
++    """AT-11: Both the live topology (direct edge) and the proposal modal (gated edge)
++    use the same --edge-* CSS token vocabulary for stroke colors.
++
++    Assertions:
++      live topology a→b (direct, healthy) → stroke = var(--edge-direct)
++      proposal modal sender→receiver (gated) → stroke = var(--edge-gated)
++    """
++    page.goto(proposal_dashboard_url)
++
++    # Wait for in-rail topology SVG to render and edges to be decorated.
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15_000)
++    page.wait_for_timeout(1200)  # edge-decoration useEffect + mapEdgeStatsToPaths
++
++    # ── Live topology: a→b direct edge must carry var(--edge-direct) stroke ──
++    live_stroke = page.evaluate(
++        """() => {
++          const paths = document.querySelectorAll('.rail-topology path.flowchart-link');
++          for (const p of paths) {
++            if (p.style.stroke) return p.style.stroke;
++          }
++          return null;
++        }"""
++    )
++    assert live_stroke == "var(--edge-direct)", (
++        f"Live direct edge stroke expected 'var(--edge-direct)', got {live_stroke!r}. "
++        "The --edge-* token vocabulary may not be applied to the in-rail topology."
++    )
++
++    # ── Open shape gate panel via pending-gate pill ──
++    page.locator('[data-testid="pending-gate-pill"]').wait_for(
++        state="visible", timeout=10_000
++    )
++    page.locator('[data-testid="pending-gate-pill"]').click()
++
++    # ── Click the proposal thumbnail to open the proposal modal ──
++    page.locator(".shape-proposal-thumbnail").first.wait_for(
++        state="visible", timeout=5_000
++    )
++    page.locator(".shape-proposal-thumbnail").first.click()
++
++    # Wait for proposal modal + mermaid render + edge decoration (renderInto async).
++    page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
++    page.wait_for_timeout(1500)  # mermaid.render() promise + rAF + edge coloring
++
++    # ── Proposal modal: gated edge must carry var(--edge-gated) stroke ──
++    proposal_stroke = page.evaluate(
++        """() => {
++          const modal = document.querySelector('#proposal-modal');
++          if (!modal) return null;
++          const paths = modal.querySelectorAll('path.flowchart-link');
++          for (const p of paths) {
++            const s = p.style.stroke;
++            if (s && s.includes('edge-gated')) return s;
++          }
++          return null;
++        }"""
++    )
++    assert proposal_stroke == "var(--edge-gated)", (
++        f"Proposal gated edge stroke expected 'var(--edge-gated)', got {proposal_stroke!r}. "
++        "shapeToMermaidUnified/openProposalModal may not decorate edges with --edge-* tokens."
++    )
++
++
++# ---------------------------------------------------------------------------
++# AT-12: Proposed variant — .nodecard.proposed with dashed border
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.dashboard
++def test_at12_proposed_nodecard_class_and_dashed_border(proposal_dashboard_url, page):
++    """AT-12: Proposal nodes rendered in the modal carry .nodecard.proposed
++    and their computed border-style is dashed.
++    """
++    page.goto(proposal_dashboard_url)
++
++    # Open shape gate panel.
++    page.locator('[data-testid="pending-gate-pill"]').wait_for(
++        state="visible", timeout=10_000
++    )
++    page.locator('[data-testid="pending-gate-pill"]').click()
++
++    # Open the proposal modal.
++    page.locator(".shape-proposal-thumbnail").first.wait_for(
++        state="visible", timeout=5_000
++    )
++    page.locator(".shape-proposal-thumbnail").first.click()
++
++    page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
++    page.wait_for_timeout(1500)  # mermaid render + DOMPurify sanitize + DOM paint
++
++    # Verify .nodecard.proposed elements exist in the proposal modal.
++    proposed_count = page.evaluate(
++        "() => document.querySelectorAll('#proposal-modal .nodecard.proposed').length"
++    )
++    assert proposed_count > 0, (
++        "No .nodecard.proposed elements found inside #proposal-modal after render. "
++        "shapeToMermaidUnified may not emit the 'proposed' CSS class on nodes."
++    )
++
++    # Verify border-style is dashed (the CSS rule .nodecard.proposed applies).
++    border_style = page.evaluate(
++        """() => {
++          const node = document.querySelector('#proposal-modal .nodecard.proposed');
++          if (!node) return null;
++          return window.getComputedStyle(node).borderStyle;
++        }"""
++    )
++    assert border_style is not None, (
++        ".nodecard.proposed element not found when checking computed border-style."
++    )
++    assert "dashed" in border_style, (
++        f"Expected computed border-style to include 'dashed', got {border_style!r}. "
++        "The .nodecard.proposed CSS rule may be missing or misapplied."
++    )
++
++
++# ---------------------------------------------------------------------------
++# AT-14: Proposal card is a preview thumbnail that opens the unified modal
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.dashboard
++def test_at14_proposal_thumbnail_opens_modal(proposal_dashboard_url, page):
++    """AT-14: ShapeProposalCard renders as a clickable thumbnail preview.
++
++    Sub-checks:
++    1. NAMED LITERAL 'maxWidth: 420' is absent from dashboard.html (the old
++       static side-by-side diagram was removed).
++    2. The rendered card has a .shape-proposal-thumbnail element (the thumbnail).
++    3. Before clicking, the modal is not visible.
++    4. Clicking the thumbnail shows the shared zoom/pan modal (.modal with .zoom-surface).
++    """
++    # ── Structural sub-check: maxWidth: 420 literal must be gone ──
++    dashboard_path = (
++        Path(__file__).parent.parent / "claude_crew" / "ui" / "dashboard.html"
++    )
++    src = dashboard_path.read_text(encoding="utf-8")
++    assert "maxWidth: 420" not in src, (
++        "NAMED LITERAL 'maxWidth: 420' still present in dashboard.html — "
++        "the old side-by-side ShapeProposalCard diagram layout was not removed."
++    )
++
++    page.goto(proposal_dashboard_url)
++
++    # Open shape gate panel.
++    page.locator('[data-testid="pending-gate-pill"]').wait_for(
++        state="visible", timeout=10_000
++    )
++    page.locator('[data-testid="pending-gate-pill"]').click()
++
++    # Proposal card should render with the thumbnail element.
++    page.locator(".shape-proposal-card").first.wait_for(state="visible", timeout=10_000)
++    thumbnail = page.locator(".shape-proposal-thumbnail").first
++    thumbnail.wait_for(state="visible", timeout=5_000)
++
++    # Modal should not be open yet.
++    assert not page.locator("#proposal-modal .modal").is_visible(), (
++        "#proposal-modal .modal is visible before the thumbnail was clicked."
++    )
++
++    # Click the thumbnail to open the shared zoom/pan modal.
++    thumbnail.click()
++
++    # Modal with zoom-surface must become visible.
++    page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
++    page.locator("#proposal-modal .zoom-surface").wait_for(
++        state="visible", timeout=5_000
++    )
++    assert page.locator("#proposal-modal .modal").is_visible(), (
++        "#proposal-modal .modal is not visible after clicking the thumbnail."
++    )
+diff --git a/tests/test_unified_topology_keyed_lookup.py b/tests/test_unified_topology_keyed_lookup.py
+index e0e4f69..6407f99 100644
+--- a/tests/test_unified_topology_keyed_lookup.py
++++ b/tests/test_unified_topology_keyed_lookup.py
+@@ -192,7 +192,9 @@ def test_at5_reciprocal_pair_keyed_stroke_colors(reciprocal_pair_url, page):
+       That contradicts the assertion below → test fails → regression caught.
+     """
+     page.goto(reciprocal_pair_url)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    # Use #topo-host (specific to the topology canvas) to avoid matching the
++    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal task).
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(1000)  # mermaid render + post-render decoration
+ 
+     # Extract per-path info: id, class attribute, inline stroke, stroke-width.
+@@ -272,7 +274,9 @@ def test_at5_reciprocal_pair_keyed_stroke_colors(reciprocal_pair_url, page):
+     # as foreignObject/edgeLabel elements. textContent collects all nested text.
+     svg_text: str = page.evaluate(
+         """() => {
+-          const svg = document.querySelector('.rail-topology svg');
++          // Use #topo-host svg to avoid matching the expand-button SVG icon
++          // also inside .rail-topology (added by shared-zoom-pan-modal task).
++          const svg = document.querySelector('#topo-host svg');
+           return svg ? svg.textContent : '';
+         }"""
+     )
+@@ -315,7 +319,9 @@ def test_at6_map_edge_stats_to_paths_all_branches(reciprocal_pair_url, page):
+     (bypassing DOMPurify) to exercise the fallback tier independently.
+     """
+     page.goto(reciprocal_pair_url)
+-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
++    # Use #topo-host (specific to the topology canvas) to avoid matching the
++    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal task).
++    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
+     page.wait_for_timeout(500)  # ensure window.mapEdgeStatsToPaths is defined
+ 
+     results: dict = page.evaluate(
