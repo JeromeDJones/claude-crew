@@ -66,6 +66,8 @@
     .nodecard.waiting  { border-color: var(--st-waiting); }
     .nodecard.idle     { border-color: var(--line); }
     .nodecard.lead     { border-color: var(--accent-line); background: var(--bg-2); }
+    .nodecard.proposed { border-color: var(--accent-line); border-style: dashed; background: var(--bg-1); }
+    .nodecard.proposed .ndot { background: var(--accent); opacity: 0.6; }
     .nodecard .row1 {
       display: flex; align-items: center; gap: 6px;
       font-weight: 600; font-size: 12px; color: var(--fg-0);
@@ -2373,6 +2375,91 @@
 
     function _escListenerTopology(ev) { if (ev.key === 'Escape') closeTopologyModal(); }
 
+    // ── shapeToMermaidUnified ────────────────────────────────────────────────
+    // Generate mermaid source for a shape proposal using the same .nodecard
+    // foreignObject label HTML as the live TopologyGraph — both surfaces share
+    // one visual language. When proposed=true nodes carry .nodecard.proposed
+    // (dashed accent border). Edge colors use the same --edge-* CSS tokens.
+    function shapeToMermaidUnified(shape, { proposed = false } = {}) {
+      const nodeCls = proposed ? 'proposed' : 'idle';
+      function _nl(r1, r2, cls) {
+        return `<div class='nodecard ${cls}'><div class='row1'><span class='ndot'></span>${r1}</div><div class='row2'>${r2}</div></div>`;
+      }
+      // Gated edges route through lead (mirrors live topology displayEdges expansion).
+      const displayEdges = (shape.edges || []).flatMap(e =>
+        e.mode === 'gated'
+          ? [{ from: e.from, to: 'lead', mode: 'gated' }, { from: 'lead', to: e.to, mode: 'gated' }]
+          : [{ from: e.from, to: e.to, mode: e.mode }]
+      );
+      const lines = ['graph TD'];
+      lines.push(`  lead["${_nl('lead', '', 'lead')}"]`);
+      (shape.nodes || []).forEach(n => {
+        lines.push(`  ${n.slot}["${_nl(n.slot, n.role || '', nodeCls)}"]`);
+      });
+      displayEdges.forEach(e => {
+        lines.push(`  ${e.from} -->|"${e.mode}"| ${e.to}`);
+      });
+      return lines.join('\n');
+    }
+
+    // ── Proposal modal (shared zoom/pan substrate, proposal opener) ──────────
+    // Opens the shared zoom/pan modal for a shape proposal. Renders the
+    // structured shape via shapeToMermaidUnified + the existing renderInto
+    // pipeline (mermaid securityLevel:'strict' + DOMPurify unchanged).
+    // No new per-instance fetch — consumes the structured shape already on
+    // /api/state, preserving the multi-instance LEADER invariant.
+    function openProposalModal(proposal) {
+      const shape = proposal.shape || {};
+      const mount = document.getElementById('proposal-modal');
+      if (!mount) return;
+      const mermaidSrc = shapeToMermaidUnified(shape, { proposed: true });
+      // Convert shape edges to the EdgeStat-like format renderInto expects.
+      // Gated expansion happens inside renderInto; tripped is never set for proposals.
+      const edgeStats = (shape.edges || []).map(e => ({
+        from_slot: e.from,
+        to_slot: e.to,
+        mode: e.mode,
+        exchanges: 0,
+        tripped: false,
+      }));
+      mount.style.display = '';
+      mount.innerHTML = `
+        <div class="modal-backdrop" onclick="if(event.target===this)closeProposalModal()">
+          <div class="modal">
+            <div class="modal-head">
+              <span class="title">Shape Gate — proposal</span>
+              <span class="subtitle">${proposal.shape_id || ''}</span>
+              <span class="spacer"></span>
+              <span class="ctrls">
+                <button class="topo-btn" onclick="zoomBy('prop-host',1/1.25)">−</button>
+                <span class="z-label" id="z-label-prop-host">100%</span>
+                <button class="topo-btn" onclick="zoomBy('prop-host',1.25)">+</button>
+              </span>
+              <button class="close-btn" onclick="closeProposalModal()">✕</button>
+            </div>
+            <div class="modal-body zoom-surface" id="prop-host" data-zoom="1" data-tx="0" data-ty="0"></div>
+            <div class="modal-foot">
+              <div class="meta" style="font-size:11px;color:var(--fg-2);font-family:var(--font-mono);">
+                crew: ${proposal.crew_id || ''}
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const host = document.getElementById('prop-host');
+      bindPanZoom(host);
+      renderInto(host, mermaidSrc, edgeStats);
+      document.addEventListener('keydown', _escListenerProposal);
+    }
+
+    function closeProposalModal() {
+      const m = document.getElementById('proposal-modal');
+      if (!m) return;
+      m.innerHTML = ''; m.style.display = 'none';
+      document.removeEventListener('keydown', _escListenerProposal);
+    }
+
+    function _escListenerProposal(ev) { if (ev.key === 'Escape') closeProposalModal(); }
+
     // Render a stored tool-output body nicely. The body is the raw SDK tool
     // response (often a JSON envelope). Parse it and surface the useful text;
     // fall back to the raw string for non-JSON or truncated-unparseable bodies.
@@ -2979,20 +3066,13 @@
     }
 
     // --- Shape Gate Panel ---
-    // ShapeProposalCard: renders one pending proposal as a mermaid DAG with
-    // Approve/Decline controls. Reuses the existing renderMermaidBlocks pipeline
-    // (wraps the mermaid source in pre > code.language-mermaid so the function
-    // finds it via its DOM walk, then calls it via a ref callback after mount).
+    // ShapeProposalCard: renders one pending proposal as a preview thumbnail.
+    // Clicking the thumbnail opens the shared zoom/pan modal via openProposalModal(),
+    // which renders the shape through shapeToMermaidUnified + the existing
+    // mermaid securityLevel:'strict' + DOMPurify pipeline unchanged.
     function ShapeProposalCard({ proposal }) {
       const [busy, setBusy] = React.useState(false);
       const [resolved, setResolved] = React.useState(false);
-
-      // Ref callback: fires once after mount when el is non-null. By then, the
-      // pre > code.language-mermaid child is already in the DOM, so
-      // renderMermaidBlocks can find and replace it with the rendered SVG.
-      const mermaidRef = React.useCallback((el) => {
-        if (el) renderMermaidBlocks(el);
-      }, []);  // proposal.shape_id is stable per card; no dep needed
 
       if (resolved) return null;
 
@@ -3014,64 +3094,72 @@
           className="shape-proposal-card"
           data-shape-id={proposal.shape_id}
           style={{
-            display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 16,
+            display: 'flex', flexDirection: 'column', gap: 10,
             padding: '12px 16px',
             background: 'var(--bg-1)',
             borderRadius: 6,
             border: '1px solid var(--line)',
           }}
         >
-          {/* Mermaid DAG — rendered via the existing renderMermaidBlocks pipeline */}
+          {/* Preview thumbnail — click opens the shared zoom/pan modal */}
           <div
-            className="shape-proposal-diagram"
-            ref={mermaidRef}
-            style={{ flex: '0 0 auto', minWidth: 180, maxWidth: 420 }}
+            className="shape-proposal-thumbnail"
+            onClick={() => openProposalModal(proposal)}
+            style={{
+              cursor: 'pointer',
+              border: '1px solid var(--line-soft)',
+              borderRadius: 4,
+              overflow: 'hidden',
+              background: 'var(--bg-0)',
+              minHeight: 80,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11, color: 'var(--fg-3)',
+              userSelect: 'none',
+            }}
+            title="Click to preview shape"
           >
-            <pre style={{ margin: 0 }}>
-              <code className="language-mermaid">{proposal.mermaid}</code>
-            </pre>
+            Click to preview shape
           </div>
-          {/* Metadata + controls */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
-              crew: {proposal.crew_id}
+          {/* Metadata */}
+          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+            crew: {proposal.crew_id}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+            shape_id: {proposal.shape_id}
+          </div>
+          {proposal.adaptation_diff && (
+            <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
+              adaptation: {proposal.adaptation_diff}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
-              shape_id: {proposal.shape_id}
-            </div>
-            {proposal.adaptation_diff && (
-              <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
-                adaptation: {proposal.adaptation_diff}
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-              <button
-                className="shape-approve-btn"
-                onClick={() => decide('approve')}
-                disabled={busy}
-                style={{
-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
-                  background: busy ? 'var(--bg-2)' : '#166534',
-                  color: '#f0fdf4', border: 'none', borderRadius: 4,
-                  cursor: busy ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Approve
-              </button>
-              <button
-                className="shape-decline-btn"
-                onClick={() => decide('decline')}
-                disabled={busy}
-                style={{
-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
-                  background: busy ? 'var(--bg-2)' : '#991b1b',
-                  color: '#fff1f2', border: 'none', borderRadius: 4,
-                  cursor: busy ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Decline
-              </button>
-            </div>
+          )}
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button
+              className="shape-approve-btn"
+              onClick={() => decide('approve')}
+              disabled={busy}
+              style={{
+                padding: '4px 14px', fontSize: 12, fontWeight: 600,
+                background: busy ? 'var(--bg-2)' : '#166534',
+                color: '#f0fdf4', border: 'none', borderRadius: 4,
+                cursor: busy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Approve
+            </button>
+            <button
+              className="shape-decline-btn"
+              onClick={() => decide('decline')}
+              disabled={busy}
+              style={{
+                padding: '4px 14px', fontSize: 12, fontWeight: 600,
+                background: busy ? 'var(--bg-2)' : '#991b1b',
+                color: '#fff1f2', border: 'none', borderRadius: 4,
+                cursor: busy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Decline
+            </button>
           </div>
         </div>
       );
@@ -3311,6 +3399,8 @@
           )}
           {/* Topology expand modal mount — populated by openTopologyModal() */}
           <div id="topology-modal" style={{ display: 'none' }} />
+          {/* Proposal modal mount — populated by openProposalModal() */}
+          <div id="proposal-modal" style={{ display: 'none' }} />
         </div>
       );
     }

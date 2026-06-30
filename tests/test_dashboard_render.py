@@ -1024,7 +1024,9 @@ def test_at7_unified_topology_preserves_crew_id_in_edge_log_path(
     url, crew_id = at7_unified_topology_url
     page.goto(url)
     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    # Use #topo-host svg (not .rail-topology svg) to avoid strict-mode collision
+    # with the expand-button SVG added by the shared-zoom-pan-modal task.
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(800)  # mermaid render + post-render decoration
 
     # Capture every fetch URL the dashboard issues from now on.
@@ -1037,7 +1039,7 @@ def test_at7_unified_topology_preserves_crew_id_in_edge_log_path(
     # Diagnostic — what paths does mermaid emit?
     diag = page.evaluate(
         """() => {
-          const all = document.querySelectorAll('.rail-topology svg path');
+          const all = document.querySelectorAll('#topo-host svg path');
           const out = [];
           all.forEach(p => out.push({
             cls: p.getAttribute('class') || '',

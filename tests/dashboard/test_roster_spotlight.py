@@ -268,9 +268,11 @@ def test_topology_pinned_in_left_rail(five_agent_url, page):
     assert "TOPOLOGY" in rail_text.upper(), (
         f"Expected Topology label in rail; got: {rail_text!r}"
     )
-    # Wait for mermaid render to produce the SVG (async).
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=10000)
-    assert page.locator(".rail-topology svg").count() == 1
+    # Wait for mermaid render to produce the flowchart SVG (async).
+    # Use #topo-host svg (not .rail-topology svg) to avoid ambiguity with the
+    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal).
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=10000)
+    assert page.locator("#topo-host svg").count() == 1
 
 
 # ── AT-4 — Roster fallback (empty topology_edge_stats) ───────────────────────
@@ -292,8 +294,8 @@ def test_at4_roster_fallback_subtitle_and_legend_hidden(five_agent_url, page):
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
     page.goto(five_agent_url)
     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
-    # Wait for mermaid SVG so post-render decoration has settled.
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=10000)
+    # Wait for mermaid flowchart SVG so post-render decoration has settled.
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=10000)
     # Give mermaid a beat to finish foreignObject sanitization.
     page.wait_for_timeout(500)
 
@@ -313,7 +315,7 @@ def test_at4_roster_fallback_subtitle_and_legend_hidden(five_agent_url, page):
 def test_at4_roster_fallback_neutral_edges_no_click_no_badges(five_agent_url, page):
     """AT-4: roster fallback edges are neutral grey, no click handler, no mode badge."""
     page.goto(five_agent_url)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(800)  # let mermaid + post-render decoration finish
 
     # All flowchart-link paths must render with neutral stroke and cursor:default.
