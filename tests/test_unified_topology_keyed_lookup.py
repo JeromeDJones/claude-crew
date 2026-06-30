@@ -192,7 +192,9 @@ def test_at5_reciprocal_pair_keyed_stroke_colors(reciprocal_pair_url, page):
       That contradicts the assertion below → test fails → regression caught.
     """
     page.goto(reciprocal_pair_url)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    # Use #topo-host (specific to the topology canvas) to avoid matching the
+    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal task).
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(1000)  # mermaid render + post-render decoration
 
     # Extract per-path info: id, class attribute, inline stroke, stroke-width.
@@ -272,7 +274,9 @@ def test_at5_reciprocal_pair_keyed_stroke_colors(reciprocal_pair_url, page):
     # as foreignObject/edgeLabel elements. textContent collects all nested text.
     svg_text: str = page.evaluate(
         """() => {
-          const svg = document.querySelector('.rail-topology svg');
+          // Use #topo-host svg to avoid matching the expand-button SVG icon
+          // also inside .rail-topology (added by shared-zoom-pan-modal task).
+          const svg = document.querySelector('#topo-host svg');
           return svg ? svg.textContent : '';
         }"""
     )
@@ -315,7 +319,9 @@ def test_at6_map_edge_stats_to_paths_all_branches(reciprocal_pair_url, page):
     (bypassing DOMPurify) to exercise the fallback tier independently.
     """
     page.goto(reciprocal_pair_url)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    # Use #topo-host (specific to the topology canvas) to avoid matching the
+    # expand-button SVG icon also inside .rail-topology (added by shared-zoom-pan-modal task).
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(500)  # ensure window.mapEdgeStatsToPaths is defined
 
     results: dict = page.evaluate(
