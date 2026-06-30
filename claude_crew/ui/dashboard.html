@@ -640,6 +640,21 @@
        sits over the panel edge rather than covering left-aligned content. */
     .drawer-resize-handle { position: absolute; left: -3px; top: 0; height: 100%; width: 8px; cursor: ew-resize; z-index: 2; }
     .drawer-resize-handle:hover, .drawer-resize-handle.dragging { background: var(--accent-soft); }
+    /* === Responsive two-pane grid (replaces MissionControlLayout hardcoded inline style) === */
+    /* Base: standard 320px left-rail at wide viewports. */
+    .dash-grid {
+      flex: 1; display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      min-height: 0;
+    }
+    /* At ≤1024px: fluidize the left rail — two-pane preserved, no drawer, no single-column. */
+    @media (max-width: 1024px) {
+      .dash-grid {
+        grid-template-columns: clamp(220px, 22vw, 260px) minmax(0, 1fr);
+      }
+      .dash-grid .nodecard { min-width: 72px; padding: 5px 8px 4px; }
+      .dash-grid .roster-row { padding: 6px 10px 6px 14px; }
+    }
   </style>
 </head>
 <body>
@@ -3341,7 +3356,7 @@
           />
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId} readState={readState}/>
           <ShapeGatePanel instances={instances} open={gateOpen} onClose={onCloseGate} />
-          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
+          <div className="dash-grid">
             <RosterRail
               liveAgents={liveAgents}
               selectedIds={selectedIds}
