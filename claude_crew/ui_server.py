@@ -31,7 +31,7 @@ from claude_crew.broker import LEAD_ID, Broker, BrokerSnapshot
 from claude_crew.ctx_window import resolve_ctx_window
 from claude_crew.instance_registry import InstanceRegistry
 from claude_crew.redaction import REDACTION_VERSION, _TOOL_OUTPUT_BYTE_CAP
-from claude_crew.shapes import shape_to_mermaid
+from claude_crew.shapes import shape_to_dict, shape_to_mermaid
 from claude_crew.teammate import ToolEvent
 
 _logger = logging.getLogger(__name__)
@@ -451,6 +451,7 @@ class UIServer:
                     "mermaid": shape_to_mermaid(p.shape),
                     "name": p.shape.name,
                     "summary": p.shape.description,
+                    "shape": shape_to_dict(p.shape),
                 }
                 for p in snapshot.shape_proposals
             ],

@@ -154,28 +154,39 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
         panel = page.locator(".shape-gate-panel")
         panel.wait_for(state="visible", timeout=15_000)
 
-        # Wait for the async mermaid.render() call to complete and replace the
-        # pre block with the SVG.  The existing tests use 2-3 s here.
+        # ── 1. Proposal card and thumbnail are present ───────────────────────
+        # The new ShapeProposalCard renders a clickable thumbnail that opens
+        # the shared zoom/pan modal; the SVG is no longer rendered inline.
+        card = panel.locator(".shape-proposal-card")
+        card.wait_for(state="visible", timeout=5_000)
+        thumbnail = panel.locator(".shape-proposal-thumbnail")
+        thumbnail.wait_for(state="visible", timeout=5_000)
+
+        # ── 2. Click thumbnail to open the proposal modal with the DAG ───────
+        thumbnail.click()
+        page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
+        # Wait for the async mermaid.render() call to complete.
         page.wait_for_timeout(3_000)
 
-        # ── 1. SVG is present ────────────────────────────────────────────────
-        svg_locator = page.locator(".shape-gate-panel svg")
+        # ── 3. SVG is present inside the proposal modal ───────────────────────
+        svg_locator = page.locator("#proposal-modal svg")
         assert svg_locator.count() >= 1, (
-            f"Expected >=1 SVG inside .shape-gate-panel, got {svg_locator.count()}"
+            f"Expected >=1 SVG inside #proposal-modal, got {svg_locator.count()}"
         )
 
-        # ── 2. Labels are visible (not black boxes) ──────────────────────────
+        # ── 4. Labels are visible (not black boxes) ──────────────────────────
         # Mermaid (securityLevel:'strict') renders diagram labels as HTML
-        # inside <foreignObject>, so inner_text() on the panel will capture
+        # inside <foreignObject>, so inner_text() on the modal will capture
         # them if the pipeline is correctly wired.
-        panel_text = panel.inner_text()
-        assert "implementor" in panel_text, (
-            f"Slot 'implementor' not visible in shape-gate panel. "
-            f"Panel text (first 500): {panel_text[:500]!r}"
+        modal_el = page.locator("#proposal-modal")
+        modal_text = modal_el.inner_text()
+        assert "implementor" in modal_text, (
+            f"Slot 'implementor' not visible in proposal modal. "
+            f"Modal text (first 500): {modal_text[:500]!r}"
         )
-        assert "reviewer" in panel_text, (
-            f"Slot 'reviewer' not visible in shape-gate panel. "
-            f"Panel text (first 500): {panel_text[:500]!r}"
+        assert "reviewer" in modal_text, (
+            f"Slot 'reviewer' not visible in proposal modal. "
+            f"Modal text (first 500): {modal_text[:500]!r}"
         )
 
         # Also verify via JS that the SVG carries text/foreignObject nodes
@@ -183,7 +194,7 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
         label_content = page.evaluate(
             """() => {
                 const labels = [];
-                for (const svg of document.querySelectorAll('.shape-gate-panel svg')) {
+                for (const svg of document.querySelectorAll('#proposal-modal svg')) {
                     // foreignObject-based labels (securityLevel:'strict' path):
                     for (const el of svg.querySelectorAll('foreignObject *')) {
                         const t = el.textContent.trim();
@@ -198,13 +209,14 @@ def test_shape_gate_renders_dag_with_visible_labels(page):
                 return labels.join(' ');
             }"""
         )
-        combined = f"{label_content} {panel_text}"
+        combined = f"{label_content} {modal_text}"
         assert "implementor" in combined, (
-            f"'implementor' not found in SVG labels or panel text. "
+            f"'implementor' not found in SVG labels or modal text. "
             f"SVG labels: {label_content!r}"
         )
 
-        # ── 3. Approve / Decline controls ────────────────────────────────────
+        # ── 5. Approve / Decline controls ────────────────────────────────────
+        # These live in the gate panel (card), not in the proposal modal.
         approve = page.locator(".shape-gate-panel button.shape-approve-btn")
         decline = page.locator(".shape-gate-panel button.shape-decline-btn")
         assert approve.count() >= 1, "Approve button not found in shape-gate panel"

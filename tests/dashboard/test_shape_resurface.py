@@ -181,28 +181,31 @@ class TestShapeGateResurface:
         assert "Gate" in pill_text
 
     def test_open_modal_shows_dag(self, page, gate_server):
-        """Clicking the gate pill opens the modal containing the mermaid DAG."""
+        """Clicking the gate pill opens the panel; clicking the thumbnail opens the proposal modal with the mermaid DAG."""
         url, broker, shape_id = gate_server
         page.goto(url)
         pill = page.locator('[data-testid="pending-gate-pill"]')
         pill.wait_for(state="visible", timeout=15_000)
         pill.click()
-        # Shape gate modal is visible
+        # Shape gate panel is visible
         panel = page.locator(".shape-gate-panel")
         panel.wait_for(state="visible", timeout=5_000)
-        # The proposal card with the diagram container is present
+        # The proposal card with the thumbnail is present
         card = panel.locator(".shape-proposal-card")
         card.wait_for(state="visible", timeout=5_000)
-        # The diagram div is present (renderMermaidBlocks replaces code → SVG async)
-        diagram = panel.locator(".shape-proposal-diagram")
-        diagram.wait_for(state="visible", timeout=5_000)
+        # The thumbnail div is present (replaces the old inline diagram; click opens zoom/pan modal)
+        thumbnail = panel.locator(".shape-proposal-thumbnail")
+        thumbnail.wait_for(state="visible", timeout=5_000)
+        # Click the thumbnail to open the proposal zoom/pan modal
+        thumbnail.click()
+        # The proposal modal must become visible
+        page.locator("#proposal-modal .modal").wait_for(state="visible", timeout=10_000)
         # Wait for mermaid render to complete (async replacement of code block with SVG)
         page.wait_for_timeout(3_000)
-        # Either the rendered SVG or the source code element must be present
-        has_svg = panel.locator(".shape-proposal-diagram svg").count() >= 1
-        has_code = panel.locator(".shape-proposal-diagram code").count() >= 1
-        assert has_svg or has_code, (
-            "Expected either rendered SVG or mermaid source code element in the diagram"
+        # The rendered SVG must be present in the proposal modal
+        has_svg = page.locator("#proposal-modal svg").count() >= 1
+        assert has_svg, (
+            "Expected rendered SVG in the proposal modal"
         )
 
     def test_badge_persists_after_modal_closed(self, page, gate_server):

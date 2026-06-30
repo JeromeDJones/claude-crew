@@ -1,7 +1,7 @@
 # Roadmap: claude-crew
 
 **Created**: 2026-06-13 (harvested from `doc/PRODUCT-VISION.md` Feature Pipeline at M2 retro)
-**Last Updated**: 2026-06-17
+**Last Updated**: 2026-06-29
 
 This roadmap is a condensed view of the Workflow Shape Composition arc. For the full feature pipeline (MVP track, post-MVP substrate, deferred items), see `doc/PRODUCT-VISION.md § Feature Pipeline`.
 
@@ -62,3 +62,4 @@ See `doc/PRODUCT-VISION.md § Product Journal` for the full history. Key substra
 | Async shape gate M1.5 | 2026-06-12 | Gate interaction model |
 | Edge routing M2 | 2026-06-13 | Live execution |
 | plan-gate-and-telemetry-hardening | 2026-06-17 | Closes silent safety regression (plan-mode write gate now enforced client-side); restores F7 TNM telemetry (arrival-order correlation); adds forced-crash coverage; fixes shutdown-signal flake. Substrate hardening for M3.5 and beyond. |
+| shape-graphic-redesign | 2026-06-29 | Unified roomier shape graphic in Mission Control: shared zoom/pan modal (fitToHost/applyTransform/bindPanZoom/renderInto), `shapeToMermaidUnified` for proposal visual parity with live topology, `.topo-head` control row, `clamp`-based in-rail host growth, responsive `.dash-grid` class, additive `shape` key on `/api/state` proposals. |

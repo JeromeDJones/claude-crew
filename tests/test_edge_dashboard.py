@@ -646,20 +646,22 @@ def test_at3_unified_topology_renders_single_graph_with_lead_node(at3_active_top
     """
     page.goto(at3_active_topology_url)
     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    # Use #topo-host svg (not .rail-topology svg) to avoid strict-mode collision
+    # with the expand-button SVG added by the shared-zoom-pan-modal task.
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(800)  # mermaid render + post-render decoration
 
     # Header reads "Topology" (CSS uppercases).
     rail_text = page.locator(".rail-topology").inner_text()
     assert "TOPOLOGY" in rail_text.upper(), f"Expected Topology header; got: {rail_text!r}"
 
-    # Exactly one SVG in the rail-topology subtree — the unified graph.
-    svgs = page.locator(".rail-topology svg")
+    # Exactly one mermaid-rendered SVG in #topo-host (excludes expand-button SVG).
+    svgs = page.locator("#topo-host svg")
     assert svgs.count() == 1, f"Expected exactly 1 topology SVG; found {svgs.count()}"
 
     # The legacy MiniGraph radial SVG had a <radialGradient id="mcCenter">.
     # Its absence is a strong signal that the hand-drawn roster hub is gone.
-    legacy_radial = page.locator(".rail-topology svg defs radialGradient#mcCenter")
+    legacy_radial = page.locator("#topo-host svg defs radialGradient#mcCenter")
     assert legacy_radial.count() == 0, "Legacy MiniGraph radial gradient must not render"
 
     # The unified graph contains the `lead` node as a first-class node.
@@ -744,7 +746,7 @@ def test_at8_activity_joins_via_slot_to_teammate(at8_divergent_slot_role_url, pa
     """
     page.goto(at8_divergent_slot_role_url)
     page.locator(".rail-topology").wait_for(state="visible", timeout=15000)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     # Mermaid foreignObject HTML is the slow path — give it a beat.
     page.wait_for_timeout(1000)
 
@@ -828,12 +830,12 @@ def test_gated_edge_bridges_through_lead_with_two_amber_segments(gated_bridge_ur
     single peer edge)."""
     url, crew_id = gated_bridge_url
     page.goto(url)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(1000)
 
     paths_info = page.evaluate(
         """() => {
-          const paths = document.querySelectorAll('.rail-topology path.flowchart-link');
+          const paths = document.querySelectorAll('#topo-host path.flowchart-link');
           return [...paths].map(p => ({
             id: p.id || '',
             cls: p.getAttribute('class') || '',
@@ -893,7 +895,7 @@ def test_clicking_gated_segment_fetches_source_endpoints_with_crew_id(
     404 on follower-owned rows.)"""
     url, crew_id = gated_bridge_url
     page.goto(url)
-    page.locator(".rail-topology svg").wait_for(state="attached", timeout=15000)
+    page.locator("#topo-host svg").wait_for(state="attached", timeout=15000)
     page.wait_for_timeout(1000)
 
     captured: list[str] = []

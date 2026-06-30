@@ -1,8 +1,8 @@
 # Product Vision: claude-crew
 
 **Created**: 2026-04-25
-**Last Updated**: 2026-06-13
-**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush + teammate-death-diagnostics + workflow-shape-composition-m0 + workflow-shape-composition-m1.5 + workflow-shape-composition-m2 + workflow-shape-composition-m3 + plan-gate-and-telemetry-hardening
+**Last Updated**: 2026-06-29
+**Features Implemented**: 16 + post-#13 polish + per-agent dashboard tokens + #16 (thinking half cut) + dead-teammate UI segregation + #25 startup diagnostics dashboard (MVP + #6 telemetry-based liveness + #7 subagent-activity envelopes + #8 tool-execution telemetry + #9 get_messages long-poll + #10 agent-config-extension + #11 lightweight-subagent-context + #12 mission-control-ui + #13 multi-instance-registry + leader election + race-free port binding + dashboard UX polish + #14 token/cost telemetry + #18 broker snapshot + dashboard polish + #17 agent definition parity) + #27 fidelity-audit live-test suite + multi-scope-agent-memory + plugin-MCP isolation + per-teammate backend routing (Bedrock / custom endpoints, rebranded 2026-05-29) + graceful-termination-memory-flush + teammate-death-diagnostics + workflow-shape-composition-m0 + workflow-shape-composition-m1.5 + workflow-shape-composition-m2 + workflow-shape-composition-m3 + plan-gate-and-telemetry-hardening + shape-graphic-redesign
 **Next up**: workflow-shape-composition-**m3.5** (reshape a live/instantiated crew — apply `swap`/`drop` verbs to already-running teammates; touches broker live registry + M2 routing engine). Agreed ordering (Jerome): M0 done → M1.5 done → M2 done → M3 done → **M3.5 next**. *(M1 blessed-shape library + classifier reframed → repo-react policy; no longer a claude-crew milestone.)*
 
 ---
@@ -251,6 +251,24 @@ Makes crew shapes first-class, declarative, human-gated, and now adaptable. M0 s
 ## Product Journal
 
 *Running log of major milestones, direction shifts, and learnings. This is the organic lifecycle signal — no rigid phases, just observable history.*
+
+### 2026-06-29 — shape-graphic-redesign — Shipped
+
+Unified, roomier shape graphic across both Mission Control surfaces (live in-rail `TopologyGraph` and `ShapeProposalCard` proposal gate). Pure view-layer change plus one additive backend field; 1648 tests passing.
+
+**Delivered:**
+- **Shared zoom/pan modal substrate** — `fitToHost` / `applyTransform` / `bindPanZoom` / `renderInto` shared by two thin openers (`openTopologyModal` for live topology; `openProposalModal` for proposals). The double-rAF auto-fit (floor 0.05) fits even large 8+ node crews on open. Modal body uses `.zoom-surface` (flex:1), not `.topology-host` (the in-rail height cap that was pinning the body at 340px inside a 754px modal).
+- **`shapeToMermaidUnified(shape, {proposed})`** — client-side helper producing the same `.nodecard` foreignObject labels and `--edge-*` color tokens as the live topology; `.nodecard.proposed` dashed-accent variant for pending proposals. Renders through the existing `securityLevel:'strict'` + DOMPurify pipeline — no relaxation.
+- **Additive `shape` key on `/api/state` shape-proposals** — `shape_to_dict(p.shape)` serialized by `ui_server.py` alongside the retained `mermaid` key (back-compat; `list_pending_shapes` unaffected).
+- **Roomier in-rail host** — `clamp(220, 240+18·max(0,agents-3), 340)px`; `.topo-head` control row (title + subtitle + −/fit/+/expand).
+- **Responsive `.dash-grid` class** — replaces hardcoded `320px minmax(0,1fr)` JSX; `@media (max-width:1024px)` clamps rail to `clamp(220px, 22vw, 260px)`. Two-pane preserved.
+
+**No scope creep**: all routing/XSS invariants preserved. Multi-instance LEADER invariant preserved (no new per-instance fetch in the proposal modal). 18 ATs, 75 Playwright dashboard tests + 3 backend payload tests, 1648 full-suite green (exit 0).
+
+- Advances criteria: 4 (live observability — roomier, more legible shape graphic)
+- Learnings: `dashboard.html`-touching tasks must run the full `-m dashboard` suite in their `testCommand`; "pre-existing" classification requires a master baseline, not `git stash` (cycle-0 build mis-labeled 4 real regressions; coordinator caught at cycle-1).
+- Vision shift: none — on track.
+- Pipeline impact: none; M3.5 remains next.
 
 ### 2026-06-13 — Workflow Shape Composition M2 — Shipped
 

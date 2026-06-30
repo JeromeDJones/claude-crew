@@ -396,6 +396,90 @@ The Mission Control dashboard (`ui_server.py`) is not single-instance. One insta
 
 ---
 
+## Dashboard Shape Graphic (`shape-graphic-redesign`, 2026-06-29)
+
+Unified roomier shape graphic across both Mission Control surfaces: the live in-rail `TopologyGraph` and the `ShapeProposalCard` proposal gate. Pure view-layer change (`dashboard.html`) plus one additive backend field (`ui_server.py`). All routing/XSS invariants preserved.
+
+### Files touched
+
+- `claude_crew/ui/dashboard.html` — CSS, globally-scoped JS substrate, React component changes
+- `claude_crew/ui_server.py` — additive `"shape": shape_to_dict(p.shape)` key on `/api/state` shape-proposal entries
+
+### Shared zoom/pan modal substrate
+
+Globally-scoped vanilla JS functions shared by both modal openers:
+
+| Function | Responsibility |
+|----------|---------------|
+| `fitToHost(hostEl)` | Measures SVG at `scale(1)`, computes largest zoom fitting the host (`w-24`, `h-24`); floor **0.05** (not the old 0.3 — must be low enough for large 8+ node crews); writes `dataset.zoom/tx/ty`; calls `applyTransform`. |
+| `applyTransform(hostEl)` | Applies `translate(tx,ty) scale(z)` on `.pan-layer`; updates zoom %-label to `Math.round(z*100)+'%'` (ACTUAL zoom — never hardcoded). |
+| `bindPanZoom(hostEl)` | Wheel=zoom (clamp `[0.25, 4]`), mousedown/move/up=pan, `no-anim` class during gesture. `panZoomBoundRef` guard prevents double-bind in React strict mode. |
+| `renderInto(hostEl, src, edgeStats)` | Renders mermaid source → wraps SVG in `.pan-layer` → DOMPurify sanitizes → decorates edges via `mapEdgeStatsToPaths` → double-rAF auto-fit (`requestAnimationFrame(() => requestAnimationFrame(() => fitToHost(host)))` — a single rAF reads the host before its flex height settles). |
+
+Two thin openers share this substrate:
+
+| Opener | Mermaid source | Edge decoration |
+|--------|---------------|----------------|
+| `openTopologyModal()` | Live `mermaidSrc` from `window._topoModalData`; `topology_edge_stats` from the same snapshot | Runtime mode (`direct`/`tee`/`gated`/`tripped`); edge click dispatches `/edge-log` |
+| `openProposalModal(proposal)` | `shapeToMermaidUnified(proposal.shape, {proposed:true})` | Declared mode only (no `tripped` — a runtime circuit-breaker concept absent pre-instantiation); no new per-instance fetch |
+
+**Invariant — `.modal-body` must use `.zoom-surface`, never `.topology-host`.** `.topology-host` carries the in-rail height cap (`max-height: 340px`); using it inside the modal body caused the 340px-stuck-in-754px-modal layout bug (body clipped, footer unpinned). `.zoom-surface` uses `flex: 1` to fill the modal body correctly.
+
+**Invariant — double-rAF auto-fit.** A single `requestAnimationFrame` fires before the modal's flex layout completes; the second rAF guarantees the measurement is post-layout. Pattern: `renderInto` fires `requestAnimationFrame(() => requestAnimationFrame(() => fitToHost(host)))`.
+
+### `shapeToMermaidUnified(shape, {proposed})` client helper
+
+Produces a `graph TD` mermaid source string using the same `.nodecard` foreignObject labels as the live `TopologyGraph`. Gated edges are expanded through `lead` (sender→lead→receiver), matching the live `displayEdges` gated-bridge expansion. `proposed:true` adds `.nodecard.proposed` on each node card.
+
+**`.nodecard.proposed` CSS variant**: `border-style: dashed; border-color: var(--accent-line); background: var(--bg-1)`. Dot opacity lowered to 0.6 to distinguish from live nodes. The `class` attribute survives mermaid's foreignObject sanitization (DOMPurify `ADD_ATTR` list already included `class`).
+
+**XSS invariant**: `shapeToMermaidUnified` feeds `renderInto`, which uses `mermaid.initialize({securityLevel:'strict'})` + the existing DOMPurify sanitize config unchanged. No new renderer introduced, no sanitize config relaxed. AT-15 and `tests/dashboard/test_dashboard_artifact_xss.py` are non-regression guards.
+
+### `/api/state` additive `shape` key on shape-proposal entries
+
+`ui_server.py` serializes `"shape": shape_to_dict(p.shape)` in the `shape_proposals` list comprehension inside `_build_local_instance` (line 454), alongside the retained `"mermaid"` key. The existing `mermaid` key is kept for back-compat — `list_pending_shapes` (`server.py`) reads it and is unaffected. `shape_to_dict` already existed in `shapes.py` as the JSON-ready inverse of `parse_shape`; the payload change is a one-line import + call.
+
+**Multi-instance LEADER invariant**: `openProposalModal` reads `proposal.shape` from the already-aggregated `/api/state` response; it introduces NO new per-instance endpoint. The multi-instance rule ("any new lazy-fetch endpoint must carry `crew_id` and proxy") is not triggered because no new endpoint is added.
+
+### In-rail topology host changes
+
+- **`.topo-head`** control row above the topology host: title span, subtitle span, `.ctrls` with `−`/`fit`/z-label/`+`/expand buttons.
+- **Roomier host**: inline `height` style set to `clamp(220, 240 + 18·max(0, agents−3), 340)px`. A 3-agent crew → 240px (unchanged from before); 6-agent crew → 294px; 8+ agents → 340px cap.
+- **`window._topoModalData`** updated after each render with `{mermaidSrc, edgeStats, subtitle, crewId, branch}` so `openTopologyModal` always reads fresh data.
+- **SVG wrapper change**: SVG is now wrapped in a `.pan-layer` div (not appended directly), enabling CSS transform-based pan/zoom. The edge-decoration `useEffect` still operates on the same `svgEl` regardless of the wrapper — no behavior change.
+
+### Responsive `.dash-grid` class
+
+Replaces the hardcoded `gridTemplateColumns: "320px minmax(0, 1fr)"` JSX inline style in `MissionControlLayout` with a `className="dash-grid"` + CSS class:
+
+```css
+.dash-grid {
+  flex: 1; display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  min-height: 0;
+}
+@media (max-width: 1024px) {
+  .dash-grid { grid-template-columns: clamp(220px, 22vw, 260px) minmax(0, 1fr); }
+  .dash-grid .nodecard { min-width: 72px; }
+  .dash-grid .roster-row { /* tightened padding */ }
+}
+```
+
+Two-pane layout preserved at all supported widths — no drawer, no single-column collapse. The per-agent column grid (`gridTemplateColumns: repeat(${agents.length}, minmax(220px, 1fr))` inside the agent columns panel) is a distinct, unrelated CSS property and is untouched.
+
+**AT-18 structural guard**: the deletion-detector greps for the FULL inline JSX form `gridTemplateColumns: "320px minmax(0, 1fr)"` (prefix + quotes) — deliberately distinct from the CSS property `grid-template-columns: 320px minmax(0, 1fr)` (the legitimate CSS default track). This prevents false-fails while ensuring any reversion to the inline JSX style is detected.
+
+### Preserved invariants
+
+The following were explicitly non-regressed by the shape-graphic-redesign:
+
+- **`window.mapEdgeStatsToPaths` BC-03 keyed lookup** — untouched; `tests/test_unified_topology_keyed_lookup.py` AT-5/AT-6 stay green.
+- **`displayEdges` gated-bridge `_source` back-refs** — `segment._source || segment` pattern preserved.
+- **`/edge-log/` fetch + `promote-to-gated` control** — both literal strings covered by AT-8 structural guard in `test_topology_zoom_modal.py`.
+- **Edge-decoration `useEffect`** (status border + 1.6s pulse + per-mode stroke) — preserved; the SVG wrapper change (`.pan-layer`) does not affect the decoration, which operates on the same `svgEl`.
+
+---
+
 ## Test Conventions
 
 - `conftest.py` auto-sets `CLAUDE_CREW_TEAMMATE_MODE=stub` and `CLAUDE_CREW_TRANSCRIPT_DISABLED=1`.

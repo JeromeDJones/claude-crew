@@ -66,6 +66,8 @@
     .nodecard.waiting  { border-color: var(--st-waiting); }
     .nodecard.idle     { border-color: var(--line); }
     .nodecard.lead     { border-color: var(--accent-line); background: var(--bg-2); }
+    .nodecard.proposed { border-color: var(--accent-line); border-style: dashed; background: var(--bg-1); }
+    .nodecard.proposed .ndot { background: var(--accent); opacity: 0.6; }
     .nodecard .row1 {
       display: flex; align-items: center; gap: 6px;
       font-weight: 600; font-size: 12px; color: var(--fg-0);
@@ -93,6 +95,131 @@
       0%   { stroke-width: 6px; }
       100% { stroke-width: var(--edge-stroke-w, 2.5px); }
     }
+
+    /* === Zoom/Pan substrate — topo-head, topo-btn, zoom-surface, modal ===
+       Faithful to doc/design/mockups/shape-graphic-redesign-mock.html */
+
+    /* Control row above the in-rail topology host. */
+    .topo-head {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .topo-head .title {
+      font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--fg-2);
+    }
+    .topo-head .subtitle {
+      font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-2);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0; flex: 1;
+    }
+    .topo-head .ctrls { display: flex; gap: 3px; flex-shrink: 0; }
+    .topo-btn {
+      width: 22px; height: 22px;
+      background: var(--bg-0); border: 1px solid var(--line-soft);
+      border-radius: 3px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--fg-2); font-size: 13px; font-weight: 600;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+    .topo-btn:hover { background: var(--bg-2); color: var(--fg-0); }
+    .topo-btn.expand { width: 26px; }
+    .topo-btn svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.75; }
+
+    /* Pan/zoom behavior — shared by in-rail host AND the modal body.
+       Split from .topology-host so .modal-body can use flex:1 without
+       inheriting the in-rail height cap (the 340px-stuck-in-754px-modal bug). */
+    .zoom-surface {
+      position: relative;
+      overflow: hidden;
+      cursor: grab;
+    }
+    .zoom-surface.dragging { cursor: grabbing; }
+    .zoom-surface .pan-layer {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      transform-origin: center center;
+      transition: transform 0.12s ease;
+      will-change: transform;
+    }
+    .zoom-surface.no-anim .pan-layer { transition: none; }
+    .zoom-surface svg { display: block; max-width: none; max-height: none; }
+
+    /* In-rail topology host — sizing-only (composes with .zoom-surface).
+       Grows from 220→340px with crew size; modal does NOT use this class. */
+    .topology-host {
+      background: var(--bg-0);
+      border: 1px solid var(--line-soft);
+      border-radius: 4px;
+      min-height: 220px;
+      max-height: 340px;
+    }
+
+    /* Zoom/Pan modal — reused by live-topology expand and shape-gate proposal. */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 1000;
+      background: oklch(0.10 0.04 240 / 0.55);
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px;
+    }
+    .modal {
+      width: 100%; height: 100%;
+      max-width: 1480px; max-height: 92vh;
+      background: var(--bg-0); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: 0 16px 64px oklch(0.10 0.04 240 / 0.5);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .modal-head {
+      height: 48px; flex-shrink: 0;
+      padding: 0 18px;
+      display: flex; align-items: center; gap: 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--bg-1);
+    }
+    .modal-head .title { font-size: 13px; font-weight: 600; color: var(--fg-0); }
+    .modal-head .subtitle { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-2); }
+    .modal-head .spacer { flex: 1; }
+    .modal-head .ctrls { display: flex; gap: 4px; align-items: center; }
+    .modal-head .ctrls .z-label {
+      width: 50px; text-align: center;
+      font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-1);
+    }
+    .modal-head .close-btn {
+      width: 28px; height: 28px;
+      background: none; border: 1px solid var(--line);
+      border-radius: 4px; cursor: pointer; color: var(--fg-2);
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-left: 8px;
+    }
+    .modal-head .close-btn:hover { background: var(--bg-2); color: var(--fg-0); }
+    .modal-body {
+      flex: 1; position: relative;
+      background:
+        linear-gradient(var(--bg-1) 1px, transparent 1px) 0 0 / 24px 24px,
+        linear-gradient(90deg, var(--bg-1) 1px, transparent 1px) 0 0 / 24px 24px,
+        var(--bg-0);
+      overflow: hidden;
+      cursor: grab;
+      min-height: 0;
+    }
+    .modal-body.dragging { cursor: grabbing; }
+    .modal-body .pan-layer {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      transform-origin: center center;
+      transition: transform 0.12s ease;
+      will-change: transform;
+    }
+    .modal-body.no-anim .pan-layer { transition: none; }
+    .modal-foot {
+      flex-shrink: 0; min-height: 56px; max-height: 50vh;
+      padding: 12px 18px;
+      border-top: 1px solid var(--line);
+      background: var(--bg-1);
+      display: flex; align-items: center; gap: 12px;
+      overflow-y: auto;
+    }
+    .modal-foot .actions { display: flex; gap: 8px; flex-shrink: 0; }
 
     html, body, #root {
       height: 100%;
@@ -513,6 +640,21 @@
        sits over the panel edge rather than covering left-aligned content. */
     .drawer-resize-handle { position: absolute; left: -3px; top: 0; height: 100%; width: 8px; cursor: ew-resize; z-index: 2; }
     .drawer-resize-handle:hover, .drawer-resize-handle.dragging { background: var(--accent-soft); }
+    /* === Responsive two-pane grid (replaces MissionControlLayout hardcoded inline style) === */
+    /* Base: standard 320px left-rail at wide viewports. */
+    .dash-grid {
+      flex: 1; display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      min-height: 0;
+    }
+    /* At ≤1024px: fluidize the left rail — two-pane preserved, no drawer, no single-column. */
+    @media (max-width: 1024px) {
+      .dash-grid {
+        grid-template-columns: clamp(220px, 22vw, 260px) minmax(0, 1fr);
+      }
+      .dash-grid .nodecard { min-width: 72px; padding: 5px 8px 4px; }
+      .dash-grid .roster-row { padding: 6px 10px 6px 14px; }
+    }
   </style>
 </head>
 <body>
@@ -1785,18 +1927,24 @@
           });
           const svgEl = holder.querySelector('svg');
           if (!svgEl) return;
-          // Constrain SVG to its host (overflow:hidden on .topology-host)
-          // so the mermaid graph cannot bleed UPWARD into the roster region
-          // above (which would intercept .roster-row clicks).
-          svgEl.style.width = '100%';
-          svgEl.style.height = '100%';
-          svgEl.style.maxWidth = '100%';
-          svgEl.style.maxHeight = '100%';
+          // SVG is unconstrained — the .pan-layer centers it; .topology-host
+          // overflow:hidden clips it. Width/height attrs removed so the SVG
+          // takes its natural viewBox size and fitToHost can measure it at scale=1.
+          svgEl.style.maxWidth = 'none';
+          svgEl.style.maxHeight = 'none';
           svgEl.removeAttribute('width');
           svgEl.removeAttribute('height');
           svgEl.style.display = 'block';
+          // Wrap in .pan-layer for the zoom/pan substrate.
+          const panDiv = document.createElement('div');
+          panDiv.className = 'pan-layer';
+          panDiv.appendChild(svgEl);
           containerRef.current.innerHTML = '';
-          containerRef.current.appendChild(svgEl);
+          containerRef.current.appendChild(panDiv);
+          // Re-apply current transform so zoom/pan state survives re-render.
+          if (typeof applyTransform === 'function') applyTransform(containerRef.current);
+          // Keep modal data fresh with latest state.
+          window._topoModalData = { mermaidSrc, edgeStats, subtitle, crewId, branch: cli.branch || '' };
 
           // ── EDGE DECORATION ──
           if (isRoster) {
@@ -1864,6 +2012,20 @@
         return () => { cancelled = true; };
       }, [mermaidSrc, crewId, isRoster, displayEdges]);
 
+      // Once-on-mount: initialise pan/zoom on the in-rail topology host.
+      // Empty deps = runs once; the panZoomBoundRef guard prevents double-binding
+      // in React strict mode double-invoke.
+      const panZoomBoundRef = useRef(false);
+      useEffect(() => {
+        const container = containerRef.current;
+        if (!container || panZoomBoundRef.current) return;
+        panZoomBoundRef.current = true;
+        if (!container.dataset.zoom) container.dataset.zoom = '1';
+        if (!container.dataset.tx)   container.dataset.tx   = '0';
+        if (!container.dataset.ty)   container.dataset.ty   = '0';
+        if (typeof bindPanZoom === 'function') bindPanZoom(container);
+      }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
       // POST /edge-promote. crewId in path = multi-instance correct.
       const promoteEdge = (es) => {
         const key = `${es.from_slot}→${es.to_slot}`;
@@ -1888,15 +2050,24 @@
         ['tripped', 'var(--edge-tripped)'],
       ];
 
+      const railH = Math.min(340, Math.max(220, 240 + 18 * Math.max(0, agents.length - 3)));
       return (
         <div className="topology-graph" style={{ padding: "12px 16px", display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: 420, minHeight: 0 }}>
-          <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-2)", marginBottom: 4 }}>
-            Topology
+          <div className="topo-head">
+            <span className="title">Topology</span>
+            <span className="subtitle">{subtitle}</span>
+            <span className="ctrls">
+              <button className="topo-btn" onClick={() => zoomBy('topo-host', 1/1.25)} title="Zoom out">−</button>
+              <button className="topo-btn" onClick={() => resetZoom('topo-host')} title="Fit to host">fit</button>
+              <span id="z-label-topo-host" style={{ minWidth: 40, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--fg-2)' }}>100%</span>
+              <button className="topo-btn" onClick={() => zoomBy('topo-host', 1.25)} title="Zoom in">+</button>
+              <button className="topo-btn expand" onClick={openTopologyModal} title="Expand to full view">
+                <svg viewBox="0 0 16 16"><path d="M3 3 L7 3 M3 3 L3 7 M13 3 L9 3 M13 3 L13 7 M3 13 L7 13 M3 13 L3 9 M13 13 L9 13 M13 13 L13 9"/></svg>
+              </button>
+            </span>
           </div>
-          <div className="topology-subtitle" style={{ fontSize: 12, color: "var(--fg-2)", marginBottom: 8, minHeight: 16 }}>
-            {subtitle}
-          </div>
-          <div ref={containerRef} className="topology-host" style={{ flex: "0 1 auto", overflow: "hidden", minHeight: 120, maxHeight: 240 }} />
+          <div ref={containerRef} id="topo-host" className="topology-host zoom-surface"
+               style={{ height: railH }} />
           {/* Legend hidden in roster fallback (no modes to legend). */}
           {!isRoster && (
             <div className="topology-legend" style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
@@ -2022,6 +2193,287 @@
     // components were removed when TopologyGraph subsumed both layers
     // (activity on node border, routing on edges). The mount-site in
     // MissionControlLayout was retargeted to <TopologyGraph .../>.
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Shared Zoom/Pan Modal substrate
+    // Faithful to doc/design/mockups/shape-graphic-redesign-mock.html
+    // fitToHost floor=0.05 (NOT 0.3) so large crews fit in the modal body.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function updateZLabel(hostEl) {
+      const label = document.getElementById('z-label-' + hostEl.id);
+      if (label) {
+        const z = parseFloat(hostEl.dataset.zoom) || 1;
+        label.textContent = Math.round(z * 100) + '%';
+      }
+    }
+
+    function applyTransform(hostEl) {
+      const pan = hostEl.querySelector('.pan-layer');
+      if (!pan) return;
+      const z = parseFloat(hostEl.dataset.zoom) || 1;
+      const tx = parseFloat(hostEl.dataset.tx) || 0;
+      const ty = parseFloat(hostEl.dataset.ty) || 0;
+      pan.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
+      updateZLabel(hostEl);
+    }
+
+    function zoomBy(hostId, factor) {
+      const host = document.getElementById(hostId);
+      if (!host) return;
+      const cur = parseFloat(host.dataset.zoom) || 1;
+      host.dataset.zoom = Math.min(4, Math.max(0.1, cur * factor));
+      applyTransform(host);
+    }
+
+    function resetZoom(hostId) {
+      const host = document.getElementById(hostId);
+      if (!host) return;
+      host.dataset.zoom = 1; host.dataset.tx = 0; host.dataset.ty = 0;
+      applyTransform(host);
+      fitToHost(host);
+    }
+
+    // Floor 0.05 (NOT 0.3) — large crews must fit inside the modal body;
+    // 0.3 prevented full fit. Detail then comes from zoom-in/pan.
+    function fitToHost(hostEl) {
+      const pan = hostEl.querySelector('.pan-layer');
+      const svg = pan && pan.querySelector('svg');
+      if (!svg) return;
+      const hostBox = hostEl.getBoundingClientRect();
+      // Measure SVG at scale=1 so fit math sees the natural size.
+      const savedT = pan.style.transform;
+      pan.style.transform = 'scale(1)';
+      const svgBox = svg.getBoundingClientRect();
+      pan.style.transform = savedT;
+      if (svgBox.width === 0 || hostBox.width === 0) return;
+      const fitZ = Math.min(
+        (hostBox.width  - 24) / svgBox.width,
+        (hostBox.height - 24) / svgBox.height,
+        1.0
+      );
+      hostEl.dataset.zoom = Math.max(0.05, fitZ);
+      hostEl.dataset.tx = 0; hostEl.dataset.ty = 0;
+      applyTransform(hostEl);
+    }
+
+    function bindPanZoom(hostEl) {
+      hostEl.addEventListener('wheel', (ev) => {
+        ev.preventDefault();
+        const factor = ev.deltaY > 0 ? 1/1.1 : 1.1;
+        const cur = parseFloat(hostEl.dataset.zoom) || 1;
+        hostEl.dataset.zoom = Math.min(4, Math.max(0.25, cur * factor));
+        hostEl.classList.add('no-anim');
+        applyTransform(hostEl);
+        setTimeout(() => hostEl.classList.remove('no-anim'), 60);
+      }, { passive: false });
+      let dragging = false; let sx, sy, stx, sty;
+      hostEl.addEventListener('mousedown', (ev) => {
+        dragging = true; sx = ev.clientX; sy = ev.clientY;
+        stx = parseFloat(hostEl.dataset.tx) || 0;
+        sty = parseFloat(hostEl.dataset.ty) || 0;
+        hostEl.classList.add('dragging', 'no-anim');
+      });
+      window.addEventListener('mousemove', (ev) => {
+        if (!dragging) return;
+        hostEl.dataset.tx = stx + (ev.clientX - sx);
+        hostEl.dataset.ty = sty + (ev.clientY - sy);
+        applyTransform(hostEl);
+      });
+      window.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        hostEl.classList.remove('dragging', 'no-anim');
+      });
+    }
+
+    // renderInto: render mermaid src into hostEl wrapped in .pan-layer,
+    // decorate edges, auto-fit via double-rAF (modal flex layout settles first).
+    function renderInto(hostEl, src, edgeStats) {
+      const uid = 'modal-' + Math.random().toString(36).slice(2);
+      mermaid.render(uid, src).then(({ svg }) => {
+        const pan = document.createElement('div');
+        pan.className = 'pan-layer';
+        pan.innerHTML = DOMPurify.sanitize(svg, {
+          USE_PROFILES: { svg: true, svgFilters: true },
+          ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br', 'style'],
+          ADD_ATTR: ['style', 'class', 'xmlns'],
+          FORBID_TAGS: ['script', 'image', 'a', 'iframe', 'object', 'embed'],
+          FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur'],
+        });
+        const svgEl = pan.querySelector('svg');
+        if (svgEl) {
+          svgEl.style.maxWidth = 'none';
+          svgEl.style.maxHeight = 'none';
+          svgEl.removeAttribute('width');
+          svgEl.removeAttribute('height');
+        }
+        hostEl.innerHTML = '';
+        hostEl.appendChild(pan);
+
+        // Decorate edges: gated expansion + keyed lookup (same as in-rail).
+        if (svgEl && edgeStats && edgeStats.length > 0 && window.mapEdgeStatsToPaths) {
+          const displayEdges = [];
+          (edgeStats || []).forEach(es => {
+            if (es.mode === 'gated' && es.from_slot !== 'lead' && es.to_slot !== 'lead') {
+              displayEdges.push({ from_slot: es.from_slot, to_slot: 'lead', mode: 'gated', exchanges: es.exchanges, tripped: es.tripped, _source: es });
+              displayEdges.push({ from_slot: 'lead', to_slot: es.to_slot, mode: 'gated', exchanges: es.exchanges, tripped: es.tripped, _source: es });
+            } else {
+              displayEdges.push(es);
+            }
+          });
+          const pathToEdge = window.mapEdgeStatsToPaths(svgEl, displayEdges);
+          pathToEdge.forEach((segment, path) => {
+            const colour = segment.tripped              ? 'var(--edge-tripped)'
+                         : segment.mode === 'gated'     ? 'var(--edge-gated)'
+                         : segment.mode === 'tee'       ? 'var(--edge-tee)'
+                         :                                'var(--edge-direct)';
+            path.style.stroke = colour;
+            path.style.strokeWidth = segment.tripped ? '3px' : '2.5px';
+            path.style.cursor = 'pointer';
+          });
+        }
+
+        // Double-rAF: modal body lays out via flex:1 after head/foot resolve;
+        // a single rAF reads the host before its real height is in place.
+        requestAnimationFrame(() => requestAnimationFrame(() => fitToHost(hostEl)));
+      }).catch(err => { console.warn('[topology-modal] mermaid render failed', err); });
+    }
+
+    function openTopologyModal() {
+      const data = window._topoModalData || {};
+      const { mermaidSrc, edgeStats, subtitle: sub, crewId: crew, branch } = data;
+      const mount = document.getElementById('topology-modal');
+      if (!mount) return;
+      mount.style.display = '';
+      // Escape subtitle/branch for safe HTML injection
+      const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      mount.innerHTML = `
+        <div class="modal-backdrop" onclick="if(event.target===this)closeTopologyModal()">
+          <div class="modal">
+            <div class="modal-head">
+              <span class="title">Topology</span>
+              <span class="subtitle">${esc(sub)}</span>
+              <span class="spacer"></span>
+              <span class="ctrls">
+                <button class="topo-btn" onclick="zoomBy('modal-host',1/1.25)">−</button>
+                <button class="topo-btn" onclick="resetZoom('modal-host')">fit</button>
+                <span class="z-label" id="z-label-modal-host">100%</span>
+                <button class="topo-btn" onclick="zoomBy('modal-host',1.25)">+</button>
+              </span>
+              <button class="close-btn" onclick="closeTopologyModal()">✕</button>
+            </div>
+            <div class="modal-body zoom-surface" id="modal-host" data-zoom="1" data-tx="0" data-ty="0"></div>
+            <div class="modal-foot">
+              <div style="flex:1;font-family:var(--font-mono);font-size:11px;color:var(--fg-3);">
+                <span><strong style="color:var(--fg-1)">branch</strong> ${esc(branch)}</span>
+              </div>
+              <div class="actions">
+                <button class="topo-btn" style="width:auto;padding:0 12px;" onclick="closeTopologyModal()">Close</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const host = document.getElementById('modal-host');
+      if (!host) return;
+      bindPanZoom(host);
+      if (mermaidSrc) renderInto(host, mermaidSrc, edgeStats || []);
+      document.addEventListener('keydown', _escListenerTopology);
+    }
+
+    function closeTopologyModal() {
+      const m = document.getElementById('topology-modal');
+      if (!m) return;
+      m.innerHTML = ''; m.style.display = 'none';
+      document.removeEventListener('keydown', _escListenerTopology);
+    }
+
+    function _escListenerTopology(ev) { if (ev.key === 'Escape') closeTopologyModal(); }
+
+    // ── shapeToMermaidUnified ────────────────────────────────────────────────
+    // Generate mermaid source for a shape proposal using the same .nodecard
+    // foreignObject label HTML as the live TopologyGraph — both surfaces share
+    // one visual language. When proposed=true nodes carry .nodecard.proposed
+    // (dashed accent border). Edge colors use the same --edge-* CSS tokens.
+    function shapeToMermaidUnified(shape, { proposed = false } = {}) {
+      const nodeCls = proposed ? 'proposed' : 'idle';
+      function _nl(r1, r2, cls) {
+        return `<div class='nodecard ${cls}'><div class='row1'><span class='ndot'></span>${r1}</div><div class='row2'>${r2}</div></div>`;
+      }
+      // Gated edges route through lead (mirrors live topology displayEdges expansion).
+      const displayEdges = (shape.edges || []).flatMap(e =>
+        e.mode === 'gated'
+          ? [{ from: e.from, to: 'lead', mode: 'gated' }, { from: 'lead', to: e.to, mode: 'gated' }]
+          : [{ from: e.from, to: e.to, mode: e.mode }]
+      );
+      const lines = ['graph TD'];
+      lines.push(`  lead["${_nl('lead', '', 'lead')}"]`);
+      (shape.nodes || []).forEach(n => {
+        lines.push(`  ${n.slot}["${_nl(n.slot, n.role || '', nodeCls)}"]`);
+      });
+      displayEdges.forEach(e => {
+        lines.push(`  ${e.from} -->|"${e.mode}"| ${e.to}`);
+      });
+      return lines.join('\n');
+    }
+
+    // ── Proposal modal (shared zoom/pan substrate, proposal opener) ──────────
+    // Opens the shared zoom/pan modal for a shape proposal. Renders the
+    // structured shape via shapeToMermaidUnified + the existing renderInto
+    // pipeline (mermaid securityLevel:'strict' + DOMPurify unchanged).
+    // No new per-instance fetch — consumes the structured shape already on
+    // /api/state, preserving the multi-instance LEADER invariant.
+    function openProposalModal(proposal) {
+      const shape = proposal.shape || {};
+      const mount = document.getElementById('proposal-modal');
+      if (!mount) return;
+      const mermaidSrc = shapeToMermaidUnified(shape, { proposed: true });
+      // Convert shape edges to the EdgeStat-like format renderInto expects.
+      // Gated expansion happens inside renderInto; tripped is never set for proposals.
+      const edgeStats = (shape.edges || []).map(e => ({
+        from_slot: e.from,
+        to_slot: e.to,
+        mode: e.mode,
+        exchanges: 0,
+        tripped: false,
+      }));
+      mount.style.display = '';
+      mount.innerHTML = `
+        <div class="modal-backdrop" onclick="if(event.target===this)closeProposalModal()">
+          <div class="modal">
+            <div class="modal-head">
+              <span class="title">Shape Gate — proposal</span>
+              <span class="subtitle">${proposal.shape_id || ''}</span>
+              <span class="spacer"></span>
+              <span class="ctrls">
+                <button class="topo-btn" onclick="zoomBy('prop-host',1/1.25)">−</button>
+                <span class="z-label" id="z-label-prop-host">100%</span>
+                <button class="topo-btn" onclick="zoomBy('prop-host',1.25)">+</button>
+              </span>
+              <button class="close-btn" onclick="closeProposalModal()">✕</button>
+            </div>
+            <div class="modal-body zoom-surface" id="prop-host" data-zoom="1" data-tx="0" data-ty="0"></div>
+            <div class="modal-foot">
+              <div class="meta" style="font-size:11px;color:var(--fg-2);font-family:var(--font-mono);">
+                crew: ${proposal.crew_id || ''}
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const host = document.getElementById('prop-host');
+      bindPanZoom(host);
+      renderInto(host, mermaidSrc, edgeStats);
+      document.addEventListener('keydown', _escListenerProposal);
+    }
+
+    function closeProposalModal() {
+      const m = document.getElementById('proposal-modal');
+      if (!m) return;
+      m.innerHTML = ''; m.style.display = 'none';
+      document.removeEventListener('keydown', _escListenerProposal);
+    }
+
+    function _escListenerProposal(ev) { if (ev.key === 'Escape') closeProposalModal(); }
 
     // Render a stored tool-output body nicely. The body is the raw SDK tool
     // response (often a JSON envelope). Parse it and surface the useful text;
@@ -2629,20 +3081,13 @@
     }
 
     // --- Shape Gate Panel ---
-    // ShapeProposalCard: renders one pending proposal as a mermaid DAG with
-    // Approve/Decline controls. Reuses the existing renderMermaidBlocks pipeline
-    // (wraps the mermaid source in pre > code.language-mermaid so the function
-    // finds it via its DOM walk, then calls it via a ref callback after mount).
+    // ShapeProposalCard: renders one pending proposal as a preview thumbnail.
+    // Clicking the thumbnail opens the shared zoom/pan modal via openProposalModal(),
+    // which renders the shape through shapeToMermaidUnified + the existing
+    // mermaid securityLevel:'strict' + DOMPurify pipeline unchanged.
     function ShapeProposalCard({ proposal }) {
       const [busy, setBusy] = React.useState(false);
       const [resolved, setResolved] = React.useState(false);
-
-      // Ref callback: fires once after mount when el is non-null. By then, the
-      // pre > code.language-mermaid child is already in the DOM, so
-      // renderMermaidBlocks can find and replace it with the rendered SVG.
-      const mermaidRef = React.useCallback((el) => {
-        if (el) renderMermaidBlocks(el);
-      }, []);  // proposal.shape_id is stable per card; no dep needed
 
       if (resolved) return null;
 
@@ -2664,64 +3109,72 @@
           className="shape-proposal-card"
           data-shape-id={proposal.shape_id}
           style={{
-            display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 16,
+            display: 'flex', flexDirection: 'column', gap: 10,
             padding: '12px 16px',
             background: 'var(--bg-1)',
             borderRadius: 6,
             border: '1px solid var(--line)',
           }}
         >
-          {/* Mermaid DAG — rendered via the existing renderMermaidBlocks pipeline */}
+          {/* Preview thumbnail — click opens the shared zoom/pan modal */}
           <div
-            className="shape-proposal-diagram"
-            ref={mermaidRef}
-            style={{ flex: '0 0 auto', minWidth: 180, maxWidth: 420 }}
+            className="shape-proposal-thumbnail"
+            onClick={() => openProposalModal(proposal)}
+            style={{
+              cursor: 'pointer',
+              border: '1px solid var(--line-soft)',
+              borderRadius: 4,
+              overflow: 'hidden',
+              background: 'var(--bg-0)',
+              minHeight: 80,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11, color: 'var(--fg-3)',
+              userSelect: 'none',
+            }}
+            title="Click to preview shape"
           >
-            <pre style={{ margin: 0 }}>
-              <code className="language-mermaid">{proposal.mermaid}</code>
-            </pre>
+            Click to preview shape
           </div>
-          {/* Metadata + controls */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
-              crew: {proposal.crew_id}
+          {/* Metadata */}
+          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+            crew: {proposal.crew_id}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
+            shape_id: {proposal.shape_id}
+          </div>
+          {proposal.adaptation_diff && (
+            <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
+              adaptation: {proposal.adaptation_diff}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--fg-2)', fontFamily: 'var(--font-mono)' }}>
-              shape_id: {proposal.shape_id}
-            </div>
-            {proposal.adaptation_diff && (
-              <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>
-                adaptation: {proposal.adaptation_diff}
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-              <button
-                className="shape-approve-btn"
-                onClick={() => decide('approve')}
-                disabled={busy}
-                style={{
-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
-                  background: busy ? 'var(--bg-2)' : '#166534',
-                  color: '#f0fdf4', border: 'none', borderRadius: 4,
-                  cursor: busy ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Approve
-              </button>
-              <button
-                className="shape-decline-btn"
-                onClick={() => decide('decline')}
-                disabled={busy}
-                style={{
-                  padding: '4px 14px', fontSize: 12, fontWeight: 600,
-                  background: busy ? 'var(--bg-2)' : '#991b1b',
-                  color: '#fff1f2', border: 'none', borderRadius: 4,
-                  cursor: busy ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Decline
-              </button>
-            </div>
+          )}
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button
+              className="shape-approve-btn"
+              onClick={() => decide('approve')}
+              disabled={busy}
+              style={{
+                padding: '4px 14px', fontSize: 12, fontWeight: 600,
+                background: busy ? 'var(--bg-2)' : '#166534',
+                color: '#f0fdf4', border: 'none', borderRadius: 4,
+                cursor: busy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Approve
+            </button>
+            <button
+              className="shape-decline-btn"
+              onClick={() => decide('decline')}
+              disabled={busy}
+              style={{
+                padding: '4px 14px', fontSize: 12, fontWeight: 600,
+                background: busy ? 'var(--bg-2)' : '#991b1b',
+                color: '#fff1f2', border: 'none', borderRadius: 4,
+                cursor: busy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Decline
+            </button>
           </div>
         </div>
       );
@@ -2903,7 +3356,7 @@
           />
           <InstanceStrip instances={instances} activeId={activeId} onSelect={setActiveId} readState={readState}/>
           <ShapeGatePanel instances={instances} open={gateOpen} onClose={onCloseGate} />
-          <div style={{ flex: 1, display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", minHeight: 0 }}>
+          <div className="dash-grid">
             <RosterRail
               liveAgents={liveAgents}
               selectedIds={selectedIds}
@@ -2959,6 +3412,10 @@
               onClose={() => setOpenArtifact(null)}
             />
           )}
+          {/* Topology expand modal mount — populated by openTopologyModal() */}
+          <div id="topology-modal" style={{ display: 'none' }} />
+          {/* Proposal modal mount — populated by openProposalModal() */}
+          <div id="proposal-modal" style={{ display: 'none' }} />
         </div>
       );
     }
