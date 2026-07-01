@@ -12,7 +12,7 @@ import copy
 import dataclasses
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Literal
@@ -1618,6 +1618,38 @@ class Broker:
         Unknown edges record a harmless override (no edge ever matches it).
         """
         self._edge_overrides[(from_slot, to_slot)] = "gated"
+
+    # --- reshape helpers (additive, M3-5) ---
+
+    def latest_topology(self) -> "Topology | None":
+        """Return the most-recently recorded Topology, or None if none exist.
+
+        Equivalent to ``self._topologies[-1] if self._topologies else None``.
+        Used by ``reshape_crew`` to inspect the current live topology before
+        applying overrides.
+        """
+        return self._topologies[-1] if self._topologies else None
+
+    def set_edge_override(self, from_slot: str, to_slot: str, mode: str) -> None:
+        """Write ``_edge_overrides[(from_slot, to_slot)] = mode``.
+
+        Generalises ``promote_edge`` (which forces ``'gated'``) to any mode
+        (``'gated'``, ``'tee'``, or ``'direct'``).  Idempotent — existing
+        entries are silently overwritten.  Unknown edges record a harmless
+        override (no live edge ever matches it until a topology with that pair
+        is instantiated).
+        """
+        self._edge_overrides[(from_slot, to_slot)] = mode
+
+    def remove_edge_overrides(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Remove each ``(from_slot, to_slot)`` key from ``_edge_overrides``.
+
+        Idempotent — absent keys are silently skipped.  After this call the
+        affected edges revert to the mode recorded in the active topology (if
+        any).
+        """
+        for pair in pairs:
+            self._edge_overrides.pop(pair, None)
 
     def get_tool_output(self, teammate_id: str, tool_use_id: str) -> "str | None":
         """Return the stored tool output for the given (teammate_id, tool_use_id) pair.
