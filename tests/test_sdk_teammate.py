@@ -3098,7 +3098,19 @@ class TestSdkTeammateMcpServersWiring:
         ))
         await _wait_for_lead_messages(broker, 1)
         opts = captured["options"]
-        assert opts.mcp_servers == {"local-x": {"type": "stdio", "command": "uv"}}
+        # D0 (M3.5): send_to is now wired unconditionally, so mcp_servers always
+        # contains _SEND_TO_MCP_SERVER_NAME in addition to pack-declared servers.
+        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
+        assert _SEND_TO_MCP_SERVER_NAME in (opts.mcp_servers or {}), (
+            f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
+            f"got keys: {sorted(opts.mcp_servers or {})}"
+        )
+        # Pack-declared inline-dict entry is still present.
+        assert "local-x" in (opts.mcp_servers or {}), (
+            f"Expected pack-declared 'local-x' in mcp_servers; "
+            f"got keys: {sorted(opts.mcp_servers or {})}"
+        )
+        assert (opts.mcp_servers or {})["local-x"] == {"type": "stdio", "command": "uv"}
 
     async def test_pack_string_name_resolves_via_patched_user_config(
         self, broker, monkeypatch,
@@ -3134,7 +3146,17 @@ class TestSdkTeammateMcpServersWiring:
         ))
         await _wait_for_lead_messages(broker, 1)
         opts = captured["options"]
-        assert opts.mcp_servers == {"atlassian": {"type": "http", "url": "https://x"}}
+        # D0 (M3.5): send_to always wired; pack-declared string-name entry also present.
+        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
+        assert _SEND_TO_MCP_SERVER_NAME in (opts.mcp_servers or {}), (
+            f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
+            f"got keys: {sorted(opts.mcp_servers or {})}"
+        )
+        assert "atlassian" in (opts.mcp_servers or {}), (
+            f"Expected pack-declared 'atlassian' in mcp_servers; "
+            f"got keys: {sorted(opts.mcp_servers or {})}"
+        )
+        assert (opts.mcp_servers or {})["atlassian"] == {"type": "http", "url": "https://x"}
 
     async def test_pack_no_mcp_servers_no_options_key(
         self, broker, monkeypatch,
@@ -3162,8 +3184,20 @@ class TestSdkTeammateMcpServersWiring:
         ))
         await _wait_for_lead_messages(broker, 1)
         opts = captured["options"]
-        # ClaudeAgentOptions defaults mcp_servers to {} via field(default_factory=dict).
-        assert opts.mcp_servers == {} or opts.mcp_servers is None
+        # D0 (M3.5): send_to is wired unconditionally — mcp_servers now always
+        # contains _SEND_TO_MCP_SERVER_NAME even when the pack declares no mcpServers.
+        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
+        mcp = opts.mcp_servers or {}
+        assert _SEND_TO_MCP_SERVER_NAME in mcp, (
+            f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
+            f"got keys: {sorted(mcp)}"
+        )
+        # No pack-declared server means exactly one key (the send_to server).
+        extra_keys = set(mcp) - {_SEND_TO_MCP_SERVER_NAME}
+        assert not extra_keys, (
+            f"Expected no extra mcp_servers beyond {_SEND_TO_MCP_SERVER_NAME!r}; "
+            f"got extra: {sorted(extra_keys)}"
+        )
 
 
 class TestSdkTeammateMemoryWarn:
