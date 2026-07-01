@@ -164,25 +164,30 @@ async def _setup_base_crew(
 # Base shapes
 # ---------------------------------------------------------------------------
 
-# AT 17: 1-node base (impl/explorer).  Reshape adds reviewer/general + edge.
+# AT 17: 1-node base (impl/general).  Reshape adds reviewer/general + DIRECT edge.
 # Single node keeps spawn cost minimal; the post-reshape spawn is what we test.
+# impl uses the `general` role (an acting agent that reliably emits the send_to
+# tool call) rather than the read-only `explorer` role.
 _BASE_SHAPE_17: dict = {
     "name": "live-reshape-add-test",
     "description": "AT17 base: 1-node impl, no edges; reshape adds reviewer",
-    "nodes": [{"slot": "impl", "role": "explorer"}],
+    "nodes": [{"slot": "impl", "role": "general"}],
     "edges": [],
 }
 
-# AT 18: 2-node base (sender/explorer → worker/general).  Reshape swaps worker.
+# AT 18: 2-node base (sender/general → worker/general).  Reshape swaps worker.
+# The sender→worker edge is DIRECT (peer delivery) so send_to lands in the
+# recipient's inbox — a `gated` edge (the ShapeEdge default) would route the
+# message to LEAD instead, which is not what this guard asserts.
 # sender→worker edge is preserved after the swap so sender can call send_to.
 _BASE_SHAPE_18: dict = {
     "name": "live-reshape-swap-test",
     "description": "AT18 base: sender→worker crew; reshape swaps worker role",
     "nodes": [
-        {"slot": "sender", "role": "explorer"},
+        {"slot": "sender", "role": "general"},
         {"slot": "worker", "role": "general"},
     ],
-    "edges": [{"from_slot": "sender", "to_slot": "worker"}],
+    "edges": [{"from_slot": "sender", "to_slot": "worker", "mode": "direct"}],
 }
 
 
@@ -242,7 +247,9 @@ class TestLiveReshapeNoRespawnAdd:
                             "params": {
                                 "node": {"slot": "reviewer", "role": "general"},
                                 "edges": [
-                                    {"from_slot": "impl", "to_slot": "reviewer"}
+                                    # DIRECT so impl's send_to lands in reviewer's
+                                    # inbox (gated would route to LEAD instead).
+                                    {"from_slot": "impl", "to_slot": "reviewer", "mode": "direct"}
                                 ],
                             },
                             "base_shape_id": base_shape_id,
@@ -323,7 +330,9 @@ class TestLiveReshapeNoRespawnAdd:
                     broker,
                     recipient=reviewer_tid,
                     from_sender=impl_tid,
-                    timeout=120.0,
+                    # impl processes two turns (informing msg + this prompt) —
+                    # give real SDK turns headroom.
+                    timeout=180.0,
                 )
 
                 assert msg.payload, (
@@ -488,7 +497,7 @@ class TestLiveReshapeSwap:
                     broker,
                     recipient=worker_new_tid,
                     from_sender=sender_tid,
-                    timeout=120.0,
+                    timeout=180.0,
                 )
 
                 assert msg.payload, (
