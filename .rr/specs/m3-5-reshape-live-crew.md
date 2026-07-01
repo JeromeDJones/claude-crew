@@ -490,6 +490,7 @@ tasks:
     taskTouches:
       - "claude_crew/sdk_teammate.py"
       - "tests/test_scoped_send.py"
+      - "tests/test_sdk_teammate.py"
       - "tests/test_d0_send_to_unconditional.py"
     implementationKind: behavior-change
     testCommand: |
