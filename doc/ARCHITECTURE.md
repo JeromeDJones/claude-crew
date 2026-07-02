@@ -486,10 +486,11 @@ The following were explicitly non-regressed by the shape-graphic-redesign:
 ## Test Conventions
 
 - `conftest.py` auto-sets `CLAUDE_CREW_TEAMMATE_MODE=stub` and `CLAUDE_CREW_TRANSCRIPT_DISABLED=1`.
-- Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_live_stderr.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
+- Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_live_stderr.py`, `test_live_reshape.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
 - `asyncio.get_running_loop()`, never `asyncio.get_event_loop()` inside coroutines.
 - Bound unbounded async-iterator drains with `asyncio.wait_for(..., timeout=T)`.
 - HOME-monkeypatch tests must copy `~/.claude/.credentials.json` and `~/.claude.json` into the tmp HOME.
 - LLM-relayed sentinels: ≤12 hex characters (preferred) to avoid truncation/paraphrasing across the LLM relay boundary.
 - Full `uv run pytest` (not `-k` subset) when changing widely-consumed behavior.
 - **Tests that spawn a `claude_crew.cli` subprocess must allocate a free TCP port** using the `_get_free_port()` pattern (bind socket to port 0, read assigned ephemeral port, close; pass result as `CLAUDE_CREW_UI_PORT=<port>` in the subprocess environment). Do NOT rely on the default port 7821 — a live claude-crew MCP session holds it, preventing the subprocess from binding `UIServer` and completing registration. Canonical helper: `_get_free_port()` in `tests/test_shutdown_signals.py`.
+- **Live tests asserting teammate→teammate peer delivery must use `direct` edges.** Gated edges (the `ShapeEdge` default) route messages to the coordinator's inbox via `broker._send_routed`, not the recipient's inbox — a peer-delivery assertion against a gated edge will time out rather than fail fast. Verified 2026-06-30 (`test_live_reshape.py` AT-17/18): initial runs timed out because the test fixture used the default gated mode; switching to `direct` edges resolved it. See also [`m3-5-reshape-live-crew` validation report](.rr/reports/m3-5-reshape-live-crew-validation.md).
