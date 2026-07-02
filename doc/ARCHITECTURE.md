@@ -11,7 +11,7 @@ claude-crew is a local multi-agent orchestrator. A Claude Code session (the **le
 
 ### `claude_crew/server.py`
 
-FastMCP server. The only surface the lead touches. Exposes **17** MCP tools:
+FastMCP server. The only surface the lead touches. Exposes **18** MCP tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -32,6 +32,7 @@ FastMCP server. The only surface the lead touches. Exposes **17** MCP tools:
 | `list_pending_shapes` | Read pending proposals: returns `{ok:True, pending:[{shape_id, name, crew_id, mermaid, summary}]}`; empty list when none pending |
 | `instantiate_shape` | Spawn exactly the approved crew; pre-flight role resolution all-or-nothing via `factory.known_roles`; records a `Topology`; single-use per `shape_id` |
 | `adapt_shape` | Apply one adaptation verb (`add_node`/`swap`/`augment`/`set_gate`/`drop`) to a pre-instantiation base shape (pending/approved proposal or inline dict); resolves swap/augment roles via the same `factory.known_roles`/`resolve_role` seam as `instantiate_shape`; on success registers a new pending proposal with `adaptation_diff=diff.render()` — reusing the M1.5 gate verbatim; returns `{ok:True, shape_id, status:"pending", diff, shape}` or a staged `{ok:False, stage:...}` failure envelope; no proposal registered on any failure path |
+| `reshape_crew` | Apply one adaptation verb to an **already-instantiated live crew** (M3.5). `base_shape_id` must resolve to a proposal with `status="instantiated"` (i.e. a running crew). Reuses the M1.5 human gate: registers a proposal carrying the `AdaptationDiff`, blocks on `await_proposal`, and on approval applies the live mutation per verb — `set_gate` rewires `_edge_overrides` in place; `add_node`/`augment` spawn the new node and send a `neighbor_added` inform to the running source (no respawn); `drop` records the minus-topology, graceful-kills the dropped node, cleans stale `_edge_overrides`, and informs surviving neighbors; `swap` spawns the replacement and records the new topology **before** killing the old (no dead-slot window). On decline/timeout the crew is completely untouched. Returns `{ok:True, shape_id, verb, diff, status:"instantiated", actions, topology}` on success, or a staged `{ok:False, stage:...}` failure envelope. Tool count 17→18. |
 
 ### `claude_crew/shapes.py`
 
@@ -105,7 +106,7 @@ Production teammate backed by `claude-agent-sdk`. Per-turn loop: pull envelope �
 
 Also owns the **stderr ring buffer subsystem** and **death-site telemetry** — see below.
 
-Also owns the **scoped `send_to` in-process MCP server** (added in `m2-edge-routing` 2026-06-13): each spawned `SdkTeammate` runs a private FastMCP server (`_build_send_to_mcp_server()`) exposing a single `send_to(recipient, message)` tool whose handler calls `broker.send_scoped`. This is the sole channel by which a teammate can address the broker for non-lead sends — see [Edge Routing (M2)](#edge-routing-m2) below.
+Also owns the **scoped `send_to` in-process MCP server** (added in `m2-edge-routing` 2026-06-13; wired **unconditionally for every `SdkTeammate`** since D0, `m3-5-reshape-live-crew` 2026-06-30): every spawned `SdkTeammate` runs a private FastMCP server (`_build_send_to_mcp_server()`) exposing a single `send_to(recipient, message)` tool whose handler calls `broker.send_scoped`. The security boundary is `broker.authorize_send` at delivery time — **not** the tool's presence — so a teammate without current out-edges still holds the tool (enabling respawn-free live edge additions). This is the sole channel by which a teammate can address the broker for non-lead sends — see [Edge Routing (M2)](#edge-routing-m2) and [Reshape (M3.5)](#workflow-shape-composition-m0--m15--m2--m3--m35) below.
 
 Also owns the **plan-mode write gate** (added in `plan-gate-and-telemetry-hardening` 2026-06-17): `_PLAN_MODE_DENIED_TOOLS: frozenset = {"Write","Edit","NotebookEdit","MultiEdit"}` (module-level); `self._effective_permission_mode: str | None` (stashed at options-build time from spawn-arg-wins-then-role-pack resolution, before the SDK client context opens, so the hook always sees the same value the SDK received). In `_on_pre_tool_use`, AFTER the memory-write guard and BEFORE the subagent/main tracking branches: when `_effective_permission_mode == "plan"` and `tool_name in _PLAN_MODE_DENIED_TOOLS`, returns `permissionDecision: "deny"`. Read-only tools (`Read`, `Grep`, `Glob`, `Bash`, `WebFetch`, `Task`) are NOT denied — a plan-mode teammate is gated, not neutered. This is a claude-crew-side enforcement that does not depend on the SDK's plan gate (which as of claude-agent-sdk 0.1.68 / CLI 2.1.177 presents an approval UI instead of silently blocking in headless sessions — see Verified SDK Behavioral Invariants).
 
@@ -214,7 +215,7 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 
 ---
 
-## Workflow Shape Composition (M0 + M1.5 + M2 + M3)
+## Workflow Shape Composition (M0 + M1.5 + M2 + M3 + M3.5)
 
 **M0** added in `workflow-shape-composition-m0` (2026-06-11) — Makes a crew **shape** a first-class, declarative, legible data structure and gates teammate spawning on human approval. Purely additive — no control-flow change to the existing spawn, routing, or message paths.
 
@@ -222,7 +223,9 @@ Uses `%`-style lazy logging args (not f-strings) to match the module's existing 
 
 **M2** added in `m2-edge-routing` (2026-06-13) — Makes the approved graph **execute**: edge modes enforced, scoped `send_to` in-process MCP tool, neighbor injection, budget-only circuit breaker, and on-graph dashboard overlay. See [Edge Routing (M2)](#edge-routing-m2) below for full detail.
 
-**M3** added in `m3-adaptation-algebra` (2026-06-17) — Makes shape adaptation **computable**. Five typed verb commands in `shapes.py` (`AddNode`/`Swap`/`Augment`/`SetGate`/`Drop`), each pure: `apply(shape) -> tuple[Shape, AdaptationDiff]` — never mutates input, returns a new frozen `Shape` (satisfying all `parse_shape` invariants) or raises `ShapeValidationError`; no silent no-op, no partial shape. `AdaptationDiff.render()` produces the human-readable gate string that feeds the existing `adaptation_diff: str` broker channel — **no gate-signature change; `broker.py` is untouched** (`register_proposal` already carried the `adaptation_diff?` param). `AdaptationChain`/`AdaptationStep` carry in-process provenance (not persisted to broker). `adapt_shape` MCP tool in `server.py` resolves the base shape (pending/approved proposal or inline dict), resolves `swap`/`augment` roles via the same `factory.known_roles`/`resolve_role` seam as `instantiate_shape`, applies the verb command, and on success calls `broker.register_proposal(new_shape, adaptation_diff=diff.render())` — reusing the M1.5 gate verbatim. Every adapted shape re-satisfies `parse_shape`. Adaptation is **pre-instantiation only** — reshaping a running crew is the separately-milestoned M3.5.
+**M3** added in `m3-adaptation-algebra` (2026-06-17) — Makes shape adaptation **computable**. Five typed verb commands in `shapes.py` (`AddNode`/`Swap`/`Augment`/`SetGate`/`Drop`), each pure: `apply(shape) -> tuple[Shape, AdaptationDiff]` — never mutates input, returns a new frozen `Shape` (satisfying all `parse_shape` invariants) or raises `ShapeValidationError`; no silent no-op, no partial shape. `AdaptationDiff.render()` produces the human-readable gate string that feeds the existing `adaptation_diff: str` broker channel — **no gate-signature change; `broker.py` is untouched** (`register_proposal` already carried the `adaptation_diff?` param). `AdaptationChain`/`AdaptationStep` carry in-process provenance (not persisted to broker). `adapt_shape` MCP tool in `server.py` resolves the base shape (pending/approved proposal or inline dict), resolves `swap`/`augment` roles via the same `factory.known_roles`/`resolve_role` seam as `instantiate_shape`, applies the verb command, and on success calls `broker.register_proposal(new_shape, adaptation_diff=diff.render())` — reusing the M1.5 gate verbatim. Every adapted shape re-satisfies `parse_shape`. Adaptation via `adapt_shape` is **pre-instantiation only** (produces a new pending proposal; spawns a fresh crew on approval).
+
+**M3.5** added in `m3-5-reshape-live-crew` (2026-06-30) — Makes the same five verbs apply to an **already-running crew** via the new `reshape_crew` MCP tool (18th tool). Foundational design decision D0: the in-process `send_to` MCP server is now wired for **every** `SdkTeammate` unconditionally at spawn (previously gated on a non-empty `neighbors` list). Safety is unchanged — `broker.authorize_send` at delivery time is the security boundary, not tool presence. This pre-wiring is what enables respawn-free live edge additions: a running subprocess cannot have tools injected after launch (the SDK bakes `--allowedTools` at spawn), so every teammate must already hold `send_to` before a live edge can be added to it. Three additive broker helpers support the tool: `latest_topology()`, `set_edge_override(from, to, mode)` (generalizes `promote_edge` to any mode), and `remove_edge_overrides(pairs)` (idempotent stale-key cleanup). The M1.5 gate (`register_proposal`/`await_proposal`/`resolve_proposal`) is reused verbatim — no gate-signature change. On decline or timeout the live crew is completely untouched. Tool count 17→18.
 
 ### Data flow
 
@@ -331,7 +334,7 @@ AT#7 was amended to assert: reciprocal direct exchanges below budget do NOT trip
 
 ### Scoped `send_to` — sole teammate→broker entry
 
-Each `SdkTeammate` spawned with a non-empty `neighbors` list runs a private in-process FastMCP server exposing one tool:
+Every `SdkTeammate` runs a private in-process FastMCP server exposing one tool — **unconditionally since D0 (M3.5, 2026-06-30)**; previously wired only when a non-empty `neighbors` list was present at spawn time:
 
 ```
 send_to(recipient: str, message: str) → {ok, seq}
@@ -339,7 +342,7 @@ send_to(recipient: str, message: str) → {ok, seq}
 
 The handler calls `broker.send_scoped(sender_id, recipient, {"text": message})`. `send_scoped` resolves the recipient (slot name → teammate-id via active topology, or `LEAD_ID`), calls `authorize_send` (raises `UnauthorizedEdgeError` for non-neighbors), and routes via `send()`.
 
-**This is the moat choke-point**: the only way a teammate can address the broker for non-lead sends. There is no other API surface through which a running teammate can inject messages into the broker's routing engine. The `neighbors` parameter is injected into the teammate's system prompt by `teammate_prompt.build_teammate_prompt` so the model knows which recipients are valid.
+**This is the moat choke-point**: the only way a teammate can address the broker for non-lead sends. There is no other API surface through which a running teammate can inject messages into the broker's routing engine. The `neighbors` parameter is injected into the teammate's system prompt by `teammate_prompt.build_teammate_prompt` so the model knows which recipients are valid. **The security boundary is `authorize_send` at delivery time, not the tool's presence** — a teammate with no current out-edges holds the tool but cannot deliver until a topology edge is authorized.
 
 ### Neighbor injection and authorization coupling
 
@@ -483,10 +486,11 @@ The following were explicitly non-regressed by the shape-graphic-redesign:
 ## Test Conventions
 
 - `conftest.py` auto-sets `CLAUDE_CREW_TEAMMATE_MODE=stub` and `CLAUDE_CREW_TRANSCRIPT_DISABLED=1`.
-- Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_live_stderr.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
+- Live SDK tests (`test_live_sdk.py`, `test_live_subagents.py`, `test_live_stderr.py`, `test_live_reshape.py`, `test_user_loader_live.py`) are skipped unless `CLAUDE_CREW_LIVE_TESTS=1`.
 - `asyncio.get_running_loop()`, never `asyncio.get_event_loop()` inside coroutines.
 - Bound unbounded async-iterator drains with `asyncio.wait_for(..., timeout=T)`.
 - HOME-monkeypatch tests must copy `~/.claude/.credentials.json` and `~/.claude.json` into the tmp HOME.
 - LLM-relayed sentinels: ≤12 hex characters (preferred) to avoid truncation/paraphrasing across the LLM relay boundary.
 - Full `uv run pytest` (not `-k` subset) when changing widely-consumed behavior.
 - **Tests that spawn a `claude_crew.cli` subprocess must allocate a free TCP port** using the `_get_free_port()` pattern (bind socket to port 0, read assigned ephemeral port, close; pass result as `CLAUDE_CREW_UI_PORT=<port>` in the subprocess environment). Do NOT rely on the default port 7821 — a live claude-crew MCP session holds it, preventing the subprocess from binding `UIServer` and completing registration. Canonical helper: `_get_free_port()` in `tests/test_shutdown_signals.py`.
+- **Live tests asserting teammate→teammate peer delivery must use `direct` edges.** Gated edges (the `ShapeEdge` default) route messages to the coordinator's inbox via `broker._send_routed`, not the recipient's inbox — a peer-delivery assertion against a gated edge will time out rather than fail fast. Verified 2026-06-30 (`test_live_reshape.py` AT-17/18): initial runs timed out because the test fixture used the default gated mode; switching to `direct` edges resolved it. See also [`m3-5-reshape-live-crew` validation report](.rr/reports/m3-5-reshape-live-crew-validation.md).

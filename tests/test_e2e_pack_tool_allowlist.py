@@ -11,17 +11,19 @@ pass after the implementation lands.
 
 Contract under test:
   TOOLS
-    - pack `tools: [A, B]`                       → opts.allowed_tools == [A, B]
-    - pack `tools: [A, B]` + extra_tools=[C]     → opts.allowed_tools == [A, B, C] (union, dedup)
+    - pack `tools: [A, B]`                       → opts.allowed_tools == [A, B, mcp__crew-send__send_to]
+    - pack `tools: [A, B]` + extra_tools=[C]     → opts.allowed_tools == [A, B, C, mcp__crew-send__send_to]
     - pack omits `tools:`                        → opts has NO allowed_tools key (inherit-all)
-    - pack `tools: []` (explicit empty)          → opts.allowed_tools == []
+    - pack `tools: []` (explicit empty)          → opts.allowed_tools == [mcp__crew-send__send_to]
+                                                    (pack contributes nothing; send_to is always-wired
+                                                    framework infra, broker-gated — presence ≠ reach)
   MCP
-    - pack omits `mcpServers:` AND spawn omits   → opts.mcp_servers == {}  (explicit empty,
-                                                    NOT absent — denies CLI auto-inherit)
-    - pack `mcpServers: [name]`                  → opts.mcp_servers includes name's config
-    - spawn mcp_servers=[name]                   → opts.mcp_servers includes name's config
-    - pack [A] + spawn [B]                       → both present (union)
-    - spawn mcp_servers=[unknown]                → unknown skipped, WARN logged, spawn ok
+    - pack omits `mcpServers:` AND spawn omits   → opts.mcp_servers == {'crew-send': <sdk-cfg>}
+                                                    (crew-send always wired; no other servers)
+    - pack `mcpServers: [name]`                  → opts.mcp_servers includes name's config + crew-send
+    - spawn mcp_servers=[name]                   → opts.mcp_servers includes name's config + crew-send
+    - pack [A] + spawn [B]                       → both present (union) + crew-send
+    - spawn mcp_servers=[unknown]                → unknown skipped, WARN logged, spawn ok; crew-send present
 """
 
 from __future__ import annotations
@@ -194,12 +196,14 @@ class TestPackToolsAsAllowlist:
         opts = captured["options"]
         # `tools` is the wire-level catalog (what the model sees);
         # `allowed_tools` is pre-approval (no permission prompt). Both must
-        # reflect the pack list — see honor-pack-tools-allowlist.md.
-        assert list(opts.tools) == ["Read", "Grep", "Glob"], (
-            f"expected exact pack tools in catalog, got {opts.tools!r}"
+        # reflect the pack list followed by the always-wired framework send_to
+        # (D0/M3.5: broker-gated, presence ≠ reach).
+        # See honor-pack-tools-allowlist.md.
+        assert list(opts.tools) == ["Read", "Grep", "Glob", "mcp__crew-send__send_to"], (
+            f"expected pack tools + framework send_to in catalog, got {opts.tools!r}"
         )
-        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob"], (
-            f"expected exact pack tools in allowlist, got {opts.allowed_tools!r}"
+        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob", "mcp__crew-send__send_to"], (
+            f"expected pack tools + framework send_to in allowlist, got {opts.allowed_tools!r}"
         )
 
     async def test_pack_tools_unioned_with_extra_tools_dedup(
@@ -225,12 +229,13 @@ class TestPackToolsAsAllowlist:
         )
 
         opts = captured["options"]
-        # Catalog (--tools) and allowlist (--allowedTools) both carry the union.
-        assert list(opts.tools) == ["Read", "Grep", "Bash"], (
-            f"expected deduped union in catalog, got {opts.tools!r}"
+        # Catalog (--tools) and allowlist (--allowedTools) both carry the union,
+        # followed by the always-wired framework send_to (D0/M3.5).
+        assert list(opts.tools) == ["Read", "Grep", "Bash", "mcp__crew-send__send_to"], (
+            f"expected deduped union + framework send_to in catalog, got {opts.tools!r}"
         )
-        assert list(opts.allowed_tools) == ["Read", "Grep", "Bash"], (
-            f"expected deduped union in allowlist, got {opts.allowed_tools!r}"
+        assert list(opts.allowed_tools) == ["Read", "Grep", "Bash", "mcp__crew-send__send_to"], (
+            f"expected deduped union + framework send_to in allowlist, got {opts.allowed_tools!r}"
         )
 
     async def test_pack_without_tools_key_yields_inherit_all(
@@ -266,9 +271,12 @@ class TestPackToolsAsAllowlist:
     ) -> None:
         """Given a pack with `tools: []` (explicit empty),
         When the teammate is spawned,
-        Then opts.tools == [] → SDK passes `--tools ""` → CLI restricts the
-        catalog to empty → the model sees NO tools at all (true no-tools
-        surface, mirrors the subagent contract)."""
+        Then opts.tools == ['mcp__crew-send__send_to'] — the pack contributes
+        NO pack tools (the SDK still enforces tools=[] for pack-declared tools),
+        but claude-crew unconditionally wires the framework send_to as broker-
+        gated infrastructure (D0/M3.5). Presence does not grant reach: a teammate
+        with no topology out-edges gets UnauthorizedEdgeError from authorize_send.
+        The safe-by-default seal is preserved by authorization, not tool absence."""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
         _write_pack_file(
@@ -283,8 +291,10 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "no-tools")
 
         opts = captured["options"]
-        assert opts.tools == [], (
-            f"expected empty list (--tools '' → empty catalog), got {opts.tools!r}"
+        # Pack contributes nothing; framework send_to is always wired (broker-gated).
+        assert list(opts.tools) == ["mcp__crew-send__send_to"], (
+            f"expected only framework send_to (pack:[] + always-wired send_to), "
+            f"got {opts.tools!r}"
         )
 
     async def test_default_factory_extra_tools_no_double_grant(
@@ -352,13 +362,15 @@ class TestPackToolsAsAllowlist:
 
         opts = captured["options"]
         # Pack: [Read, Grep, Glob]. Extras: [Bash, Read]. Union, dedup, order
-        # preserved: pack-first then extras. Catalog AND allowlist both reflect
-        # the union (so wire prompt restricts AND tools are pre-approved).
-        assert list(opts.tools) == ["Read", "Grep", "Glob", "Bash"], (
-            f"expected deduped union catalog via production factory, "
+        # preserved: pack-first then extras, then framework send_to (D0/M3.5).
+        # Catalog AND allowlist both reflect the union (so wire prompt restricts
+        # AND tools are pre-approved). No double-grant from the production factory
+        # double-flow: dict.fromkeys dedup collapses any repetition.
+        assert list(opts.tools) == ["Read", "Grep", "Glob", "Bash", "mcp__crew-send__send_to"], (
+            f"expected deduped union + framework send_to via production factory, "
             f"got {opts.tools!r}"
         )
-        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob", "Bash"]
+        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob", "Bash", "mcp__crew-send__send_to"]
         assert len(opts.tools) == len(set(opts.tools))
 
     async def test_pack_tools_restrict_subprocess_cli_args(
@@ -418,8 +430,9 @@ class TestPackToolsAsAllowlist:
         await _spawn_and_drain_one_turn(Broker(), factory, "explorer")
 
         opts = captured["options"]
-        assert list(opts.tools) == ["Read", "Grep", "Glob"]
-        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob"]
+        # Pack declares [Read, Grep, Glob]; framework send_to appended (D0/M3.5).
+        assert list(opts.tools) == ["Read", "Grep", "Glob", "mcp__crew-send__send_to"]
+        assert list(opts.allowed_tools) == ["Read", "Grep", "Glob", "mcp__crew-send__send_to"]
 
 
 # --------------------------------------------------------------------------
@@ -428,9 +441,11 @@ class TestPackToolsAsAllowlist:
 
 
 class TestMcpDenyByDefault:
-    """No pack-declared and no spawn-granted MCP servers → no MCP at all.
-    Always sets `mcp_servers` on opts (even to `{}`) to deny the CLI's
-    `~/.claude.json` auto-inheritance."""
+    """No pack-declared and no spawn-granted MCP servers → only the always-wired
+    framework `crew-send` server (broker-gated; presence ≠ reach). User-registered
+    MCP servers from `~/.claude.json` are NOT inherited — explicit deny is still
+    enforced. D0 (M3.5): `crew-send` is the one always-present exception, secured
+    by `broker.authorize_send` at delivery time, not by tool absence."""
 
     async def test_no_pack_mcp_and_no_spawn_grant_yields_empty_dict(
         self, tmp_path: Path, monkeypatch
@@ -438,9 +453,9 @@ class TestMcpDenyByDefault:
         """Given a pack without `mcpServers:` AND a ~/.claude.json that
         registers several MCP servers (the operator has them configured),
         When a teammate is spawned without spawn-time `mcp_servers`,
-        Then opts.mcp_servers == {} (NOT absent / NOT inherited from
-        ~/.claude.json — explicit deny so the CLI doesn't fall back to its
-        own discovery)."""
+        Then opts.mcp_servers contains ONLY crew-send (the always-wired
+        framework server, broker-gated). User servers from ~/.claude.json
+        are NOT inherited — explicit deny is still enforced. (D0/M3.5)"""
         home = tmp_path / "home"
         proj = tmp_path / "proj"
         # Operator HAS MCP servers registered; pre-fix we'd silently inherit them.
@@ -471,8 +486,15 @@ class TestMcpDenyByDefault:
         await _spawn_and_drain_one_turn(Broker(), factory, "clean")
 
         opts = captured["options"]
-        assert opts.mcp_servers == {}, (
-            f"expected explicit empty dict (deny inheritance), got {opts.mcp_servers!r}"
+        # D0 (M3.5): crew-send is always wired; extract it, then assert no user
+        # MCP servers were inherited (pack-declared portion must be exactly empty).
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {}, (
+            f"expected no user MCP servers (deny inheritance), got {_mcp!r}"
+        )
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
         )
 
     async def test_pack_declared_mcp_resolves_to_opts(
@@ -507,9 +529,15 @@ class TestMcpDenyByDefault:
         await _spawn_and_drain_one_turn(Broker(), factory, "with-mcp")
 
         opts = captured["options"]
-        assert opts.mcp_servers == {
+        # Pack-declared atlassian must be present; crew-send always wired (D0/M3.5).
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {
             "atlassian": {"type": "http", "url": "https://example.com"},
         }
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
+        )
 
     async def test_spawn_grant_attaches_named_mcp_server(
         self, tmp_path: Path, monkeypatch
@@ -543,9 +571,15 @@ class TestMcpDenyByDefault:
         )
 
         opts = captured["options"]
-        assert opts.mcp_servers == {
+        # Spawn-granted notion must be present; crew-send always wired (D0/M3.5).
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {
             "notion": {"type": "http", "url": "https://notion.example.com"},
         }
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
+        )
 
     async def test_pack_mcp_unioned_with_spawn_grant(
         self, tmp_path: Path, monkeypatch
@@ -583,10 +617,17 @@ class TestMcpDenyByDefault:
         )
 
         opts = captured["options"]
-        assert opts.mcp_servers == {
+        # Both pack-declared (atlassian) and spawn-granted (notion) must be present;
+        # crew-send always wired as framework infra (D0/M3.5).
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {
             "atlassian": {"type": "http", "url": "https://example.com"},
             "notion": {"type": "http", "url": "https://notion.example.com"},
         }
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
+        )
 
     async def test_spawn_mcp_unknown_name_skipped_with_warn(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture,
@@ -620,8 +661,15 @@ class TestMcpDenyByDefault:
         assert "teammate_id" in spawn  # spawn succeeded
 
         opts = captured["options"]
-        assert opts.mcp_servers == {}, (
-            f"unknown name must not appear in opts, got {opts.mcp_servers!r}"
+        # Unknown name must not appear; crew-send always wired as framework infra (D0/M3.5).
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {}, (
+            f"unknown name must not appear in opts (crew-send is framework infra), "
+            f"got {_mcp!r}"
+        )
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
         )
         warn_msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("does-not-exist" in m for m in warn_msgs), (

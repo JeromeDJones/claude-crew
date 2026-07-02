@@ -1209,6 +1209,480 @@ def make_server(
             "shape": shape_to_dict(new_shape),
         }
 
+    @mcp.tool()
+    async def reshape_crew(
+        verb: str,
+        params: dict,
+        base_shape_id: str,
+        gate_timeout: float = 600.0,
+    ) -> dict[str, Any]:
+        """Apply one adaptation verb to an INSTANTIATED live crew, gated by the M1.5
+        human-approval gate. On approval, the new shape is marked instantiated for
+        lineage chaining and the live crew is mutated per the verb.
+
+        base_shape_id MUST resolve to a proposal with status 'instantiated' (a
+        running crew returned by instantiate_shape or a prior reshape_crew call).
+        Unlike adapt_shape (which works on pending/approved proposals),
+        reshape_crew requires a live crew — it applies side effects to running
+        teammates on approval.
+
+        Verb must be one of: add_node | swap | augment | set_gate | drop.
+
+        Returns on success:
+          {ok: True, shape_id, verb, diff, status: "instantiated", actions, topology}
+          - shape_id: new proposal id now in status "instantiated" (use as next base)
+          - diff: AdaptationDiff.render() string (surfaced in the gate / dashboard)
+          - actions: audit record {spawned, killed, informed, edge_overrides_set,
+                     edge_overrides_removed} — populated by reshape-crew-verbs
+          - topology: current topology snapshot after mutation
+
+        Failure envelopes (NO proposal registered / NO live mutation on any failure):
+          {ok: False, stage: "base",  error}
+              Unknown base_shape_id, OR proposal status != "instantiated".
+          {ok: False, stage: "verb",  error}
+              Verb not one of the five known verbs.
+          {ok: False, stage: "adapt", error, [unresolved_roles]}
+              Role unresolvable (swap/augment when factory.known_roles is set), OR
+              verb.apply raised ShapeValidationError / KeyError / TypeError.
+          {ok: False, stage: "gate",  status: "declined"|"timed_out", shape_id}
+              Human declined or gate timed out — crew is COMPLETELY UNTOUCHED.
+        """
+        # ── 1. Base resolution ────────────────────────────────────────────────
+        # reshape_crew requires an INSTANTIATED base (a live running crew).
+        # adapt_shape accepts pending/approved; this tool differs here by design
+        # (D1): live process side-effects need a live crew as the starting point.
+        _base_proposal = broker.get_proposal(base_shape_id)
+        if _base_proposal is None:
+            return {
+                "ok": False,
+                "stage": "base",
+                "error": f"unknown base_shape_id: {base_shape_id!r}",
+            }
+        if _base_proposal.status != "instantiated":
+            return {
+                "ok": False,
+                "stage": "base",
+                "error": (
+                    f"shape {base_shape_id!r} has status {_base_proposal.status!r}; "
+                    "reshape_crew requires a running crew (status='instantiated'). "
+                    "Call instantiate_shape first, or pass the shape_id returned by "
+                    "a prior reshape_crew call."
+                ),
+            }
+        _base_shape = _base_proposal.shape
+
+        # ── 2. Verb guard ─────────────────────────────────────────────────────
+        _KNOWN_VERBS: frozenset[str] = frozenset(
+            {"add_node", "swap", "augment", "set_gate", "drop"}
+        )
+        if verb not in _KNOWN_VERBS:
+            return {
+                "ok": False,
+                "stage": "verb",
+                "error": f"unknown verb {verb!r}; must be one of {sorted(_KNOWN_VERBS)}",
+            }
+
+        # ── 3. Role resolution (swap / augment only) ──────────────────────────
+        # Mirrors adapt_shape's seam exactly (single role, same promotion logic).
+        # Skip entirely when factory.known_roles is absent (stub / no pack).
+        if verb in ("swap", "augment"):
+            if verb == "swap":
+                _role_to_check: str | None = params.get("role")
+            else:  # augment
+                _node_params = params.get("node")
+                _role_to_check = (
+                    _node_params.get("role")
+                    if isinstance(_node_params, dict)
+                    else None
+                )
+
+            _known_roles_fn = getattr(factory, "known_roles", None)
+            if _known_roles_fn is not None and _role_to_check is not None:
+                _known_set: set[str] = set(_known_roles_fn())
+                _resolve_role_fn = getattr(factory, "resolve_role", None)
+                _unresolved_roles: list[str] = []
+                if _resolve_role_fn is not None:
+                    _resolved_key = _resolve_role_fn(_role_to_check)
+                    if _resolved_key not in _known_set:
+                        _unresolved_roles.append(_role_to_check)
+                else:
+                    if _role_to_check not in _known_set:
+                        _candidates = [
+                            k for k in _known_set
+                            if k.endswith(f":{_role_to_check}")
+                        ]
+                        if len(_candidates) != 1:
+                            _unresolved_roles.append(_role_to_check)
+                if _unresolved_roles:
+                    return {
+                        "ok": False,
+                        "stage": "adapt",
+                        "error": (
+                            f"unresolvable role(s) against factory.known_roles:"
+                            f" {_unresolved_roles}"
+                        ),
+                        "unresolved_roles": _unresolved_roles,
+                    }
+
+        # ── 4. Construct verb command and apply (pure) ────────────────────────
+        # Reuses adapt_shape's _node_from_dict and verb construction verbatim.
+        def _node_from_dict(d: dict) -> ShapeNode:
+            """Build a ShapeNode from a plain dict; coerce lists → tuples."""
+            d = dict(d)
+            if d.get("extra_tools") is not None:
+                d["extra_tools"] = tuple(d["extra_tools"])
+            if d.get("extra_skills") is not None:
+                d["extra_skills"] = tuple(d["extra_skills"])
+            return ShapeNode(**d)
+
+        try:
+            _command: ShapeAdaptation
+            if verb == "add_node":
+                _node = _node_from_dict(params["node"])
+                _raw_edges = params.get("edges", [])
+                _edges = tuple(ShapeEdge(**e) for e in _raw_edges)
+                _command = AddNode(node=_node, edges=_edges)
+            elif verb == "swap":
+                _swap_params = dict(params)
+                if _swap_params.get("extra_tools") is not None:
+                    _swap_params["extra_tools"] = tuple(_swap_params["extra_tools"])
+                if _swap_params.get("extra_skills") is not None:
+                    _swap_params["extra_skills"] = tuple(_swap_params["extra_skills"])
+                _command = Swap(**_swap_params)
+            elif verb == "augment":
+                _node = _node_from_dict(params["node"])
+                _raw_edges = params.get("edges", [])
+                _edges = tuple(ShapeEdge(**e) for e in _raw_edges)
+                _command = Augment(node=_node, edges=_edges)
+            elif verb == "set_gate":
+                _command = SetGate(**params)
+            else:  # drop
+                _command = Drop(**params)
+
+            _new_shape, _diff = _command.apply(_base_shape)
+        except ShapeValidationError as exc:
+            return {"ok": False, "stage": "adapt", "error": str(exc)}
+        except (KeyError, TypeError) as exc:
+            return {"ok": False, "stage": "adapt", "error": str(exc)}
+
+        # ── 5. Gate (M1.5 verbatim) ───────────────────────────────────────────
+        # register_proposal stores the diff so Mission Control displays it.
+        # await_proposal blocks until the human approves/declines, or times out.
+        _diff_str = _diff.render()
+        _sid = broker.register_proposal(_new_shape, adaptation_diff=_diff_str)
+        _resolved = await broker.await_proposal(_sid, gate_timeout)
+        if _resolved.status != "approved":
+            # Crew is COMPLETELY UNTOUCHED on decline or timeout.
+            return {
+                "ok": False,
+                "stage": "gate",
+                "status": _resolved.status,
+                "shape_id": _sid,
+            }
+
+        # ── 6. Apply live mutation ────────────────────────────────────────────
+        # ┌─────────────────────────────────────────────────────────────────────┐
+        # │ PER-VERB LIVE-EFFECT DISPATCH                                        │
+        # │ reshape-crew-verbs task fills in each branch body below.             │
+        # │ This is the SINGLE DISPATCH POINT — do not add a second elsewhere.  │
+        # │                                                                       │
+        # │ Per-verb contract (implement in reshape-crew-verbs):                 │
+        # │                                                                       │
+        # │ set_gate:                                                             │
+        # │   broker.set_edge_override(from_slot, to_slot, mode)                │
+        # │   NO topology append, no spawn, no inform.                           │
+        # │   actions["edge_overrides_set"].append([from_slot, to_slot, mode])  │
+        # │                                                                       │
+        # │ add_node / augment:                                                  │
+        # │   new_id = await broker.spawn_teammate(role, name=slot, ...)         │
+        # │   Build reshaped Topology:                                           │
+        # │     slot_to_teammate = {**base_topo.slot_to_teammate, new_slot: id} │
+        # │     edges = tuple((e.from_slot, e.to_slot, e.mode)                  │
+        # │                   for e in _new_shape.edges)                         │
+        # │   broker.record_topology(reshaped_topo)  ← scaffold owns position   │
+        # │   For each new edge whose source maps to an ALREADY-RUNNING teammate:│
+        # │     try: broker.send(neighbor_added inform)                          │
+        # │     except TeammateAlreadyDeadError: swallow (best-effort)           │
+        # │   actions["spawned"].append(...); actions["informed"].append(...)    │
+        # │                                                                       │
+        # │ drop:                                                                 │
+        # │   Build reshaped Topology (base map minus dropped slot, new edges)   │
+        # │   broker.record_topology(reshaped_topo)  ← scaffold owns position   │
+        # │   await broker.kill_teammate(dropped_id, graceful=True)             │
+        # │   broker.remove_edge_overrides([removed (from,to) pairs])           │
+        # │   For each surviving affected neighbor:                              │
+        # │     try: broker.send(neighbor_removed inform)                        │
+        # │     except TeammateAlreadyDeadError: swallow (best-effort)           │
+        # │   actions["killed"].append(...); actions["informed"].append(...)     │
+        # │   actions["edge_overrides_removed"].extend(...)                      │
+        # │                                                                       │
+        # │ swap (ordering is load-bearing — AT9):                               │
+        # │   new_id = await broker.spawn_teammate(role, name=slot, ...)         │
+        # │   Build reshaped Topology (slot→new_id, _new_shape.edges)            │
+        # │   broker.record_topology(reshaped_topo)  ← scaffold: BEFORE kill!   │
+        # │   await broker.kill_teammate(old_id, graceful=True) ← AFTER record  │
+        # │   actions["spawned"].append(...); actions["killed"].append(...)      │
+        # └─────────────────────────────────────────────────────────────────────┘
+        _actions: dict[str, Any] = {
+            "spawned": [],
+            "killed": [],
+            "informed": [],
+            "edge_overrides_set": [],
+            "edge_overrides_removed": [],
+        }
+
+        # ── _apply_live_reshape (inlined) ─────────────────────────────────────
+        # Per-verb dispatch. Every branch preserves the "routing reads live state"
+        # invariant: we never rebuild routing state, only append/write. Swap
+        # ordering is load-bearing (D5 / AT 9) — spawn+record BEFORE kill.
+        _base_topo = broker.latest_topology()
+        _base_slot_to_teammate: dict[str, str] = (
+            dict(_base_topo.slot_to_teammate) if _base_topo is not None else {}
+        )
+        _new_slot_to_role: dict[str, str] = {
+            _n.slot: _n.role for _n in _new_shape.nodes
+        }
+
+        def _neighbors_for(slot: str) -> "list[dict] | None":
+            """Compute neighbor list for a slot from _new_shape.edges.
+
+            Mirrors instantiate_shape's per-slot neighbor construction so a
+            newly-spawned node launches with correct in/out entries; its own
+            out-edges are baked into its allowed-tools/prompt at launch.
+            """
+            entries: list[dict] = []
+            for _e in _new_shape.edges:
+                if _e.from_slot == slot:
+                    entries.append({
+                        "direction": "out",
+                        "slot": _e.to_slot,
+                        "role": _new_slot_to_role.get(_e.to_slot, _e.to_slot),
+                        "mode": _e.mode,
+                    })
+                if _e.to_slot == slot:
+                    entries.append({
+                        "direction": "in",
+                        "slot": _e.from_slot,
+                        "role": _new_slot_to_role.get(_e.from_slot, _e.from_slot),
+                        "mode": _e.mode,
+                    })
+            return entries or None
+
+        def _build_topology(mapping: dict[str, str]) -> Topology:
+            return Topology(
+                shape_name=_new_shape.name,
+                edges=tuple(
+                    (_e.from_slot, _e.to_slot, _e.mode) for _e in _new_shape.edges
+                ),
+                slot_to_teammate=mapping,
+            )
+
+        async def _inform(recipient_id: str, payload: dict) -> bool:
+            """Best-effort inform-message send to a running teammate.
+
+            Swallows TeammateAlreadyDeadError so a mid-flush neighbour never
+            aborts the reshape; only successful sends land in actions.informed.
+            """
+            try:
+                await broker.send(Envelope(
+                    id=new_message_id(),
+                    seq=0,
+                    sender=LEAD_ID,
+                    recipient=recipient_id,
+                    timestamp=time.time(),
+                    payload=payload,
+                ))
+                return True
+            except TeammateAlreadyDeadError:
+                return False
+            except UnknownTeammateError:
+                return False
+
+        if verb == "set_gate":
+            # SetGate: write override; no topology append, no spawn, no message.
+            _sg_from = _command.from_slot  # type: ignore[union-attr]
+            _sg_to = _command.to_slot  # type: ignore[union-attr]
+            _sg_mode = _command.mode  # type: ignore[union-attr]
+            broker.set_edge_override(_sg_from, _sg_to, _sg_mode)
+            _actions["edge_overrides_set"].append([_sg_from, _sg_to, _sg_mode])
+
+        elif verb in ("add_node", "augment"):
+            # Add a NEW node + spawn it (respawn-free wiring for existing sources).
+            _new_node_slot = _command.node.slot  # type: ignore[union-attr]
+            _new_node = next(
+                _n for _n in _new_shape.nodes if _n.slot == _new_node_slot
+            )
+            _new_id = await broker.spawn_teammate(
+                role=_new_node.role,
+                name=_new_node.slot,
+                factory=factory,
+                model=_new_node.model,
+                extra_tools=list(_new_node.extra_tools or ()) or None,
+                extra_skills=list(_new_node.extra_skills or ()) or None,
+                cwd=_new_node.cwd,
+                neighbors=_neighbors_for(_new_node.slot),
+            )
+            _actions["spawned"].append({
+                "slot": _new_node.slot,
+                "teammate_id": _new_id,
+                "role": _new_node.role,
+            })
+            _reshaped_map = {
+                **_base_slot_to_teammate,
+                _new_node.slot: _new_id,
+            }
+            broker.record_topology(_build_topology(_reshaped_map))
+
+            # Inform each already-running source of a new out-edge to _new_node.
+            _informed_sources: set[str] = set()
+            for _new_edge in _command.edges:  # type: ignore[union-attr]
+                _source_slot = _new_edge.from_slot
+                if _source_slot == _new_node.slot:
+                    # Source is the freshly-spawned node — no inform needed
+                    # (its out-edges were baked in at launch).
+                    continue
+                _source_tid = _base_slot_to_teammate.get(_source_slot)
+                if _source_tid is None or _source_tid in _informed_sources:
+                    continue
+                _informed_sources.add(_source_tid)
+                _neighbor_slot = _new_edge.to_slot
+                _neighbor_role = _new_slot_to_role.get(_neighbor_slot, _neighbor_slot)
+                _ok = await _inform(
+                    _source_tid,
+                    {
+                        "type": "crew_reshape",
+                        "event": "neighbor_added",
+                        "neighbor_slot": _neighbor_slot,
+                        "neighbor_role": _neighbor_role,
+                        "reachable_via": "send_to",
+                    },
+                )
+                if _ok:
+                    _actions["informed"].append(_source_tid)
+
+        elif verb == "drop":
+            # Drop: append minus-topology BEFORE kill (mirrors swap's ordering
+            # invariant so a slot-name send during the graceful-flush window
+            # can never resolve to the dropped id via the latest topology).
+            _drop_slot: str = _command.slot  # type: ignore[union-attr]
+            _dropped_id = _base_slot_to_teammate.get(_drop_slot)
+            _reshaped_map = {
+                _slot: _tid
+                for _slot, _tid in _base_slot_to_teammate.items()
+                if _slot != _drop_slot
+            }
+            broker.record_topology(_build_topology(_reshaped_map))
+
+            # Sweep stale _edge_overrides keyed on the dropped slot (D6).
+            _overrides_snapshot: list[tuple[str, str]] = list(
+                broker._edge_overrides.keys()  # type: ignore[attr-defined]
+            )
+            _pairs_to_remove: list[tuple[str, str]] = [
+                _pair for _pair in _overrides_snapshot
+                if _pair[0] == _drop_slot or _pair[1] == _drop_slot
+            ]
+            if _pairs_to_remove:
+                broker.remove_edge_overrides(_pairs_to_remove)
+                for _pair in _pairs_to_remove:
+                    _actions["edge_overrides_removed"].append([_pair[0], _pair[1]])
+
+            # Inform each surviving neighbour previously linked to the dropped
+            # slot via a still-present override (removed-edges here is empty —
+            # Drop.apply rejected any node with live edges).
+            _informed_neighbors: set[str] = set()
+            for _pair in _pairs_to_remove:
+                _survivor_slot = _pair[1] if _pair[0] == _drop_slot else _pair[0]
+                _survivor_tid = _base_slot_to_teammate.get(_survivor_slot)
+                if _survivor_tid is None or _survivor_tid in _informed_neighbors:
+                    continue
+                _informed_neighbors.add(_survivor_tid)
+                _ok = await _inform(
+                    _survivor_tid,
+                    {
+                        "type": "crew_reshape",
+                        "event": "neighbor_removed",
+                        "neighbor_slot": _drop_slot,
+                        "neighbor_role": None,
+                    },
+                )
+                if _ok:
+                    _actions["informed"].append(_survivor_tid)
+
+            # Kill the dropped teammate (graceful).
+            if _dropped_id is not None:
+                try:
+                    await broker.kill_teammate(_dropped_id, graceful=True)
+                    _actions["killed"].append(_dropped_id)
+                except (UnknownTeammateError, TeammateAlreadyDeadError):
+                    pass  # already gone → best-effort
+
+        elif verb == "swap":
+            # Swap ORDERING (D5, AT 9): spawn replacement + record_topology
+            # BEFORE kill_teammate(old). The new topology wins in
+            # reversed(_topologies), so slot-name resolution points at the
+            # live replacement throughout the tombstone transition — no
+            # dead-slot window.
+            _swap_slot: str = _command.slot  # type: ignore[union-attr]
+            _old_id = _base_slot_to_teammate.get(_swap_slot)
+            _new_node = next(
+                _n for _n in _new_shape.nodes if _n.slot == _swap_slot
+            )
+            _new_id = await broker.spawn_teammate(
+                role=_new_node.role,
+                name=_new_node.slot,
+                factory=factory,
+                model=_new_node.model,
+                extra_tools=list(_new_node.extra_tools or ()) or None,
+                extra_skills=list(_new_node.extra_skills or ()) or None,
+                cwd=_new_node.cwd,
+                neighbors=_neighbors_for(_new_node.slot),
+            )
+            _actions["spawned"].append({
+                "slot": _new_node.slot,
+                "teammate_id": _new_id,
+                "role": _new_node.role,
+            })
+            _reshaped_map = {
+                **_base_slot_to_teammate,
+                _swap_slot: _new_id,
+            }
+            broker.record_topology(_build_topology(_reshaped_map))
+
+            # THEN kill the old (AFTER record_topology — ordering is asserted
+            # by AT 9 via call-order capture).
+            if _old_id is not None and _old_id != _new_id:
+                try:
+                    await broker.kill_teammate(_old_id, graceful=True)
+                    _actions["killed"].append(_old_id)
+                except (UnknownTeammateError, TeammateAlreadyDeadError):
+                    pass
+
+        # ── 7. Lineage + return ───────────────────────────────────────────────
+        # mark_instantiated transitions the new proposal to "instantiated" so it
+        # can serve as the base for the next reshape_crew call (lineage chain).
+        broker.mark_instantiated(_sid)
+
+        _topo = broker.latest_topology()
+        _topology_out: dict[str, Any] = (
+            {
+                "shape_name": _topo.shape_name,
+                "edges": [list(e) for e in _topo.edges],
+                "slot_to_teammate": dict(_topo.slot_to_teammate),
+            }
+            if _topo is not None
+            else {}
+        )
+
+        return {
+            "ok": True,
+            "shape_id": _sid,
+            "verb": verb,
+            "diff": _diff_str,
+            "status": "instantiated",
+            "actions": _actions,
+            "topology": _topology_out,
+        }
+
     # Stash the broker on the server for tests / introspection.
     mcp._broker = broker  # type: ignore[attr-defined]
 

@@ -648,8 +648,9 @@ class SdkTeammate(Teammate):
         self._task: asyncio.Task[None] | None = None
         self._broker: Broker | None = None
         self._inbox: asyncio.Queue | None = None
-        # M2: neighbors stored so _run() can conditionally inject send_to.
-        # None / empty → no out-edges declared → tool not injected.
+        # M2 → D0: neighbors stored for prompt injection and spawn-time context.
+        # send_to is now wired unconditionally in _run(); this field is only used
+        # for the system-prompt neighbors section (teammate adjacency display).
         self._neighbors: "list[dict] | None" = neighbors if neighbors else None
         # Set by _build_send_to_mcp_server(); exposed for test introspection.
         self._send_to_tool: Any = None
@@ -1539,25 +1540,22 @@ class SdkTeammate(Teammate):
             )
         opts_kwargs["mcp_servers"] = {**pack_mcp_resolved, **spawn_mcp_resolved}
 
-        # M2: inject in-process send_to tool when this teammate has declared out-edges.
-        # Gated on self._neighbors so teammates without topology do not acquire a
-        # crew-send MCP entry (preserves existing mcp_servers contract for plain
-        # SdkTeammate usage, keeps the tool surface minimal for non-topology spawns).
-        _has_out_edges = any(
-            n.get("direction") == "out"
-            for n in (self._neighbors or [])
+        # D0 (M3.5): inject in-process send_to tool for EVERY SdkTeammate unconditionally.
+        # The security boundary is broker.authorize_send (called inside send_scoped) —
+        # not the tool's presence. Wiring unconditionally is foundational for
+        # respawn-free edge addition: the SDK bakes --allowedTools at launch, so a
+        # running subprocess cannot receive tools post-spawn. Any teammate must already
+        # hold send_to before reshape_crew can add a live out-edge to it.
+        _send_to_cfg = self._build_send_to_mcp_server()
+        opts_kwargs["mcp_servers"][_SEND_TO_MCP_SERVER_NAME] = _send_to_cfg
+        _existing_allowed = list(opts_kwargs.get("allowed_tools") or [])
+        opts_kwargs["allowed_tools"] = list(
+            dict.fromkeys(_existing_allowed + [_SEND_TO_TOOL_ID])
         )
-        if _has_out_edges:
-            _send_to_cfg = self._build_send_to_mcp_server()
-            opts_kwargs["mcp_servers"][_SEND_TO_MCP_SERVER_NAME] = _send_to_cfg
-            _existing_allowed = list(opts_kwargs.get("allowed_tools") or [])
-            opts_kwargs["allowed_tools"] = list(
-                dict.fromkeys(_existing_allowed + [_SEND_TO_TOOL_ID])
+        if "tools" in opts_kwargs:
+            opts_kwargs["tools"] = list(
+                dict.fromkeys(opts_kwargs["tools"] + [_SEND_TO_TOOL_ID])
             )
-            if "tools" in opts_kwargs:
-                opts_kwargs["tools"] = list(
-                    dict.fromkeys(opts_kwargs["tools"] + [_SEND_TO_TOOL_ID])
-                )
 
         # Add unconditional --strict-mcp-config via extra_args pass-through.
         # Merge semantics: setdefault preserves any pre-existing extra_args; the

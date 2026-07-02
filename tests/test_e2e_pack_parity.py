@@ -189,10 +189,18 @@ class TestPackParityHappyPath:
 
         opts = captured["options"]
         # Both forms reach mcp_servers, name stripped from inline dict.
-        assert opts.mcp_servers == {
+        # D0 (M3.5): crew-send is always wired as framework infrastructure
+        # (broker-gated; presence ≠ reach). Extract it separately before
+        # exact-matching the pack-declared servers.
+        _mcp = dict(opts.mcp_servers)
+        _crew_send = _mcp.pop("crew-send")
+        assert _mcp == {
             "atlassian": {"type": "http", "url": "https://example.com"},
             "local-x": {"type": "stdio", "command": "uv"},
         }
+        assert _crew_send["type"] == "sdk" and _crew_send["name"] == "crew-send", (
+            f"expected crew-send framework SDK server; got {_crew_send!r}"
+        )
         # Memory scope `project` is now honored (multi-scope-agent-memory feature).
         # The old D-8 "only 'user' is supported in v1" WARN was removed — assert it
         # no longer fires. (System-prompt memory injection requires a pack body,
