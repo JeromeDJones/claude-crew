@@ -440,6 +440,8 @@ class TestDropLive:
         # D6 scenario: an override left over from a prior edge that has since
         # been removed. Drop must sweep it.
         broker._edge_overrides[("a", "b")] = "gated"
+        # Also plant b→c (b as FROM-endpoint) to cover the _pair[0] == drop_slot branch.
+        broker._edge_overrides[("b", "c")] = "gated"
 
         pre_topologies = len(broker.get_topologies())
 
@@ -478,9 +480,12 @@ class TestDropLive:
         info = broker._info.get(b_id)
         assert info is not None and info.alive is False
 
-        # (c) the stale _edge_overrides[("a","b")] entry is removed.
+        # (c) the stale _edge_overrides[("a","b")] entry is removed (TO-endpoint branch).
         assert ("a", "b") not in broker._edge_overrides
         assert ["a", "b"] in acts["edge_overrides_removed"]
+        # (c2) the stale _edge_overrides[("b","c")] entry is removed (FROM-endpoint branch).
+        assert ("b", "c") not in broker._edge_overrides
+        assert ["b", "c"] in acts["edge_overrides_removed"]
 
         # (d) surviving affected neighbour `a` received a neighbor_removed msg.
         a_msgs = _teammate_inbox_payloads(broker, a_id)

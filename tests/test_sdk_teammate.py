@@ -41,6 +41,7 @@ from claude_crew.sdk_teammate import (
     _STDERR_RING_MAXLEN,
     _STDERR_RING_BYTE_CAP,
     _PLAN_MODE_DENIED_TOOLS,
+    _SEND_TO_MCP_SERVER_NAME,
 )
 from tests.fakes.sdk import FakeSDKClient, text_response, text_response_with_usage
 from tests.fakes.programmable_sdk_client import ProgrammableSDKClient
@@ -3100,7 +3101,6 @@ class TestSdkTeammateMcpServersWiring:
         opts = captured["options"]
         # D0 (M3.5): send_to is now wired unconditionally, so mcp_servers always
         # contains _SEND_TO_MCP_SERVER_NAME in addition to pack-declared servers.
-        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
         assert _SEND_TO_MCP_SERVER_NAME in (opts.mcp_servers or {}), (
             f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
             f"got keys: {sorted(opts.mcp_servers or {})}"
@@ -3147,7 +3147,6 @@ class TestSdkTeammateMcpServersWiring:
         await _wait_for_lead_messages(broker, 1)
         opts = captured["options"]
         # D0 (M3.5): send_to always wired; pack-declared string-name entry also present.
-        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
         assert _SEND_TO_MCP_SERVER_NAME in (opts.mcp_servers or {}), (
             f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
             f"got keys: {sorted(opts.mcp_servers or {})}"
@@ -3186,7 +3185,6 @@ class TestSdkTeammateMcpServersWiring:
         opts = captured["options"]
         # D0 (M3.5): send_to is wired unconditionally — mcp_servers now always
         # contains _SEND_TO_MCP_SERVER_NAME even when the pack declares no mcpServers.
-        from claude_crew.sdk_teammate import _SEND_TO_MCP_SERVER_NAME
         mcp = opts.mcp_servers or {}
         assert _SEND_TO_MCP_SERVER_NAME in mcp, (
             f"Expected {_SEND_TO_MCP_SERVER_NAME!r} always wired; "
